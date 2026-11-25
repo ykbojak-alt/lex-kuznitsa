@@ -161,7 +161,7 @@ fi
 step "Шаг 4/4: демо поиска (без инференса модели)"
 mkdir -p "$RUN_OUT"
 
-"$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$ACTIVE_PATH" <<'PYEOF'
+if ! "$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$ACTIVE_PATH" <<'PYEOF'
 import json
 import math
 import re
@@ -279,6 +279,10 @@ print("Итог лексического поиска:", json.dumps(summary, ens
 print(f"Артефакты прогона: {run_out}")
 print("Полная методика оценки (recall, faithfulness, refusal accuracy): docs/EVAL-HARNESS.md")
 PYEOF
+then
+  echo "run-local: демо поиска не выполнено — ошибка выше" >&2
+  exit 1
+fi
 
 step "Готово"
 echo "Корпус: $CORPUS_DIR"
