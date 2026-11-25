@@ -44,3 +44,6 @@ venv.bak/
 # Data
 sample-corpus/*.jsonl
 demo/*.mp4
+
+# Internal farm documents — never published
+docs/legacy/

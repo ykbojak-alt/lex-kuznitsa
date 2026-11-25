@@ -72,7 +72,7 @@ Qwen3-8B — fallback. См. `docs/MODEL.md`.
 **Mitigation:**
 - Репозиторий создан заранее: `github.com/ykbojak-alt/iikuznitsa-sprint`.
 - **Проверка перед сдачей:** открыть в инкогнито, README читается.
-- **Данные:** только синтетический корпус (вариант B из `IIKUZNITSA-REPO-AND-DESCRIPTION.md` §2).
+- **Данные:** только синтетический корпус (вариант B: синтетика в нашей структуре + генератор).
 - **Секреты:** `.env` в `.gitignore`; ключи NexusLink — только env, никогда в git.
 - **Лицензии:** наш код — MIT (`LICENSE`); внешние компоненты (Qwen3-8B, bge-m3,
   bge-reranker-base — Apache-2.0) перечислены отдельно в `docs/COMPONENTS.md`.
