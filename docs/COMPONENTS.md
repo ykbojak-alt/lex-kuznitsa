@@ -29,7 +29,7 @@ analytics, UI) распространяется под MIT.
 |---|---|---|---|
 | **Tool execution loop** | `roles.py` — D1–D4, Mercury падение на 401. | Каркас управления вызовами инструментов (§5). | MIT (`tool-execution-loop-spec-v1-1.md`) |
 | **Журнал событий + analytics** | `reports/QODER-orchestration-ledger.md` — форматы, агрегация. | Основа §7 (analytics) — журнал → аналитика. | CC-BY-4.0 (наши отчёты) |
-| **NexusLink — маршрутизация моделей** | `docs/farm/NEXUSLINK_SURFACES.md`, `NEXUSLINK_KEYS.md`. | **Основной модельный путь проекта** (`:5679` локально, `:4435` публично). | Apache-2.0 (`D:\openbridge`) |
+| **NexusLink — маршрутизация моделей** | `D:\openbridge` (Rust/axum); описание поверхностей — внутренняя документация фермы (в этот репозиторий не входит). | **Основной модельный путь проекта** (`127.0.0.1:5679` локально, `:4435` публично за Caddy). | Apache-2.0 |
 | **ai2-contract logic** | `apps/nexus/src/integrations/ai2/` — RAG-паттерны, retrieval. | Базовая идея §3 (retrieve) — BM25 + vector. | Apache-2.0 (NEXUS код) |
 | **MaYa-бот** | Диалоговый бот на sage-pl — структура диалога, вопросы. | Вдохновение для UI-сценариев. | Apache-2.0 |
 
