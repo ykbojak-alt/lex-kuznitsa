@@ -4,9 +4,18 @@
 
 Зачем: RAG-контур должен провереняться на данных, похожих на заказчика, но
 **без единого реального документа заказчика**. Этот генератор собирает
-синтетические регламенты и инструкции в формате технического задания (ТЗ),
+синтетические регламенты и инструкции в формате технического задания,
 которые можно положить в RAG-индекс, задать к ним вопросы и проверить
 качество поиска.
+
+Корпус состоит из двух частей:
+  * обычные документы (регламенты, инструкции, стандарты) — по умолчанию 20;
+  * **редакции конфликтующих правил** — 3 правила × 2–3 редакции (7 документов).
+    Один и тот же вопрос («какой срок действует?») имеет разные ответы в
+    зависимости от даты: действует редакция, чья дата вступления наступила, но
+    не позже заданной даты; правило, ещё не вступившее в силу, не применяется;
+    на дату раньше первой редакции правильный ответ — обоснованный отказ.
+    Это проверяет логику действующего документа и отказ вместо выдумывания.
 
 Безопасность данных:
   * все данные вымышлены — генератор не читает и не копирует никакие
@@ -241,6 +250,7 @@ class Doc:
     sha256: str = ""
     words: int = 0
     sections: list[str] = field(default_factory=list)
+    rule_key: str = ""
 
 
 def _slug(text: str) -> str:
@@ -473,6 +483,7 @@ def make_conflict_doc(
             "Приёмочные критерии",
             "Порядок хранения и аудита",
         ],
+        rule_key=rule["key"],
     )
 
     lines: list[str] = []
@@ -590,11 +601,54 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
         doc.sha256 = _sha256(doc.body)
         docs.append(doc)
 
+    # --- Конфликтующие редакции одного правила --------------------------------
+    conflict_meta: list[dict] = []
+    conflict_docs: list[Doc] = []
+    for ri, rule in enumerate(CONFLICT_RULES, start=1):
+        revisions: list[dict] = []
+        prev: date | None = None
+        for rev_no, (eff_str, value) in enumerate(rule["revisions"], start=1):
+            eff = date.fromisoformat(eff_str)
+            doc = make_conflict_doc(rng, rule, ri, rev_no, eff, value, prev)
+            fname = f"{doc.doc_id}-{_slug(doc.title)}.md"
+            path = out_dir / fname
+            path.write_text(doc.body, encoding="utf-8")
+            doc.path = path
+            doc.sha256 = _sha256(doc.body)
+            conflict_docs.append(doc)
+            revisions.append(
+                {
+                    "revision": rev_no,
+                    "doc_id": doc.doc_id,
+                    "effective": eff_str,
+                    "value": value,
+                    "file": fname,
+                    "sha256": doc.sha256,
+                }
+            )
+            prev = eff
+        conflict_meta.append(
+            {
+                "key": rule["key"],
+                "field": rule["field"],
+                "short": rule["short"],
+                "topic": rule["topic"],
+                "revisions": revisions,
+                "first_effective": rule["revisions"][0][0],
+                "in_force_at_as_of": _rule_answer(rule, AS_OF),
+            }
+        )
+    docs.extend(conflict_docs)
+
     manifest = {
         "generator": "demo/gen-sample-corpus.py",
         "seed": seed,
         "count": len(docs),
+        "base_documents": count,
+        "conflict_documents": len(conflict_docs),
+        "as_of": AS_OF.isoformat(),
         "watermark": WATERMARK,
+        "conflict_rules": conflict_meta,
         "documents": [
             {
                 "doc_id": d.doc_id,
@@ -606,6 +660,7 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
                 "owner": d.owner,
                 "version": d.version,
                 "issued": d.issued.isoformat(),
+                "rule_key": d.rule_key,
                 "file": d.path.name if d.path else None,
                 "sha256": d.sha256,
                 "words": d.words,
@@ -623,7 +678,26 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
         "",
         f"> {WATERMARK}",
         "",
-        f"Документов: **{len(docs)}**. Seed: `{seed}`. Генератор: `demo/gen-sample-corpus.py`.",
+        f"Документов: **{len(docs)}** (обычных {count} + редакций правил {len(conflict_docs)}). "
+        f"Seed: `{seed}`. Опорная дата: `{AS_OF.isoformat()}`. Генератор: `demo/gen-sample-corpus.py`.",
+        "",
+        "## Конфликтующие редакции правил",
+        "",
+        "Один и тот же вопрос имеет разные ответы в зависимости от даты: действует та "
+        "редакция, чья дата вступления наступила, но не позже заданной даты. Правило, "
+        "ещё не вступившее в силу, не применяется.",
+        "",
+        "| Ключ | Правило | Редакции (дата → значение) | Действует на "
+        f"{AS_OF.isoformat()} |",
+        "| --- | --- | --- | --- |",
+    ]
+    for meta in conflict_meta:
+        revs = "; ".join(f"{r['effective']} → {r['value']}" for r in meta["revisions"])
+        in_force = meta["in_force_at_as_of"] or "ничего (правило не введено)"
+        index_lines.append(f"| {meta['key']} | {meta['field']} | {revs} | {in_force} |")
+    index_lines += [
+        "",
+        "## Все документы",
         "",
         "| ID | Вид | Документ | Раздел | Файл | SHA-256 |",
         "| --- | --- | --- | --- | --- | --- |",
@@ -637,7 +711,7 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
         "## Как перегенерировать",
         "",
         "```bash",
-        "python demo/gen-sample-corpus.py --count 24 --seed 20261126 --clean",
+        "python demo/gen-sample-corpus.py --count 20 --seed 20261126 --clean",
         "```",
         "",
         "## Как использовать в RAG",
@@ -645,6 +719,7 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
         "1. Индексировать `sample-corpus/*.md` (кроме `INDEX.md`) в тестовый индекс.",
         "2. Взять вопросы из `sample-corpus/questions.jsonl` и сверить ответы.",
         "3. Проверить, что в ответе нет вымышленных фактов и что указан `doc_id`.",
+        "4. Для вопросов с `refusal_expected: true` правильный ответ — обоснованный отказ.",
         "",
         "> Все содержимое синтетическое. Файлы не содержат данных реального заказчика.",
     ]
@@ -652,6 +727,8 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
 
     q_lines = []
     for d in docs:
+        if d.rule_key:
+            continue  # по редакциям правил вопросы строятся отдельно
         for q_tpl, field_name, value_tpl in QUESTION_TEMPLATES:
             q = q_tpl.format(doc_title=d.title)
             answer = value_tpl.format(
@@ -667,6 +744,52 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
                         "expected_doc_id": d.doc_id,
                         "expected_answer": answer,
                         "field": field_name,
+                        "kind": "generic",
+                        "rule_key": "",
+                        "as_of": "",
+                        "refusal_expected": False,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    # Вопросы по правилам: действующая редакция, прошлая редакция, будущая
+    # редакция и обоснованный отказ (дата раньше самой первой редакции).
+    for meta in conflict_meta:
+        rule = next(r for r in CONFLICT_RULES if r["key"] == meta["key"])
+        revs = [(date.fromisoformat(r["effective"]), r) for r in meta["revisions"]]
+        first_eff = revs[0][0]
+        second_eff = revs[1][0] if len(revs) > 1 else first_eff
+        last_eff = revs[-1][0]
+        cases = [
+            ("до первой редакции (ожидается отказ)", first_eff - timedelta(days=45), True),
+            ("между редакциями", second_eff - timedelta(days=20), False),
+            ("на опорную дату", AS_OF, False),
+            ("после последней редакции", last_eff + timedelta(days=60), False),
+        ]
+        for label, as_of, is_refusal in cases:
+            answer = _rule_answer(rule, as_of)
+            expected_doc = None
+            for eff, rev in revs:
+                if eff <= as_of:
+                    expected_doc = rev["doc_id"]
+            q_lines.append(
+                json.dumps(
+                    {
+                        "question": (
+                            f"Какое значение действует для правила {rule['key']} "
+                            f"({rule['short']}) на {as_of.isoformat()}?"
+                        ),
+                        "expected_doc_id": expected_doc,
+                        "expected_answer": (
+                            answer if answer else "правило на эту дату не введено — обоснованный отказ"
+                        ),
+                        "field": rule["field"],
+                        "kind": "rule_asof",
+                        "rule_key": rule["key"],
+                        "as_of": as_of.isoformat(),
+                        "refusal_expected": is_refusal or answer is None,
+                        "case": label,
                     },
                     ensure_ascii=False,
                 )
@@ -692,12 +815,22 @@ def _first_action(doc: Doc) -> str:
     return ACTIONS[0]
 
 
+def _rule_answer(rule: dict, as_of: date) -> str | None:
+    """Значение правила, действующее на дату `as_of`; None — ни одна редакция не действует."""
+    value = None
+    for eff_str, rev_value in rule["revisions"]:
+        if date.fromisoformat(eff_str) <= as_of:
+            value = rev_value
+    return value
+
+
 def validate(out_dir: Path, manifest: dict, count: int) -> list[str]:
     """Самопроверка: количество, уникальность, непустота, отсутствие чужих доменов."""
     problems: list[str] = []
     docs = manifest["documents"]
-    if len(docs) != count:
-        problems.append(f"ожидалось {count} документов, получено {len(docs)}")
+    expected_total = count + sum(len(r["revisions"]) for r in manifest.get("conflict_rules", []))
+    if len(docs) != expected_total:
+        problems.append(f"ожидалось {expected_total} документов, получено {len(docs)}")
     ids = [d["doc_id"] for d in docs]
     if len(set(ids)) != len(ids):
         problems.append("идентификаторы документов не уникальны")
@@ -716,17 +849,49 @@ def validate(out_dir: Path, manifest: dict, count: int) -> list[str]:
         for bad in ("@example.com", "@mail.ru", "@yandex.ru", "@gmail.com"):
             if bad in text:
                 problems.append(f"похожий на реальный домен {bad} в {d['file']}")
+
+    # Конфликтующие редакции: даты строго возрастают, на опорную дату действует
+    # ровно одна редакция, каждая редакция присутствует в корпусе.
+    for meta in manifest.get("conflict_rules", []):
+        revs = meta["revisions"]
+        if len(revs) < 2:
+            problems.append(f"у правила {meta['key']} меньше двух редакций — конфликта нет")
+        effs = [r["effective"] for r in revs]
+        if effs != sorted(effs) or len(set(effs)) != len(effs):
+            problems.append(f"даты редакций правила {meta['key']} не строго возрастают: {effs}")
+        if len(set(r["value"] for r in revs)) != len(revs):
+            problems.append(f"редакции правила {meta['key']} не различаются по значению")
+        in_force = [r for r in revs if r["effective"] <= manifest["as_of"]]
+        if len(in_force) != 1:
+            problems.append(
+                f"на {manifest['as_of']} правило {meta['key']} имеет {len(in_force)} действующих редакций, ожидалась одна"
+            )
+        for r in revs:
+            if not (out_dir / r["file"]).exists():
+                problems.append(f"нет файла редакции {r['file']}")
+
     q_path = out_dir / "questions.jsonl"
     if not q_path.exists():
         problems.append("нет questions.jsonl")
     else:
+        refusals = 0
+        rule_qs = 0
         for line in q_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                try:
-                    json.loads(line)
-                except json.JSONDecodeError:
-                    problems.append("questions.jsonl содержит невалидный JSON")
-                    break
+            if not line.strip():
+                continue
+            try:
+                q = json.loads(line)
+            except json.JSONDecodeError:
+                problems.append("questions.jsonl содержит невалидный JSON")
+                break
+            if q.get("kind") == "rule_asof":
+                rule_qs += 1
+            if q.get("refusal_expected"):
+                refusals += 1
+        if rule_qs == 0:
+            problems.append("нет вопросов по редакциям правил")
+        if refusals == 0:
+            problems.append("нет вопросов, требующих обоснованного отказа")
     return problems
 
 
@@ -734,7 +899,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     here = Path(__file__).resolve().parent.parent
     ap.add_argument("--out", default=str(here / "sample-corpus"), help="каталог корпуса (по умолчанию sample-corpus/)")
-    ap.add_argument("--count", type=int, default=24, help="сколько документов (20-30 для спринта)")
+    ap.add_argument("--count", type=int, default=20, help="сколько обычных документов (сверху добавляются 7 редакций правил)")
     ap.add_argument("--seed", type=int, default=20261126, help="seed генератора")
     ap.add_argument("--clean", action="store_true", help="удалить прежние документы перед генерацией")
     ap.add_argument("--json", action="store_true", help="печатать сводку в JSON")
@@ -757,7 +922,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             for p in problems:
                 print(f"  - {p}")
             return 1
-        print(f"SELF-TEST OK: сгенерировано и проверено {min(args.count, 5)} документов")
+        print(
+            f"SELF-TEST OK: сгенерировано и проверено "
+            f"{res['manifest']['base_documents']} обычных + "
+            f"{res['manifest']['conflict_documents']} редакций правил"
+        )
         return 0
 
     out_dir = Path(args.out).resolve()
@@ -772,7 +941,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     summary = {
         "out": str(out_dir),
         "documents": len(res["manifest"]["documents"]),
+        "base_documents": res["manifest"]["base_documents"],
+        "conflict_documents": res["manifest"]["conflict_documents"],
+        "conflict_rules": len(res["manifest"]["conflict_rules"]),
         "questions": res["questions"],
+        "as_of": res["manifest"]["as_of"],
         "seed": args.seed,
         "index": str(out_dir / "INDEX.md"),
         "manifest": str(out_dir / "manifest.json"),
@@ -780,7 +953,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
-        print(f"Сгенерировано {summary['documents']} синтетических документов в {summary['out']}")
+        print(
+            f"Сгенерировано {summary['documents']} синтетических документов в {summary['out']} "
+            f"(обычных {summary['base_documents']} + редакций правил {summary['conflict_documents']})"
+        )
+        print(f"Конфликтующих правил: {summary['conflict_rules']} (опорная дата {summary['as_of']})")
         print(f"Индекс: {summary['index']}")
         print(f"Манифест: {summary['manifest']}")
         print(f"Вопросов для проверки RAG: {summary['questions']} (sample-corpus/questions.jsonl)")
