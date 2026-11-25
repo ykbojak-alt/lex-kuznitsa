@@ -1,0 +1,127 @@
+name: CI
+
+# Каркас конвейера для спринта ИИкузницы.
+# До старта спринта реальных тестов нет: шаги юнит-тестов корректно
+# сообщают «тестов пока нет» и не роняют сборку. Как только появится
+# product-код, шаги начинают проверять его без правок этого файла.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+      - name: Ruff check
+        run: ruff check . --output-format=github
+      - name: Ruff format (informational)
+        # Не блокирует: форматирование фиксируется вместе с первым product-кодом.
+        continue-on-error: true
+        run: ruff format --check . || echo "формат пока не выровнен — это не блокер"
+
+  test:
+    name: Unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+      - name: Pytest
+        run: |
+          set -e
+          if [ -d tests ] && [ -n "$(ls -A tests 2>/dev/null)" ]; then
+            python -m pytest -q
+          else
+            echo "каталог tests/ пуст — юнит-тестов пока нет (спринт ещё не начался)"
+          fi
+
+  build:
+    name: Build / import check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+      - name: Byte-compile sources
+        run: python -m compileall -q src demo
+      - name: Import check
+        run: |
+          if [ -f src/__init__.py ]; then
+            python -c "import src; print('src импортируется')"
+          else
+            echo "src/__init__.py ещё нет — проверка импорта отложена"
+          fi
+
+  corpus:
+    name: Sample corpus self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Generator self-test
+        run: python demo/gen-sample-corpus.py --self-test
+      - name: Generate corpus
+        run: |
+          set -e
+          python demo/gen-sample-corpus.py --count 24 --seed 20261126 --out "$RUNNER_TEMP/corpus"
+          count=$(find "$RUNNER_TEMP/corpus" -maxdepth 1 -name '*.md' ! -name 'INDEX.md' | wc -l)
+          echo "сгенерировано документов: $count"
+          if [ "$count" -ne 24 ]; then
+            echo "ожидалось 24 документа, получено $count" >&2
+            exit 1
+          fi
+          test -f "$RUNNER_TEMP/corpus/INDEX.md"
+          test -f "$RUNNER_TEMP/corpus/manifest.json"
+          test -f "$RUNNER_TEMP/corpus/questions.jsonl"
+
+  preflight:
+    name: Preflight (окружение)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Environment check
+        run: sh scripts/preflight.sh
