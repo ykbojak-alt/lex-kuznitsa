@@ -1,6 +1,7 @@
 # ИИкузница — чек-лист открытия спринта (26.11 10:00 МСК)
 
 **Статус:** PREP phase — выполнение ровно в 10:00 при открытии спринта.
+**План по часам:** `docs/PLAN-48H.md` (48 часов, гейты 4/12/24/40/48).
 
 ---
 
@@ -8,72 +9,81 @@
 
 | # | Проверка | GO критерий | Как проверить | Ответственный |
 |---|---|---|---|---|
-| 1 | **Локальная модель загружена** | `curl http://127.0.0.1:8080/v1/models` → `{"data":[{"id":"Qwen3-8B-Instruct-Q4_K_M",...}]}` | FORGE запускает llama.cpp server заранее (26.11 09:00) | FORGE |
-| 2 | **VRAM ≤ 7.5 GB** | `nvidia-smi` показывает занято ≤ 7.5 GB из 8 GB (GPU 0) | `nvidia-smi --query-gpu=memory.used,memory.total --format=csv` | FORGE |
-| 3 | **Dev-датасет не пустой** | `sample-corpus/` содержит ≥ 20 синтетических документов с полями: `doc_id`, `title`, `level`, `effective_date`, `revision`, `content`, `cancels[]`, `priority_over[]` | `python -c "import json; print(len(json.load(open('sample-corpus/corpus.json'))))"` | CODEX |
-| 4 | **Git remote настроен** | `git remote -v` → `origin` указывает на публичный GitHub репо (org/репо) | `git remote -v` | FORGE |
-| 5 | **Репо публично** | GitHub Settings → Pages/Visibility → Public | Открыть URL репо в инкогнито — читается README | FORGE |
-| 6 | **LLM-эндпоинты подняты** | embedding (8081) + reranker (8082) отвечают 200 | `curl -s http://127.0.0.1:8081/health` и `curl -s http://127.0.0.1:8082/health` | SPARK |
+| 1 | **NexusLink (sage-pl) доступен** — основной путь | `POST $NEXUSLINK_BASE_URL/v1/messages` возвращает 200 и непустой ответ модели | `curl -s -o /dev/null -w '%{http_code}' -X POST "$NEXUSLINK_BASE_URL/v1/messages" -H "x-api-key: $NEXUSLINK_API_KEY" -H 'content-type: application/json' -d '{"model":"<слот>","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'` | FORGE |
+| 2 | **Ключ шлюза в env** | `$NEXUSLINK_API_KEY` непустой, файла `.env` нет в git | `test -n "$NEXUSLINK_API_KEY" && echo ok`; `git check-ignore -v .env` | FORGE |
+| 3 | **Fallback: локальная Qwen3-8B** | `curl http://127.0.0.1:8080/v1/models` → `Qwen3-8B-Instruct-Q4_K_M` | `curl -s http://127.0.0.1:8080/v1/models` | FORGE |
+| 4 | **VRAM ≤ 7.5 GB** (только для fallback) | `nvidia-smi` занято ≤ 7.5 из 8 GB | `nvidia-smi --query-gpu=memory.used,memory.total --format=csv` | FORGE |
+| 5 | **Dev-датасет не пустой** | `sample-corpus/` — корпус собран, вопросов ≥ 20 | `sh demo/run-local.sh` проходит preflight | CODEX |
+| 6 | **Git remote настроен** | `origin` → `github.com/ykbojak-alt/iikuznitsa-sprint` | `git remote -v` | FORGE |
+| 7 | **Репо публично** (перед сдачей) | README читается в инкогнито | открыть URL репо | FORGE |
+| 8 | **Embedding + reranker** | `:8081` и `:8082` отвечают 200 | `curl -s http://127.0.0.1:8081/health && curl -s http://127.0.0.1:8082/health` | SPARK |
+
+**Логика:** пункты 1–2 — основной путь, без них спринт не начинается (но не
+блокируют: сразу включаем fallback 3–4). Пункты 5–8 — обязательны к 10:15.
 
 ---
 
-## 2. Первые 2 часа (26.11 10:00–12:00) — распределение
+## 2. Первые 2 часа (26.11 10:00–12:00)
 
 | Время | Агент | Задача | Готово, когда |
 |---|---|---|---|
-| 10:00–10:15 | **ALL** | Брифинг (Telegram/голос): ТЗ заказчика, формат корпуса, дедлайны, роли | все в курсе |
-| 10:15–10:30 | **FORGE** | `git pull` свежий TZ-ветка; запуск dev-стенда `python -m uvicorn src.main:app --port 8874` | `curl /health` → 200 |
-| 10:15–11:00 | **CODEX** | Ingest pipeline: парсер формата ТЗ → чанки → BM25 индекс (whoosh/rank-bm25) + векторный (FAISS/pgvector) | `python -m ingest` → `indexes/` созданы |
-| 10:15–11:00 | **SPARK** | Retrieval API: BM25 + vector + rerank + фильтры; эндпоинт `/api/retrieve` | `curl /api/retrieve?q=...` → top-K |
-| 10:15–11:00 | **ARCH** | Orchestrator скелет: tool-schema (decompose, retrieve, resolve, conflict, compose, verify), журнал (JSONL) | `orchestrator.py` импортируется |
-| 11:00–11:30 | **ALL** | Интеграция: ingest → retrieval → orchestrator; прогон 3 вопросов из мини-датасета | 3 вопроса → непустая выдача |
-| 11:30–12:00 | **CODEX** | Логика «действующего документа» (§4 ARCHITECTURE): приоритеты, effective_date, revision, cancels, priority_over | `resolve.py` unit-tests pass |
-| 11:30–12:00 | **SPARK** | Profile `local` config: base_url, model names для 3-х эндпоинтов; проверка fallback | `config.local.json` валиден |
+| 10:00–10:15 | **ALL** | Брифинг: ТЗ заказчика, формат корпуса, ответы на QA-QUESTIONS.md, роли | ответы зафиксированы в `docs/QA-QUESTIONS.md` |
+| 10:15–10:30 | **FORGE** | Проверка GO/NO-GO §1, фиксация профиля `dev`, запуск демо-стенда | `nx send` GO-отчёт |
+| 10:15–11:00 | **CODEX** | Ingest: парсер формата ТЗ → чанки → BM25 + векторный индекс | индекс строится, поиск возвращает чанки |
+| 10:15–11:00 | **SPARK** | Retrieval API: BM25 + vector + rerank + фильтры | `curl /api/retrieve?q=...` → top-K |
+| 10:15–11:00 | **ARCH** | Orchestrator скелет: tool-schema, JSONL-журнал | `orchestrator.py` импортируется |
+| 11:00–11:30 | **ALL** | Интеграция ingest → retrieval → orchestrator; 3 вопроса из датасета | непустая выдача + 3 шага в журнале |
+| 11:30–12:00 | **CODEX** | Логика «действующего документа» (§4 ARCHITECTURE) | unit-тесты resolve проходят |
+| 11:30–12:00 | **SPARK** | Конфиг профилей `dev`/`local`, проверка переключения | оба профиля отвечают |
 
 ---
 
-## 3. Ключевые решения, которые нужно принять в 10:00 (если не приняты до)
+## 3. Ключевые решения на 10:00
 
-1. **Название модели в описании продукта** (Q9) — Qwen3-8B-Instruct GGUF Q4_K_M (финальное, после просмотра объёма корпуса).
-2. **Профиль для видео и демо жюри** — `local` (подтвердить, что снимаем на локальной модели).
-3. **Открывать ли репозиторий в описании до питча** — по итогам брифинга организатора.
+1. **Модель в описании продукта** (Q9) — основная: **NexusLink (sage-pl)**; локальная Qwen3-8B — fallback и изолированный контур.
+2. **Профиль для видео** — `dev` (NexusLink); если организатор требует изоляцию — `local`.
+3. **Публичность репозитория** — по итогам брифинга.
 
 ---
 
-## 4. Команды для быстрой проверки (скопировать в терминал)
+## 4. Команды проверки
 
 ```bash
-# 1. Модель
-curl -s http://127.0.0.1:8080/v1/models | jq .
+# 1. NexusLink (основной путь)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$NEXUSLINK_BASE_URL/v1/messages" \
+  -H "x-api-key: $NEXUSLINK_API_KEY" -H 'content-type: application/json' \
+  -d '{"model":"<слот>","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
 
-# 2. VRAM
+# 2. Ключ и отсутствие .env в git
+test -n "$NEXUSLINK_API_KEY" && echo "key ok"; git check-ignore -v .env
+
+# 3-4. Fallback: модель и VRAM
+curl -s http://127.0.0.1:8080/v1/models
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv
 
-# 3. Датасет
-python -c "import json; d=json.load(open('sample-corpus/corpus.json')); print(f'{len(d)} docs, keys={set().union(*[set(x.keys()) for x in d])}')"
+# 5. Корпус
+sh demo/run-local.sh
 
-# 4. Git remote
+# 6-7. Git
 git remote -v
 
-# 5. Репо публично
-# Открыть https://github.com/<org>/<repo> в инкогнито
-
-# 6. Embedding + reranker
+# 8. Embedding + reranker
 curl -s http://127.0.0.1:8081/health && curl -s http://127.0.0.1:8082/health
 ```
 
 ---
 
-## 5. Эскалация (если GO не пройден)
+## 5. Эскалация (≤ 15 мин)
 
-| Сбой | Реакция (≤ 15 мин) |
+| Сбой | Реакция |
 |---|---|
-| Модель не поднимается | Переключиться на Qwen3-4B fallback (3 GB), обновить MODEL.md, снять видео на `dev`, честно в описании |
-| VRAM > 7.5 GB | `--n-gpu-layers 28` (меньше слоёв на GPU), `--ctx-size 4096` |
-| Датасет пустой | CODEX: `python demo/gen-sample-corpus.py --n 30` → синтетика за 2 мин |
-| Git remote не настроен | `git remote add origin https://github.com/<org>/iikuznitsa-sprint.git` |
-| Репо не публично | GitHub Settings → Danger Zone → Change visibility → Public |
+| **NexusLink недоступен** | включить профиль `local` (Qwen3-8B, `:8080`), проверить VRAM; работать на fallback, доложить в отчёте |
+| Ключа шлюза нет | запросить у M.E.R.C. (владелец NexusLink), до ответа — `local` |
+| VRAM > 7.5 GB | `--ctx-size 4096`, затем `--n-gpu-layers 28`; если не помогло — Qwen3-4B |
+| Корпус пуст | `python demo/gen-sample-corpus.py --count 20 --seed 20261126 --clean` |
+| Git remote нет | `git remote add origin https://github.com/ykbojak-alt/iikuznitsa-sprint.git` |
+| Репо приватно | Settings → Change visibility → Public (перед сдачей) |
 
 ---
 
-**Владелец чек-листа:** FORGE. Подпись: `nx send t1 "SPRINT-KICKOFF GO/NO-GO: <результат>"` в 10:15.
+**Владелец:** FORGE. Подпись GO/NO-GO — в 10:15 ответом ALICE.

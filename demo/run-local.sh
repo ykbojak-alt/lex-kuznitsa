@@ -1,14 +1,16 @@
 #!/usr/bin/env sh
 # run-local — локальный прогон подготовительной обвязки ИИкузницы.
 #
-# Три шага:
+# Четыре шага:
 #   1. проверка окружения (scripts/preflight.sh) — без неё дальше не идём;
-#   2. генерация синтетического корпуса (demo/gen-sample-corpus.py);
-#   3. демонстрация поиска на 5 вопросах: индексация → поиск → сверка
+#   2. проверка пути инференса: основной — Nexus Link (sage-pl),
+#      fallback — локальная модель Qwen3-8B;
+#   3. генерация синтетического корпуса (demo/gen-sample-corpus.py);
+#   4. демонстрация поиска на 5 вопросах: индексация → поиск → сверка
 #      с ожидаемым документом.
 #
 # ВАЖНО: реального инференса модели здесь нет и до старта спринта не будет.
-# Шаг 3 проверяет конвейер и качество ЛЕКСИЧЕСКОГО поиска (recall@1/recall@3),
+# Шаг 4 проверяет конвейер и качество ЛЕКСИЧЕСКОГО поиска (recall@1/recall@3),
 # а не качество ответов LLM. Ответы модели появится после появления стенда;
 # методика оценки — docs/EVAL-HARNESS.md.
 #
@@ -16,9 +18,10 @@
 #   sh demo/run-local.sh
 #   sh demo/run-local.sh --questions 8
 #   sh demo/run-local.sh --skip-preflight --keep
+#   sh demo/run-local.sh --require-inference   # основной путь должен быть доступен
 #
-# Коды возврата: 0 — шаги выполнены, 1 — проверка окружения или генерация
-# корпуса не прошла.
+# Коды возврата: 0 — шаги выполнены, 1 — проверка окружения, пути инференса
+# или генерация корпуса не прошла.
 
 set -u
 
@@ -29,6 +32,7 @@ SEED=20261126
 CORPUS_DIR="$ROOT/sample-corpus"
 SKIP_PREFLIGHT=0
 KEEP_CORPUS=0
+REQUIRE_INFERENCE=0
 RUN_OUT="${TMPDIR:-/tmp}/iikuznitsa-eval"
 
 while [ $# -gt 0 ]; do
@@ -39,9 +43,10 @@ while [ $# -gt 0 ]; do
     --out) shift; CORPUS_DIR=${1:-$CORPUS_DIR} ;;
     --run-out) shift; RUN_OUT=${1:-$RUN_OUT} ;;
     --skip-preflight) SKIP_PREFLIGHT=1 ;;
+    --require-inference) REQUIRE_INFERENCE=1 ;;
     --keep) KEEP_CORPUS=1 ;;
     -h|--help)
-      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "run-local: неизвестный аргумент: $1" >&2; exit 2 ;;
@@ -62,17 +67,87 @@ fi
 
 # --- Шаг 1: окружение ---------------------------------------------------------
 if [ "$SKIP_PREFLIGHT" = 1 ]; then
-  step "Шаг 1/3: проверка окружения — пропущена (--skip-preflight)"
+  step "Шаг 1/4: проверка окружения — пропущена (--skip-preflight)"
 else
-  step "Шаг 1/3: проверка окружения"
+  step "Шаг 1/4: проверка окружения"
   if ! sh "$ROOT/scripts/preflight.sh"; then
     echo "run-local: проверка окружения не пройдена (есть FAIL). Исправьте и повторите." >&2
     exit 1
   fi
 fi
 
-# --- Шаг 2: корпус ------------------------------------------------------------
-step "Шаг 2/3: генерация корпуса"
+# --- Шаг 2: путь инференса ---------------------------------------------------
+# Основной путь — Nexus Link (sage-pl). Локальная модель Qwen3-8B — только
+# fallback: пока Nexus Link отвечает, вызовы идут на него. Проверка печатает
+# только адреса и HTTP-коды: ключи и токены не выводятся никогда.
+step "Шаг 2/4: путь инференса (основной — Nexus Link, fallback — локальная модель)"
+
+NL_BASE="${NEXUS_LINK_BASE_URL:-${MODEL_BASE_URL:-${LLM_BASE_URL:-${OPENAI_BASE_URL:-}}}}"
+NL_MODEL="${NEXUS_LINK_MODEL:-${MODEL_NAME:-${LLM_MODEL:-${OPENAI_MODEL:-}}}}"
+LOCAL_BASE="${LOCAL_MODEL_BASE_URL:-http://127.0.0.1:8080/v1}"
+LOCAL_MODEL="${LOCAL_MODEL_NAME:-Qwen3-8B-Instruct-Q4_K_M}"
+
+http_code() {
+  # http_code <url> — HTTP-код ответа или 000, если соединение не установлено.
+  command -v curl >/dev/null 2>&1 || { printf '000'; return; }
+  _code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$1" 2>/dev/null) || _code=000
+  case "$_code" in
+    ''|*[!0-9]*) _code=000 ;;
+  esac
+  printf '%s' "$_code"
+}
+
+NL_CODE="000"
+if [ -n "$NL_BASE" ]; then
+  NL_CODE=$(http_code "${NL_BASE%/}/models")
+fi
+LOCAL_CODE=$(http_code "${LOCAL_BASE%/}/models")
+
+if [ -z "$NL_BASE" ]; then
+  NL_LINE="не задан адрес (NEXUS_LINK_BASE_URL) — основной путь недоступен"
+elif [ "$NL_CODE" = "000" ]; then
+  NL_LINE="не отвечает, соединение не установлено ($NL_BASE)"
+elif [ "$NL_CODE" = "401" ] || [ "$NL_CODE" = "403" ]; then
+  NL_LINE="отвечает, HTTP $NL_CODE ($NL_BASE) — нужен токен доступа"
+else
+  NL_LINE="отвечает, HTTP $NL_CODE ($NL_BASE)"
+fi
+if [ "$LOCAL_CODE" = "000" ]; then
+  LOCAL_LINE="не отвечает, соединение не установлено ($LOCAL_BASE)"
+else
+  LOCAL_LINE="отвечает, HTTP $LOCAL_CODE ($LOCAL_BASE)"
+fi
+
+if [ "$NL_CODE" != "000" ]; then
+  ACTIVE_PATH="nexus-link (основной путь)"
+elif [ "$LOCAL_CODE" != "000" ]; then
+  ACTIVE_PATH="local-fallback (локальная модель)"
+else
+  ACTIVE_PATH="не определён — ни один путь недоступен"
+fi
+
+printf '%s\n' "  Nexus Link (ОСНОВНОЙ):       $NL_LINE"
+if [ -n "$NL_MODEL" ]; then
+  printf '%s\n' "  модель на основном пути:     $NL_MODEL"
+fi
+printf '%s\n' "  Локальная модель (FALLBACK): $LOCAL_LINE"
+printf '%s\n' "  модель на fallback:          $LOCAL_MODEL"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -n 1)
+  if [ -n "$GPU_INFO" ]; then
+    printf '%s\n' "  GPU для fallback:            $GPU_INFO"
+  fi
+fi
+printf '%s\n' "  Активный путь инференса:     $ACTIVE_PATH"
+printf '%s\n' "  Правило: Nexus Link — основной; локальная модель включается только если основной недоступен."
+
+if [ "$REQUIRE_INFERENCE" = 1 ] && [ "$NL_CODE" = "000" ]; then
+  echo "run-local: основной путь инференса (Nexus Link) недоступен, а --require-inference задан" >&2
+  exit 1
+fi
+
+# --- Шаг 3: корпус ------------------------------------------------------------
+step "Шаг 3/4: генерация корпуса"
 if [ "$KEEP_CORPUS" = 1 ]; then
   echo "используем существующий корпус: $CORPUS_DIR"
 else
@@ -82,11 +157,11 @@ else
   fi
 fi
 
-# --- Шаг 3: демо поиска на 5 вопросах ----------------------------------------
-step "Шаг 3/3: демо поиска (без инференса модели)"
+# --- Шаг 4: демо поиска на 5 вопросах ----------------------------------------
+step "Шаг 4/4: демо поиска (без инференса модели)"
 mkdir -p "$RUN_OUT"
 
-"$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" <<'PYEOF'
+"$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$ACTIVE_PATH" <<'PYEOF'
 import json
 import math
 import re
@@ -95,6 +170,7 @@ from collections import Counter
 from pathlib import Path
 
 corpus_dir, run_out, n_questions = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+inference_path = sys.argv[4] if len(sys.argv) > 4 else "не определён"
 
 STOP = {
     "какой", "какая", "какие", "что", "как", "для", "по", "на", "и", "в", "из", "к",
@@ -194,6 +270,7 @@ summary = {
     "questions": total,
     "recall@1": round(hit1 / total, 3) if total else 0.0,
     "recall@3": round(hit3 / total, 3) if total else 0.0,
+    "inference_path": inference_path,
     "note": "лексический поиск без LLM; качество ответов не измерялось",
 }
 (run_out / "stub-results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -205,4 +282,5 @@ PYEOF
 
 step "Готово"
 echo "Корпус: $CORPUS_DIR"
+echo "Путь инференса: $ACTIVE_PATH (основной — Nexus Link, fallback — локальная модель)"
 echo "Следующий шаг на старте спринта: подключить стенд и прогнать 92 вопроса по docs/EVAL-HARNESS.md"
