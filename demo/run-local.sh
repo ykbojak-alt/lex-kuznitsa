@@ -137,13 +137,18 @@ generic = [q for q in questions if q.get("kind") == "generic"]
 rule_qs = [q for q in questions if q.get("kind") == "rule_asof"]
 refusal_qs = [q for q in rule_qs if q.get("refusal_expected")]
 picked = []
+pool = []
 if generic:
-    picked.append(generic[0])
+    pool.append(generic[0])
 if generic:
-    picked.append(generic[len(generic) // 2])
-for q in refusal_qs[:1] + rule_qs[:2]:
+    pool.append(generic[len(generic) // 2])
+pool.extend(refusal_qs[:1])
+pool.extend(rule_qs)
+for q in pool:
     if q not in picked:
         picked.append(q)
+    if len(picked) >= n_questions:
+        break
 picked = picked[:n_questions]
 if not picked:
     picked = questions[:n_questions]
