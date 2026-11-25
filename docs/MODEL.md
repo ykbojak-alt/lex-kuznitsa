@@ -15,14 +15,18 @@
 (`/v1/messages` или `/v1/chat/completions`). Переключение `dev` ↔ `local` не
 требует правок в приложении.
 
-### Адреса
+### Адреса и переменные
 
-- **NexusLink (sage-pl):** базовый URL берётся из переменной окружения
-  `NEXUSLINK_BASE_URL` (не хранится в репозитории). Публичный LLM-вход шлюза —
-  `:4435` за Caddy; локальный listener шлюза — `127.0.0.1:5679`.
-- **Ключ:** `NEXUSLINK_API_KEY` (значение = `incoming_token` из конфига шлюза).
-  Только через env; в git не попадает — `.env` в `.gitignore`.
-- **Локальная fallback:** `http://127.0.0.1:8080/v1` (llama.cpp).
+- **NexusLink (sage-pl):** `NEXUS_LINK_BASE_URL` — базовый URL (в репозиторий не
+  попадает). `NEXUS_LINK_MODEL` — слот модели; задавать **явно**, т.к. дефолт
+  `demo_stand.py` (`claude-sonnet-5`) на sage-pl отдаёт 502 (см. `docs/LIMITS.md`).
+  Публичный LLM-вход шлюза — `:4435` за Caddy; локальный listener — `127.0.0.1:5679`.
+- **Токен:** `incoming_token` из `~/.nexuslink/config.json`; передаётся клиентом
+  как `x-api-key`/Bearer. Только через конфиг/env, в git не попадает (`.env` в
+  `.gitignore`).
+- **Локальный fallback:** `LOCAL_MODEL_BASE_URL` (по умолчанию
+  `http://127.0.0.1:8080/v1`), `LOCAL_MODEL_NAME` (по умолчанию
+  `Qwen3-8B-Instruct-Q4_K_M`).
 
 Владелец NexusLink — M.E.R.C.; доступ и ключи выдаются им, не вшиваются в код.
 

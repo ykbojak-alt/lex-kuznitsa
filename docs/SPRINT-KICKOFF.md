@@ -9,8 +9,8 @@
 
 | # | Проверка | GO критерий | Как проверить | Ответственный |
 |---|---|---|---|---|
-| 1 | **NexusLink (sage-pl) доступен** — основной путь | `POST $NEXUSLINK_BASE_URL/v1/messages` возвращает 200 и непустой ответ модели | `curl -s -o /dev/null -w '%{http_code}' -X POST "$NEXUSLINK_BASE_URL/v1/messages" -H "x-api-key: $NEXUSLINK_API_KEY" -H 'content-type: application/json' -d '{"model":"<слот>","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'` | FORGE |
-| 2 | **Ключ шлюза в env** | `$NEXUSLINK_API_KEY` непустой, файла `.env` нет в git | `test -n "$NEXUSLINK_API_KEY" && echo ok`; `git check-ignore -v .env` | FORGE |
+| 1 | **NexusLink (sage-pl) доступен** — основной путь | `GET $NEXUS_LINK_BASE_URL/models` отвечает 200 (401/403 = шлюз жив, нужен токен) и `POST /v1/messages` даёт непустой ответ | `sh demo/run-local.sh --require-inference` (проверяет оба пути) | FORGE |
+| 2 | **Слот модели задан явно** | `$NEXUS_LINK_MODEL` непустой и не равен дефолту `claude-sonnet-5` (на sage-pl = 502) | `echo "$NEXUS_LINK_MODEL"` | FORGE |
 | 3 | **Fallback: локальная Qwen3-8B** | `curl http://127.0.0.1:8080/v1/models` → `Qwen3-8B-Instruct-Q4_K_M` | `curl -s http://127.0.0.1:8080/v1/models` | FORGE |
 | 4 | **VRAM ≤ 7.5 GB** (только для fallback) | `nvidia-smi` занято ≤ 7.5 из 8 GB | `nvidia-smi --query-gpu=memory.used,memory.total --format=csv` | FORGE |
 | 5 | **Dev-датасет не пустой** | `sample-corpus/` — корпус собран, вопросов ≥ 20 | `sh demo/run-local.sh` проходит preflight | CODEX |
@@ -49,13 +49,9 @@
 ## 4. Команды проверки
 
 ```bash
-# 1. NexusLink (основной путь)
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$NEXUSLINK_BASE_URL/v1/messages" \
-  -H "x-api-key: $NEXUSLINK_API_KEY" -H 'content-type: application/json' \
-  -d '{"model":"<слот>","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
-
-# 2. Ключ и отсутствие .env в git
-test -n "$NEXUSLINK_API_KEY" && echo "key ok"; git check-ignore -v .env
+# 1-2. NexusLink (основной путь) + слот модели
+sh demo/run-local.sh --require-inference
+echo "$NEXUS_LINK_BASE_URL / $NEXUS_LINK_MODEL"
 
 # 3-4. Fallback: модель и VRAM
 curl -s http://127.0.0.1:8080/v1/models

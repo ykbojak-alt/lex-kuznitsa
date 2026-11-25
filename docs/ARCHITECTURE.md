@@ -206,16 +206,17 @@
 ```json
 {
   "profile": "dev",
-  "llm":       { "base_url": "${NEXUSLINK_BASE_URL}", "model": "<слот NexusLink>" },
+  "llm":       { "base_url": "${NEXUS_LINK_BASE_URL}", "model": "${NEXUS_LINK_MODEL}" },
   "embedding": { "base_url": "http://127.0.0.1:8081/v1", "model": "bge-m3" },
   "reranker":  { "base_url": "http://127.0.0.1:8082", "model": "bge-reranker-base" }
 }
 ```
 
 Локальный вариант — тот же файл, `"profile": "local"` и
-`"llm": { "base_url": "http://127.0.0.1:8080/v1", "model": "Qwen3-8B-Instruct-Q4_K_M" }`.
-Адрес и ключ шлюза — только через env (`NEXUSLINK_BASE_URL`, `NEXUSLINK_API_KEY`),
-в репозиторий не попадают.
+`"llm": { "base_url": "${LOCAL_MODEL_BASE_URL}", "model": "${LOCAL_MODEL_NAME}" }`.
+Адрес и токен шлюза — только через env/конфиг, в репозиторий не попадают.
+Слот NexusLink задаётся явно: дефолт `claude-sonnet-5` на sage-pl отдаёт 502
+(`docs/LIMITS.md` §3).
 
 | Профиль | Что это | Назначение | Честность |
 |---|---|---|---|

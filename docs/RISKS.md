@@ -14,8 +14,9 @@ Qwen3-8B — fallback. См. `docs/MODEL.md`.
 **Mitigation:**
 - **Fallback готов заранее:** профиль `local` (Qwen3-8B на `:8080`) поднят и
   проверен до 26.11 09:30 — переключение конфигом, без правок кода.
-- **Проверка в 10:15:** `POST $NEXUSLINK_BASE_URL/v1/messages` → 200 (см. SPRINT-KICKOFF §1).
-- **Ключ:** `NEXUSLINK_API_KEY` в env, запрос у M.E.R.C. — до старта.
+- **Проверка в 10:15:** `sh demo/run-local.sh --require-inference` — проверяет оба пути.
+- **Слот:** `NEXUS_LINK_MODEL` задан явно; дефолт `claude-sonnet-5` на sage-pl даёт 502.
+- **Токен:** `incoming_token` из конфига шлюза; доступ — через M.E.R.C. (владелец NexusLink).
 - **Честность:** в описании продукта локальная модель заявлена как fallback —
   переход на неё не является расхождением с заявленным.
 - **Второй уровень:** Qwen3-4B Q5 (~3 GB), если 8B не тянет по VRAM.
