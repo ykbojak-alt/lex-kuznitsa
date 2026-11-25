@@ -19,6 +19,8 @@
 #   sh demo/run-local.sh --questions 8
 #   sh demo/run-local.sh --skip-preflight --keep
 #   sh demo/run-local.sh --require-inference   # основной путь должен быть доступен
+#   sh demo/run-local.sh --nexus-link-url <url>
+#   sh demo/run-local.sh --nexus-link-key-env NEXUSLINK_KEY
 #
 # Коды возврата: 0 — шаги выполнены, 1 — проверка окружения, пути инференса
 # или генерация корпуса не прошла.
@@ -33,6 +35,8 @@ CORPUS_DIR="$ROOT/sample-corpus"
 SKIP_PREFLIGHT=0
 KEEP_CORPUS=0
 REQUIRE_INFERENCE=0
+NL_URL_OVERRIDE=""
+NL_KEY_ENV_OVERRIDE=""
 RUN_OUT="${TMPDIR:-/tmp}/iikuznitsa-eval"
 
 while [ $# -gt 0 ]; do
@@ -44,9 +48,11 @@ while [ $# -gt 0 ]; do
     --run-out) shift; RUN_OUT=${1:-$RUN_OUT} ;;
     --skip-preflight) SKIP_PREFLIGHT=1 ;;
     --require-inference) REQUIRE_INFERENCE=1 ;;
+    --nexus-link-url) shift; NL_URL_OVERRIDE=${1:-} ;;
+    --nexus-link-key-env) shift; NL_KEY_ENV_OVERRIDE=${1:-} ;;
     --keep) KEEP_CORPUS=1 ;;
     -h|--help)
-      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "run-local: неизвестный аргумент: $1" >&2; exit 2 ;;
@@ -82,15 +88,42 @@ fi
 # только адреса и HTTP-коды: ключи и токены не выводятся никогда.
 step "Шаг 2/4: путь инференса (основной — Nexus Link, fallback — локальная модель)"
 
-NL_BASE="${NEXUS_LINK_BASE_URL:-${MODEL_BASE_URL:-${LLM_BASE_URL:-${OPENAI_BASE_URL:-}}}}"
+NL_BASE="${NL_URL_OVERRIDE:-${NEXUS_LINK_BASE_URL:-${MODEL_BASE_URL:-${LLM_BASE_URL:-${OPENAI_BASE_URL:-}}}}}"
 NL_MODEL="${NEXUS_LINK_MODEL:-${MODEL_NAME:-${LLM_MODEL:-${OPENAI_MODEL:-}}}}"
+NL_KEY_ENV="NEXUSLINK_KEY"
+if [ -n "$NL_KEY_ENV_OVERRIDE" ]; then
+  NL_KEY_ENV="$NL_KEY_ENV_OVERRIDE"
+fi
 LOCAL_BASE="${LOCAL_MODEL_BASE_URL:-http://127.0.0.1:8080/v1}"
 LOCAL_MODEL="${LOCAL_MODEL_NAME:-Qwen3-8B-Instruct-Q4_K_M}"
 
+# Значение токена не печатается и не попадает в argv: заголовок уходит в curl
+# через stdin (--config -), чтобы токен не светился в списке процессов.
+NL_KEY=""
+NL_KEY_STATE="не задан"
+case "$NL_KEY_ENV" in
+  ''|*[!A-Za-z0-9_]*)
+    NL_KEY_STATE="имя переменной некорректно: $NL_KEY_ENV"
+    ;;
+  *)
+    NL_KEY=$(printenv "$NL_KEY_ENV" 2>/dev/null || true)
+    if [ -n "$NL_KEY" ]; then
+      NL_KEY_STATE="задан (env $NL_KEY_ENV, значение не выводится)"
+    else
+      NL_KEY_STATE="не задан (env $NL_KEY_ENV пуст или не экспортирован)"
+    fi
+    ;;
+esac
+
 http_code() {
-  # http_code <url> — HTTP-код ответа или 000, если соединение не установлено.
+  # http_code <url> [token] — HTTP-код ответа или 000, если соединение не
+  # установлено. Токен (если задан) уходит в заголовок через stdin.
   command -v curl >/dev/null 2>&1 || { printf '000'; return; }
-  _code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$1" 2>/dev/null) || _code=000
+  if [ -n "${2:-}" ]; then
+    _code=$(printf 'header = "Authorization: Bearer %s"\n' "$2" | curl -s -o /dev/null -m 8 -w '%{http_code}' --config - "$1" 2>/dev/null) || _code=000
+  else
+    _code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$1" 2>/dev/null) || _code=000
+  fi
   case "$_code" in
     ''|*[!0-9]*) _code=000 ;;
   esac
@@ -98,17 +131,32 @@ http_code() {
 }
 
 NL_CODE="000"
+NL_AUTHED=0
 if [ -n "$NL_BASE" ]; then
-  NL_CODE=$(http_code "${NL_BASE%/}/models")
+  if [ -n "$NL_KEY" ]; then
+    NL_CODE=$(http_code "${NL_BASE%/}/models" "$NL_KEY")
+    NL_AUTHED=1
+  else
+    NL_CODE=$(http_code "${NL_BASE%/}/models")
+  fi
 fi
 LOCAL_CODE=$(http_code "${LOCAL_BASE%/}/models")
 
-if [ -z "$NL_BASE" ]; then
-  NL_LINE="не задан адрес (NEXUS_LINK_BASE_URL) — основной путь недоступен"
+# Основной путь пригоден только если отвечает 200 с принятым токеном.
+# 401/403 и таймаут — условие перехода на локальный fallback.
+NL_USABLE=0
+if [ "$NL_AUTHED" = 1 ] && [ "$NL_CODE" = "200" ]; then
+  NL_USABLE=1
+fi
+
+if [ "$NL_USABLE" = 1 ]; then
+  NL_LINE="доступен, HTTP 200, токен принят ($NL_BASE)"
+elif [ -z "$NL_BASE" ]; then
+  NL_LINE="не задан адрес: задайте NEXUS_LINK_BASE_URL или --nexus-link-url"
 elif [ "$NL_CODE" = "000" ]; then
-  NL_LINE="не отвечает, соединение не установлено ($NL_BASE)"
+  NL_LINE="не отвечает: таймаут или соединение не установлено ($NL_BASE)"
 elif [ "$NL_CODE" = "401" ] || [ "$NL_CODE" = "403" ]; then
-  NL_LINE="отвечает, HTTP $NL_CODE ($NL_BASE) — нужен токен доступа"
+  NL_LINE="отвечает, токен отклонён (HTTP $NL_CODE) — нужен корректный $NL_KEY_ENV"
 else
   NL_LINE="отвечает, HTTP $NL_CODE ($NL_BASE)"
 fi
@@ -118,15 +166,19 @@ else
   LOCAL_LINE="отвечает, HTTP $LOCAL_CODE ($LOCAL_BASE)"
 fi
 
-if [ "$NL_CODE" != "000" ]; then
+if [ "$NL_USABLE" = 1 ]; then
+  NL_PATH_ID="nexus-link"
   ACTIVE_PATH="nexus-link (основной путь)"
 elif [ "$LOCAL_CODE" != "000" ]; then
+  NL_PATH_ID="local-fallback"
   ACTIVE_PATH="local-fallback (локальная модель)"
 else
+  NL_PATH_ID="none"
   ACTIVE_PATH="не определён — ни один путь недоступен"
 fi
 
 printf '%s\n' "  Nexus Link (ОСНОВНОЙ):       $NL_LINE"
+printf '%s\n' "  токен:                      $NL_KEY_STATE"
 if [ -n "$NL_MODEL" ]; then
   printf '%s\n' "  модель на основном пути:     $NL_MODEL"
 fi
@@ -141,8 +193,9 @@ fi
 printf '%s\n' "  Активный путь инференса:     $ACTIVE_PATH"
 printf '%s\n' "  Правило: Nexus Link — основной; локальная модель включается только если основной недоступен."
 
-if [ "$REQUIRE_INFERENCE" = 1 ] && [ "$NL_CODE" = "000" ]; then
-  echo "run-local: основной путь инференса (Nexus Link) недоступен, а --require-inference задан" >&2
+if [ "$REQUIRE_INFERENCE" = 1 ] && [ "$NL_USABLE" != 1 ]; then
+  echo "run-local: основной путь инференса (Nexus Link) непригоден, а --require-inference задан" >&2
+  echo "run-local: $NL_LINE" >&2
   exit 1
 fi
 
@@ -161,7 +214,7 @@ fi
 step "Шаг 4/4: демо поиска (без инференса модели)"
 mkdir -p "$RUN_OUT"
 
-if ! "$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$ACTIVE_PATH" <<'PYEOF'
+if ! "$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$NL_PATH_ID" <<'PYEOF'
 import json
 import math
 import re
