@@ -57,6 +57,8 @@ python -m uvicorn src.main:app --port 8874
 | `docs/DEMO-VIDEO-PROMPT.md` | производство демо-видео: скринкаст + Remotion-титры + Dola intro/outro, рендер, формат |
 | `docs/PITCH-VIDEO.md` | сценарий видео-питча 90 с (вводка 20 / демо 40 / границы 15 / экономика 15) |
 | `docs/VIDEO-CHECKLIST.md` | приёмочный чек-лист видео перед сдачей (техника, звук, тайминг, критерии) |
+| `docs/VIDEO-RENDER.md` | сборка демо-видео: тело, озвучка (Fish TTS), субтитры (whisper), Remotion-оформление, микс, планы Б/В |
+| `docs/VIDEO-EXPORT.md` | экспортный контракт: H.264 High 1080p30 yuv420p faststart + AAC, ffmpeg-команды, проверки |
 | `docs/SPRINT-KICKOFF.md`, `docs/RISKS.md` | чек-лист открытия спринта, топ-5 рисков |
 
 ## Лицензия
