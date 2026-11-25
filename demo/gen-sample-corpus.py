@@ -139,6 +139,47 @@ STORAGE_TERMS = (
     "не менее двух лет",
 )
 
+# --- Конфликтующие редакции -------------------------------------------------
+# Один и тот же вопрос («какой срок действует?») должен иметь разные ответы
+# в зависимости от даты: более поздняя редакция вытесняет раннюю, а правило,
+# ещё не вступившее в силу, применяться не должно. Это проверяет логику
+# «действующего документа» и обоснованного отказа.
+AS_OF = date(2026, 11, 26)  # опорная дата: день старта спринта
+
+CONFLICT_RULES = (
+    {
+        "key": "SR-01",
+        "topic": "согласования заявки на закупку",
+        "field": "Срок согласования заявки",
+        "short": "срок согласования заявки",
+        "revisions": (
+            ("2026-01-15", "трёх рабочих дней"),
+            ("2026-06-01", "пяти рабочих дней"),
+            ("2027-01-01", "семи рабочих дней"),
+        ),
+    },
+    {
+        "key": "SR-02",
+        "topic": "хранения журнала заявок",
+        "field": "Срок хранения журнала",
+        "short": "срок хранения журнала",
+        "revisions": (
+            ("2026-02-01", "не менее одного года"),
+            ("2026-09-01", "не менее трёх лет"),
+        ),
+    },
+    {
+        "key": "SR-03",
+        "topic": "автоматического одобрения заявки",
+        "field": "Порог автоматического одобрения",
+        "short": "порог автоматического одобрения",
+        "revisions": (
+            ("2026-03-10", "50 000 рублей"),
+            ("2026-08-01", "150 000 рублей"),
+        ),
+    },
+)
+
 SECTIONS = (
     "Назначение и область применения",
     "Термины, определения и сокращения",
@@ -389,6 +430,122 @@ def make_doc(rng: random.Random, index: int, issued: date) -> Doc:
     lines.append("---")
     lines.append("")
     lines.append(f"*Синтетический документ {doc_id}, сформирован автоматически для проверки RAG-контура.*")
+
+    doc.body = "\n".join(lines) + "\n"
+    doc.words = len(doc.body.split())
+    return doc
+
+
+def make_conflict_doc(
+    rng: random.Random,
+    rule: dict,
+    rule_index: int,
+    revision_no: int,
+    effective: date,
+    value: str,
+    prev_effective: date | None,
+) -> Doc:
+    """Документ-редакция одного правила: та же тема, другая дата вступления."""
+    dept = rng.choice(DEPARTMENTS)
+    company = rng.choice(COMPANIES)
+    owner = rng.choice(PERSONS)
+    system = rng.choice(SYSTEMS)
+    doc_id = f"ТЗ-ЭКЗ-СР{rule_index:02d}-Р{revision_no}"
+    title = f"Регламент «{rule['topic']}» (редакция {revision_no} от {effective.isoformat()})"
+
+    doc = Doc(
+        doc_id=doc_id,
+        kind="Регламент",
+        subtype="редакция правила",
+        title=title,
+        company=company,
+        dept=dept,
+        owner=owner,
+        system=system,
+        product=rng.choice(PRODUCTS),
+        issued=effective,
+        version=f"{revision_no}.0",
+        sections=[
+            "Назначение и область применения",
+            "Роли и ответственность",
+            "Порядок выполнения процедуры",
+            f"Правило {rule['key']}",
+            "Приёмочные критерии",
+            "Порядок хранения и аудита",
+        ],
+    )
+
+    lines: list[str] = []
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append(f"> {WATERMARK}")
+    lines.append("")
+    lines.append("## Паспорт документа")
+    lines.append("")
+    lines.append("| Поле | Значение |")
+    lines.append("| --- | --- |")
+    lines.append(f"| Идентификатор | {doc_id} |")
+    lines.append("| Вид | регламент (редакция правила) |")
+    lines.append(f"| Организация | {company} |")
+    lines.append(f"| Подразделение | {dept} |")
+    lines.append(f"| Ответственный | {owner} |")
+    lines.append(f"| Контур | {system} |")
+    lines.append(f"| Ключ правила | {rule['key']} |")
+    lines.append(f"| Номер редакции | {revision_no} из {len(rule['revisions'])} |")
+    lines.append(f"| Действует с | {effective.isoformat()} |")
+    if prev_effective is not None:
+        lines.append(f"| Заменяет редакцию от | {prev_effective.isoformat()} |")
+    lines.append(f"| Дата введения | {effective.isoformat()} |")
+    lines.append("")
+    lines.append("## Содержание")
+    lines.append("")
+    for s in doc.sections:
+        lines.append(f"- {s}")
+    lines.append("")
+
+    lines.append("## Назначение и область применения")
+    lines.append("")
+    lines.append(
+        f"Документ устанавливает правило {rule['key']} для {dept} компании {company} "
+        f"и применяется с {effective.isoformat()}."
+    )
+    lines.append("")
+    lines.append("## Роли и ответственность")
+    lines.append("")
+    lines.append(f"Ответственный: {owner}.")
+    lines.append("")
+    lines.append("## Порядок выполнения процедуры")
+    lines.append("")
+    lines.append("1. Определить действующую на дату запроса редакцию правила.")
+    lines.append("2. Применить её значение.")
+    lines.append("3. Зафиксировать применённую редакцию в журнале.")
+    lines.append("")
+    lines.append(f"## Правило {rule['key']}")
+    lines.append("")
+    lines.append(f"**{rule['field']}:** {value}.")
+    lines.append("")
+    lines.append(f"Редакция {revision_no} действует с {effective.isoformat()}.")
+    if prev_effective is not None:
+        lines.append(
+            f"С {effective.isoformat()} применяется это значение; редакция от "
+            f"{prev_effective.isoformat()} и ранее — не применяется."
+        )
+    else:
+        lines.append("Это первая редакция правила; ранее правило не действовало.")
+    lines.append("")
+    lines.append("## Приёмочные критерии")
+    lines.append("")
+    lines.append("- Значение правила определяется редакцией, действующей на указанную дату.")
+    lines.append("- Будущая редакция не применяется до даты вступления в силу.")
+    lines.append("- Если на дату запроса ни одна редакция не действует, правило не применяется.")
+    lines.append("")
+    lines.append("## Порядок хранения и аудита")
+    lines.append("")
+    lines.append(f"Журнал применённых редакций ведётся в {system}.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"*Синтетический документ {doc_id} — редакция правила {rule['key']}.*")
 
     doc.body = "\n".join(lines) + "\n"
     doc.words = len(doc.body.split())
