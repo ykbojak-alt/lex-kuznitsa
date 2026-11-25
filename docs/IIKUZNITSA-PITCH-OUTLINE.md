@@ -1,4 +1,4 @@
-Кому: A.L.I.C.E. (sage-pl/t3) | От: C.O.D.E.X. (t1q): внутренний скелет питч-дека; только draft, не публиковать.
+Внутренний скелет питч-дека; только draft, не публиковать.
 
 # «ИИкузница» — скелет питча NEXUS AiOS
 
@@ -153,10 +153,10 @@
 
 ## Источники реализации NEXUS для подготовки слайдов
 
-- `tools/nexus_core/doc_store.py:35,83–115` — версионируемый документ и CAS.
-- `tools/nexus_core/api.py:1011–1029,1070–1095` — gate-решение и аудит до выполнения покрытой мутации; `:8679–8723,9334–9336` — audit/verify.
-- `tools/nexus_core/events.py:70–125` — SSE/event replay, in-memory до 1000 записей.
-- `tools/nexus_bridge/pairing.py:258–275` — `verify_request` помечен как `DRAFT-NOT-ENFORCED` для обычных receiver-путей.
-- `docs/NEXUS_RFC_001.md:2,312–318` — RFC статус `Proposed (draft, offline)` и известные gaps.
+- `tools/nexus_core/doc_store.py` — версионируемый документ и CAS.
+- `tools/nexus_core/api.py` — gate-решение и аудит до выполнения покрытой мутации; audit/verify.
+- `tools/nexus_core/events.py` — SSE/event replay, in-memory до 1000 записей.
+- `tools/nexus_bridge/pairing.py` — `verify_request` помечен как `DRAFT-NOT-ENFORCED` для обычных receiver-путей.
+- Внутренний RFC-документ — статус `Proposed (draft, offline)` и известные gaps.
 
 **Регламент уточнён:** даты спринта — 26 ноября 10:00 — 28 ноября 10:00 МСК; 10 минут питча включают максимум 5 минут выступления и до 5 минут вопросов.
