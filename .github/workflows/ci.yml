@@ -104,11 +104,18 @@ jobs:
       - name: Generate corpus
         run: |
           set -e
-          python demo/gen-sample-corpus.py --count 24 --seed 20261126 --out "$RUNNER_TEMP/corpus"
+          python demo/gen-sample-corpus.py --count 20 --seed 20261126 --out "$RUNNER_TEMP/corpus"
+          expected=$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['count'])" "$RUNNER_TEMP/corpus/manifest.json")
           count=$(find "$RUNNER_TEMP/corpus" -maxdepth 1 -name '*.md' ! -name 'INDEX.md' | wc -l)
-          echo "сгенерировано документов: $count"
-          if [ "$count" -ne 24 ]; then
-            echo "ожидалось 24 документа, получено $count" >&2
+          echo "сгенерировано документов: $count (ожидается $expected)"
+          if [ "$count" -ne "$expected" ]; then
+            echo "расхождение количества документов" >&2
+            exit 1
+          fi
+          rules=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1],encoding='utf-8'))['conflict_rules']))" "$RUNNER_TEMP/corpus/manifest.json")
+          echo "конфликтующих правил: $rules"
+          if [ "$rules" -lt 2 ]; then
+            echo "ожидались конфликтующие редакции правил" >&2
             exit 1
           fi
           test -f "$RUNNER_TEMP/corpus/INDEX.md"

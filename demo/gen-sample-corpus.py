@@ -862,10 +862,22 @@ def validate(out_dir: Path, manifest: dict, count: int) -> list[str]:
         if len(set(r["value"] for r in revs)) != len(revs):
             problems.append(f"редакции правила {meta['key']} не различаются по значению")
         in_force = [r for r in revs if r["effective"] <= manifest["as_of"]]
-        if len(in_force) != 1:
+        if not in_force:
             problems.append(
-                f"на {manifest['as_of']} правило {meta['key']} имеет {len(in_force)} действующих редакций, ожидалась одна"
+                f"на {manifest['as_of']} ни одна редакция правила {meta['key']} не действует"
             )
+        else:
+            # Действует только последняя из вступивших редакций; более ранние вытеснены.
+            latest = max(in_force, key=lambda r: r["effective"])
+            if latest["value"] != meta.get("in_force_at_as_of"):
+                problems.append(
+                    f"не совпадает действующая редакция правила {meta['key']}: "
+                    f"{latest['value']} != {meta.get('in_force_at_as_of')}"
+                )
+            if len(in_force) > 1 and len({r["value"] for r in in_force}) == 1:
+                problems.append(
+                    f"у правила {meta['key']} вступившие редакции не различаются — конфликта нет"
+                )
         for r in revs:
             if not (out_dir / r["file"]).exists():
                 problems.append(f"нет файла редакции {r['file']}")
