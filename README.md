@@ -59,6 +59,7 @@ python -m uvicorn src.main:app --port 8874
 | `docs/VIDEO-CHECKLIST.md` | приёмочный чек-лист видео перед сдачей (техника, звук, тайминг, критерии) |
 | `docs/VIDEO-RENDER.md` | сборка демо-видео: тело, озвучка (Fish TTS), субтитры (whisper), Remotion-оформление, микс, планы Б/В |
 | `docs/VIDEO-EXPORT.md` | экспортный контракт: H.264 High 1080p30 yuv420p faststart + AAC, ffmpeg-команды, проверки |
+| `docs/QA-FINAL.md` | финальный чек-лист сдачи: 20 пунктов по 6 критериям + гейты репо/видео/Положение |
 | `docs/SPRINT-KICKOFF.md`, `docs/RISKS.md` | чек-лист открытия спринта, топ-5 рисков |
 
 ## Лицензия
