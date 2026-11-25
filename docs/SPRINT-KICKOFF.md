@@ -14,7 +14,7 @@
 | 3 | **Fallback: локальная Qwen3-8B** | `curl http://127.0.0.1:8080/v1/models` → `Qwen3-8B-Instruct-Q4_K_M` | `curl -s http://127.0.0.1:8080/v1/models` | FORGE |
 | 4 | **VRAM ≤ 7.5 GB** (только для fallback) | `nvidia-smi` занято ≤ 7.5 из 8 GB | `nvidia-smi --query-gpu=memory.used,memory.total --format=csv` | FORGE |
 | 5 | **Dev-датасет не пустой** | `sample-corpus/` — корпус собран, вопросов ≥ 20 | `sh demo/run-local.sh` проходит preflight | CODEX |
-| 6 | **Git remote настроен** | `origin` → `github.com/ykbojak-alt/iikuznitsa-sprint` | `git remote -v` | FORGE |
+| 6 | **Git remote настроен** | `origin` → `github.com/ykbojak-alt/lex-kuznitsa` | `git remote -v` | FORGE |
 | 7 | **Репо публично** (перед сдачей) | README читается в инкогнито | открыть URL репо | FORGE |
 | 8 | **Embedding + reranker** | `:8081` и `:8082` отвечают 200 | `curl -s http://127.0.0.1:8081/health && curl -s http://127.0.0.1:8082/health` | SPARK |
 
@@ -77,7 +77,7 @@ curl -s http://127.0.0.1:8081/health && curl -s http://127.0.0.1:8082/health
 | Ключа шлюза нет | запросить у M.E.R.C. (владелец NexusLink), до ответа — `local` |
 | VRAM > 7.5 GB | `--ctx-size 4096`, затем `--n-gpu-layers 28`; если не помогло — Qwen3-4B |
 | Корпус пуст | `python demo/gen-sample-corpus.py --count 20 --seed 20261126 --clean` |
-| Git remote нет | `git remote add origin https://github.com/ykbojak-alt/iikuznitsa-sprint.git` |
+| Git remote нет | `git remote add origin https://github.com/ykbojak-alt/lex-kuznitsa.git` |
 | Репо приватно | Settings → Change visibility → Public (перед сдачей) |
 
 ---

@@ -13,6 +13,8 @@ LLM через NexusLink (основной путь) или локальную Q
 **Статус:** PREP phase — код продукта не пишется до старта спринта
 26.11.2026 10:00 МСК.
 
+**Репозиторий:** [github.com/ykbojak-alt/lex-kuznitsa](https://github.com/ykbojak-alt/lex-kuznitsa)
+
 ## Быстрый старт (5 команд)
 
 ```bash
