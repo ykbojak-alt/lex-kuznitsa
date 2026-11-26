@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -124,10 +125,8 @@ def chat(
             payload = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         detail = ""
-        try:
+        with contextlib.suppress(Exception):
             detail = exc.read().decode("utf-8", "replace")[:400]
-        except Exception:
-            pass
         raise LLMError(f"NexusLink HTTP {exc.code}: {detail or exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise LLMError(f"NexusLink недоступен ({url}): {exc}") from exc
@@ -140,7 +139,7 @@ def chat(
     message = choices[0].get("message") or {}
     content = (message.get("content") or "").strip()
     if not content:
-        reasoning = (message.get("reasoning") or "").strip()
+        (message.get("reasoning") or "").strip()
         usage = payload.get("usage") or {}
         hint = (
             f" (reasoning_tokens={usage.get('reasoning_tokens')}, "

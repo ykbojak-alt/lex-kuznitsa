@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lex.dialogue import (  # noqa: E402
+from lex.dialogue import (
     FORMAL_MARKERS,
     MAX_CLARIFY_ITERATIONS,
     MIN_CLARIFY_ITERATIONS,

@@ -22,8 +22,9 @@ import os
 import re
 import threading
 import urllib.request
-from collections import Counter, defaultdict
+from collections import Counter
 from copy import deepcopy
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -37,6 +38,19 @@ EMBED_MODEL = os.environ.get("LEX_EMBED_MODEL", "bge-m3")
 SIM_THRESHOLD = float(os.environ.get("LEX_SIM_THRESHOLD", "0.82"))
 SIM_MIN_COUNT = int(os.environ.get("LEX_SIM_MIN_COUNT", "3"))
 HOT_REFUSAL_RATE = float(os.environ.get("LEX_HOT_REFUSAL_RATE", "0.3"))
+ESCALATIONS_PATH = Path(os.environ.get("LEX_ESCALATIONS_PATH") or (ROOT / "var" / "escalations.jsonl"))
+
+# v1.15: чтение единое, запись только для службы качества и руководства.
+WRITE_ROLES = frozenset({"quality", "director"})
+
+
+def require_write(role: str | dict[str, Any] | None) -> bool:
+    """Проверка прав на запись (кейсы, документы, формы) для эндпоинтов."""
+    if isinstance(role, dict):
+        rid = str(role.get("id") or "")
+    else:
+        rid = str(role or "")
+    return rid in WRITE_ROLES
 
 _WRITE_LOCK = threading.Lock()
 _STATS_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -62,8 +76,8 @@ _PUNCT = re.compile(r"[^\w\s]+", re.UNICODE)
 
 
 def now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    from datetime import datetime
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def append_entry(entry: dict[str, Any], path: str | Path | None = None) -> str:

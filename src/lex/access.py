@@ -1,17 +1,12 @@
-"""LEX: фильтр прав доступа (контракт API-CONTRACT.md §§2, 4, 8, 11).
+"""LEX: модель прав (контракт API-CONTRACT.md §23, v1.15).
 
-Роль — список отделов + список систем + направления по умолчанию (``default_lines``).
-``*`` означает «все». Права обязательны по брифу организаторов: документ доступен
-только при пересечении **И** отдела, **И** бизнес-направления.
+**Чтение единое:** все роли видят весь корпус одинаково — фильтра по отделу и
+направлению больше нет. Отказ ``no_access`` из чтения исчез.
 
-Важно различать два состояния (§4):
-* ``no_access`` — документы по вопросу есть, но не для этой роли;
-* ``not_in_corpus`` — в корпусе вообще ничего не нашлось.
+**Запись** (кейсы, документы, формы) — только ``quality`` и ``director``.
 
-У документа без ``business_line`` (наш текущий корпус) направление считается
-``общее`` и не блокирует доступ (§11 «Что делать с нашим корпусом»).
-
-Только чтение: этот модуль не меняет чужие файлы и не пишет в корпус.
+``departments``/``default_lines`` в ROLE_DEFS сохранены: они нужны аналитике
+(кто о чём спрашивает) и предупреждениям в UI, но не влияют на выдачу.
 """
 
 from __future__ import annotations
@@ -27,10 +22,13 @@ MANIFEST_PATH = Path(
 )
 CASES_PATH = Path(os.environ.get("LEX_CASES_PATH") or (ROOT / "var" / "cases.jsonl"))
 
-GENERAL_LINE = "общее"
 ALL = "*"
+GENERAL_LINE = "общее"
+WRITE_ROLES = frozenset({"quality", "director"})
+READ_ROLES = frozenset({"lawyer", "quality", "it", "director"})
 
 # Роли и направления — данные для GET /api/roles (SPARK импортирует отсюда).
+# departments / default_lines НЕ фильтруют чтение (v1.15) — только аналитика.
 ROLE_DEFS: list[dict[str, Any]] = [
     {
         "id": "lawyer",
@@ -65,10 +63,7 @@ ROLE_DEFS: list[dict[str, Any]] = [
 BUSINESS_LINES: list[str] = [
     "закупки", "лицензирование", "качество", "хранение", "персонал", GENERAL_LINE,
 ]
-
-# «Все выше» — только руководитель; остальные роли равны по уровню.
 ROLE_RANK: dict[str, int] = {"lawyer": 1, "quality": 1, "it": 1, "director": 3}
-
 REASON_DEPARTMENT = "вне подразделения"
 REASON_LINE = "вне направления"
 
@@ -81,6 +76,29 @@ def get_role(role_id: str | dict[str, Any] | None) -> dict[str, Any] | None:
     return next((r for r in ROLE_DEFS if r.get("id") == role_id), None)
 
 
+def role_id_of(role: str | dict[str, Any] | None) -> str:
+    if isinstance(role, dict):
+        return str(role.get("id") or "")
+    return str(role or "")
+
+
+def can_read(role: str | dict[str, Any] | None) -> bool:
+    """Чтение: весь корпус доступен всем ролям (v1.15)."""
+    return True
+
+
+def can_write(role: str | dict[str, Any] | None) -> bool:
+    """Запись: только служба качества и руководство."""
+    return role_id_of(role) in WRITE_ROLES
+
+
+def require_write(role: str | dict[str, Any] | None) -> bool:
+    """Проверка для эндпоинтов записи (аналог journal.require_write)."""
+    return can_write(role)
+
+
+# --- аналитические срезы (НЕ влияют на выдачу) -------------------------------
+
 def departments_of(role: dict[str, Any] | None) -> list[str]:
     return list((role or {}).get("departments") or [])
 
@@ -90,7 +108,6 @@ def systems_of(role: dict[str, Any] | None) -> list[str]:
 
 
 def business_lines_of(role: dict[str, Any] | None) -> list[str]:
-    """Направления роли: явные business_lines, иначе default_lines (§11)."""
     role = role or {}
     lines = role.get("business_lines") or role.get("default_lines") or [ALL]
     return [str(x) for x in lines]
@@ -105,21 +122,20 @@ def doc_system(doc: dict[str, Any]) -> str:
 
 
 def doc_business_line(doc: dict[str, Any]) -> str:
-    """Без поля business_line — «общее», не блокируем (§11)."""
     return str(doc.get("business_line") or GENERAL_LINE)
 
 
-def _matches(value: str, allowed: list[str]) -> bool:
-    return ALL in allowed or value in allowed or (not value and ALL in allowed)
+def warning_for_doc(doc: dict[str, Any], role: dict[str, Any] | None) -> str | None:
+    """Информационное предупреждение «вне подразделения / вне направления».
 
-
-def access_reason(doc: dict[str, Any], role: dict[str, Any] | None) -> str | None:
-    """None — доступен; иначе причина отказа по конкретному признаку."""
-    if role is None:
-        return "роль не задана"
-    if not _matches(doc_department(doc), departments_of(role)):
+    Только для UI/аналитики: документ всё равно выдаётся (v1.15).
+    """
+    if role is None or ALL in departments_of(role):
+        return None
+    if doc_department(doc) not in departments_of(role):
         return REASON_DEPARTMENT
-    if not _matches(doc_business_line(doc), business_lines_of(role)):
+    lines = business_lines_of(role)
+    if ALL not in lines and doc_business_line(doc) not in lines:
         return REASON_LINE
     return None
 
@@ -157,99 +173,90 @@ def load_cases(path: str | Path | None = None) -> list[dict[str, Any]]:
 
 def filter_docs(
     documents: list[dict[str, Any]],
-    role: str | dict[str, Any] | None,
+    role: str | dict[str, Any] | None = None,
     *,
     candidates_total: int | None = None,
 ) -> dict[str, Any]:
-    """Фильтр документов по роли. Возвращает доступные + отчёт о правах.
+    """Единое чтение: все кандидаты отдаются независимо от роли.
 
-    ``documents`` — уже найденные по вопросу кандидаты. Пустой список =
-    ``not_in_corpus``; непустой, но всё отброшено = ``no_access``.
+    Пустой список кандидатов = ``not_in_corpus``; ``no_access`` больше не
+    возникает никогда (v1.15). ``permissions`` информационный: показываем
+    «чтение: полный корпус · запись: раз/reshena».
     """
     role_obj = get_role(role)
-    total = len(documents) if candidates_total is None else int(candidates_total)
-    allowed: list[dict[str, Any]] = []
-    reasons: dict[str, int] = {}
-    for doc in documents or []:
-        why = access_reason(doc, role_obj)
-        if why is None:
-            allowed.append(doc)
-        else:
-            reasons[why] = reasons.get(why, 0) + 1
-
-    refused = total > 0 and not allowed
-    refusal_kind = None
-    if refused:
-        refusal_kind = "no_access"
-    elif total == 0:
-        refusal_kind = "not_in_corpus"
-
+    docs = [d for d in (documents or []) if isinstance(d, dict)]
+    total = len(docs) if candidates_total is None else int(candidates_total)
+    writable = can_write(role_obj)
     permissions = {
+        "mode": "unified_read",
         "total": total,
-        "available": len(allowed),
-        "dropped": max(0, total - len(allowed)),
-        "by_reason": dict(reasons),
+        "available": total,
+        "dropped": 0,
+        "by_reason": {},
+        "read": "полный корпус",
+        "write": "разрешена" if writable else "недоступна",
+        "can_write": writable,
     }
     return {
-        "documents": allowed,
-        "allowed": allowed,
+        "documents": docs,
+        "allowed": docs,
         "permissions": permissions,
         "total": total,
-        "available": len(allowed),
-        "dropped": permissions["dropped"],
-        "reasons": dict(reasons),
-        "refused": refused,
-        "refusal_kind": refusal_kind,
+        "available": total,
+        "dropped": 0,
+        "reasons": {},
+        "refused": False,
+        "refusal_kind": "not_in_corpus" if total == 0 else None,
     }
 
 
-def case_allowed(
-    case: dict[str, Any],
-    role: dict[str, Any] | None,
-    accessible_doc_ids: set[str] | None = None,
-) -> bool:
-    """Кейс доступен, если его автор — роль пользователя/руководитель,
-    либо доступны связанные документы. Кейс руководителя виден всем; кейс
-    отдела — только своему отделу и всех выше (§8 +补充 v1.1)."""
-    if role is None:
-        return False
-    role_id = str(role.get("id") or "")
-    author = str(case.get("author_role") or "")
-    if role_id == "director" or ALL in departments_of(role):
-        return True
-    if author == role_id or author == "director":
-        return True
-    if ROLE_RANK.get(role_id, 0) > ROLE_RANK.get(author, 1):
-        return True
-    linked = {str(x) for x in (case.get("linked_docs") or [])}
-    if accessible_doc_ids and linked & accessible_doc_ids:
-        return True
-    return False
+def case_allowed(case: dict[str, Any], role: str | dict[str, Any] | None = None,
+                 accessible_doc_ids: set[str] | None = None) -> bool:
+    """Кейсы на чтение видит каждая роль; на запись — только WRITE_ROLES."""
+    return can_read(role)
 
 
-def filter_cases(
-    cases: list[dict[str, Any]],
-    role: str | dict[str, Any] | None,
-    *,
-    accessible_doc_ids: set[str] | None = None,
-) -> dict[str, Any]:
-    role_obj = get_role(role)
-    allowed = [c for c in (cases or []) if case_allowed(c, role_obj, accessible_doc_ids)]
-    total = len(cases or [])
+def filter_cases(cases: list[dict[str, Any]],
+                 role: str | dict[str, Any] | None = None,
+                 *, accessible_doc_ids: set[str] | None = None) -> dict[str, Any]:
+    items = [c for c in (cases or []) if isinstance(c, dict)]
+    total = len(items)
     return {
-        "cases": allowed,
+        "cases": items,
         "total": total,
-        "available": len(allowed),
-        "dropped": total - len(allowed),
-        "refused": total > 0 and not allowed,
-        "refusal_kind": "no_access" if total > 0 and not allowed else ("not_in_corpus" if total == 0 else None),
+        "available": total,
+        "dropped": 0,
+        "refused": False,
+        "refusal_kind": "not_in_corpus" if total == 0 else None,
     }
 
 
 __all__ = [
-    "ROLE_DEFS", "BUSINESS_LINES", "ROLE_RANK", "GENERAL_LINE", "ALL",
-    "REASON_DEPARTMENT", "REASON_LINE", "get_role", "departments_of", "systems_of",
-    "business_lines_of", "doc_department", "doc_system", "doc_business_line",
-    "access_reason", "load_manifest", "all_documents", "load_cases",
-    "filter_docs", "case_allowed", "filter_cases",
+    "ALL",
+    "BUSINESS_LINES",
+    "GENERAL_LINE",
+    "READ_ROLES",
+    "REASON_DEPARTMENT",
+    "REASON_LINE",
+    "ROLE_DEFS",
+    "ROLE_RANK",
+    "WRITE_ROLES",
+    "all_documents",
+    "business_lines_of",
+    "can_read",
+    "can_write",
+    "case_allowed",
+    "departments_of",
+    "doc_business_line",
+    "doc_department",
+    "doc_system",
+    "filter_cases",
+    "filter_docs",
+    "get_role",
+    "load_cases",
+    "load_manifest",
+    "require_write",
+    "role_id_of",
+    "systems_of",
+    "warning_for_doc",
 ]

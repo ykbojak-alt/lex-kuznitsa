@@ -75,12 +75,14 @@ STEP_COLORS: dict[str, str] = {
 
 RefusalKind = Literal[
     "no_edition_in_force",
-    "no_access",
     "not_in_corpus",
     "conflict_unresolved",
     # §17: не искали вовсе — вопрос не про базу организации. Отличать от
     # not_in_corpus: там тема наша, а ответа нет.
     "out_of_scope",
+    # §23: no_access из чтения исчез — если документ есть, его видно всем.
+    # Осталось про ОТСУТСТВИЕ обработки: скан без OCR честно помечается.
+    "ocr_unavailable",
 ]
 
 # Контракт §9: разная форма БД заказчика — текст, картинки, сканы.

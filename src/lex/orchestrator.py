@@ -21,15 +21,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import AsyncIterator, Iterable
 
 from . import caveat as caveat_mod
 from . import detail, editions, llm, policy, rerank
@@ -38,9 +39,8 @@ from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
 from .forms import get_form
 from .grounding import GroundingReport, check_grounding
-from .index import EmbeddingError, SearchIndex, embed_texts, get_index
-from .media import inspect_corpus, render_page
-from .tickets import get_ticket_store
+from .index import SearchIndex, embed_texts, get_index
+from .media import inspect_corpus
 from .models import (
     STEP_COLORS,
     STEP_ORDER,
@@ -54,6 +54,7 @@ from .models import (
     RefusalData,
     StepEvent,
 )
+from .tickets import get_ticket_store
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "sample-corpus"
@@ -343,7 +344,7 @@ class Orchestrator:
     def _should_escalate(self, payload: object, state: dict) -> bool:
         """§15: отказ «не нашлось» — повод для эскалации, а не для сдачи."""
         kind = getattr(payload, "kind", "")
-        return kind in ("not_in_corpus", "no_access")
+        return kind in ("not_in_corpus",)
 
     def _search_summary(self, state: dict, performed: bool = True) -> dict:
         """Что именно искали — это обязательная часть заявки (§15.2)."""
@@ -422,10 +423,8 @@ class Orchestrator:
             state["assumptions"] = ctx.get("assumptions") or []
             params = ctx.get("params") or {}
             if not self.opts.as_of and params.get("as_of"):
-                try:
+                with contextlib.suppress(ValueError):
                     self.opts.as_of = date.fromisoformat(str(params["as_of"]))
-                except ValueError:
-                    pass
             return None
         state["clarify_questions"] = questions
         return Signal("clarify", ClarifyData(
@@ -459,7 +458,6 @@ class Orchestrator:
             self.opts.question,
             self.opts.role_id,
             business_line=self.opts.business_line,
-            role_lines=policy.role_lines_from_id(self.opts.role_id),
         )
         state["policy"] = verdict
         if verdict.business_line:
@@ -486,11 +484,12 @@ class Orchestrator:
                 can_skip=False,
             )))
 
-        kind = "no_access" if verdict.kind == "no_access" else "out_of_scope"
+        # §23: no_access больше не существует — если документ есть, его видно
+        # всем. Остались out_of_scope (тема не наша) и clarify (направление).
         state["final"] = ("refusal", RefusalData(
             reason=verdict.reason,
             sources=[],
-            kind=kind,
+            kind="out_of_scope",
             searched={},            # §17: не искали — нечего показывать
             hint=verdict.detail,
         ))
@@ -531,21 +530,18 @@ class Orchestrator:
         return _step(n, "cases", det, self._t0)
 
     def _stage_permissions(self, n: int, state: dict) -> StepEvent | Signal:
-        # §12.4 п.3: права фильтруются ДО генерации.
+        """§23: шаг информационный, ничего не фильтрует.
+
+        Чтение единое — значит, весь корпус доступен любой роли, и «отброшено
+        N документов» больше не бывает. Шаг не убираем: он показывает, что
+        права продуманы, и отделяет чтение от записи.
+        """
         doc_hits = state.get("doc_hits") or []
-        allowed, dropped = self._filter_access(doc_hits)
-        state["allowed"] = allowed
-        state["dropped"] = dropped
-        det = f"доступно {len(allowed)} из {len(doc_hits)}, отброшено {dropped}"
-        if not allowed and doc_hits:
-            # Есть материал, но роли он недоступен — это no_access, не «не найдено».
-            state["final"] = ("refusal", RefusalData(
-                reason="Ни один найденный документ не доступен этой роли",
-                sources=[h.chunk.doc_id for h in doc_hits][:10],
-                kind="no_access",
-                searched=self._searched(state),
-                hint="Обратитесь к владельцу регламента или выберите роль с нужными правами",
-            ))
+        state["allowed"] = list(doc_hits)
+        state["dropped"] = 0
+        writable = policy.can_write(self.opts.role_id)
+        det = (f"чтение: полный корпус ({len(self.corpus.documents)} документов) · "
+               f"запись: {'разрешена' if writable else 'недоступна'}")
         return _step(n, "permissions", det, self._t0)
 
     def _stage_resolve(self, n: int, state: dict) -> StepEvent | Signal:
@@ -1015,9 +1011,7 @@ class Orchestrator:
             return str(verdict.reason)
         line = state.get("line") or ""
         frames = len(state.get("allowed") or [])
-        hits = len(state.get("doc_hits") or [])
-        if kind == "no_access":
-            return f"найдено {hits} документов по вопросу, ни один не доступен роли {self.opts.role_id}"
+        len(state.get("doc_hits") or [])
         if frames == 0:
             where = f" в направлении «{line}»" if line else ""
             return f"в корпусе нет документа{where}, покрывающего вопрос"
@@ -1142,7 +1136,7 @@ def journal_entry(
     """Запись журнала. §12.4 п.2: только идентификаторы, без содержимого и цитат."""
     return {
         "id": f"q-{uuid.uuid4().hex[:6]}",
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "role_id": opts.role_id,
         "question": opts.question,
         "refused": refused,

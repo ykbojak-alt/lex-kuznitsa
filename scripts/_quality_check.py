@@ -32,7 +32,7 @@ def cos(a, b) -> float:
     nb = math.sqrt(sum(x * x for x in b))
     if not na or not nb:
         return 0.0
-    return sum(x * y for x, y in zip(a, b)) / (na * nb)
+    return sum(x * y for x, y in zip(a, b, strict=False)) / (na * nb)
 
 
 def load_docs(limit_chars: int):
@@ -55,7 +55,7 @@ def main() -> int:
     args = ap.parse_args()
 
     docs = load_docs(args.doc_chars)
-    qs = [json.loads(l) for l in (CORPUS / "questions.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    qs = [json.loads(line) for line in (CORPUS / "questions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     qs = [q for q in qs if not q.get("refusal_expected")][: args.questions]
     print(f"документов: {len(docs)}, вопросов: {len(qs)}, doc_chars={args.doc_chars}")
 
@@ -73,7 +73,7 @@ def main() -> int:
     pairs_total = 0
     t1 = time.time()
     rerank_hit1 = 0
-    for q, qv in zip(qs, q_vecs):
+    for q, qv in zip(qs, q_vecs, strict=False):
         scored = sorted(((cos(qv, dv), i) for i, dv in enumerate(doc_vecs)), reverse=True)
         top = [i for _, i in scored[: args.top_k]]
         if docs[top[0]]["id"] == q["expected_doc_id"]:

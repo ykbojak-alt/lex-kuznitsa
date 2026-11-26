@@ -1,5 +1,6 @@
 """Скачивание моделей LEX в D:\\models (разовый скрипт, не часть серверов)."""
 import sys
+
 from huggingface_hub import snapshot_download
 
 ROOT = r"D:\models"

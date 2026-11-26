@@ -44,6 +44,20 @@ SLA_HOURS = {"normal": float(os.environ.get("LEX_SLA_HOURS", "48")),
 # §19.6: один кейс — наблюдение, три — сигнал.
 CR_MIN_CASES = int(os.environ.get("LEX_CR_MIN_CASES", "3"))
 
+# §22.4: обращение в службу качества в демо — имитация письма.
+# Домен example.invalid зарезервирован RFC 2606: письмо физически некуда отправить,
+# и это намеренно — демо публичное, реальные адреса подставлять нельзя.
+QUALITY_EMAIL = os.environ.get("QUALITY_EMAIL", "quality@example.invalid")
+EMAIL_MODE = os.environ.get("EMAIL_MODE", "simulated")
+EMPLOYEE_EMAIL_DOMAIN = os.environ.get("EMPLOYEE_EMAIL_DOMAIN", "example.invalid")
+
+
+def employee_email(role_id: str) -> str:
+    """Адрес задающего вопрос. В демо — из роли, на зарезервированном домене."""
+    local = "".join(ch if ch.isalnum() or ch in "-._" else "-"
+                    for ch in (role_id or "employee").lower()).strip("-") or "employee"
+    return f"{local}@{EMPLOYEE_EMAIL_DOMAIN}"
+
 
 def ensure_dirs() -> None:
     VAR_DIR.mkdir(parents=True, exist_ok=True)

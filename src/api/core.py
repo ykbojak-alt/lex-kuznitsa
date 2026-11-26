@@ -21,15 +21,15 @@ pydantic-модели из ``lex.models``; HTTP-слой превращает и
 """
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import datetime as dt
 import importlib
 import json
-import os
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from . import config, sse
 
@@ -351,7 +351,7 @@ def ingest() -> dict:
             stats = c.stats
             return {"ok": True, "documents": int(getattr(stats, "documents", 0)),
                     "chunks": int(getattr(stats, "chunks", 0)), "added": []}
-        except Exception as e:  # noqa: BLE001 — ошибку ядра отдаём как есть
+        except Exception as e:
             return {"ok": False, "documents": 0, "chunks": 0, "added": [], "error": str(e)}
     return {"ok": True, "documents": len(manifest_documents()), "chunks": 0,
             "added": [], "stub": True}
@@ -445,7 +445,9 @@ def _detail_id(entry: dict) -> str:
 
 async def stream_answer(question: str, role_id: str, as_of: str | None,
                         session_id: str | None = None,
-                        answers: dict | None = None) -> AsyncIterator[str]:
+                        answers: dict | None = None,
+                        tone: str = "plain",
+                        business_line: str | None = None) -> AsyncIterator[str]:
     """Поток SSE по сигналам ядра.
 
     Инварианты, которые держит этот слой:
@@ -468,6 +470,8 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
         "inference_path": inference_path,
         "as_of": as_of,
         "session_id": session_id,
+        "tone": tone,
+        "business_line": business_line,
     }
     failed = False
     closed_without_done = False
@@ -476,7 +480,8 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
         m = core_modules()["orchestrator"]
         if not core_ready():
             raise RuntimeError("ядро LEX (src/lex/orchestrator.py) недоступно")
-        opts = _run_options(question, role_id, as_of, session_id, answers)
+        opts = _run_options(question, role_id, as_of, session_id, answers,
+                            tone=tone, business_line=business_line)
         orch = m.Orchestrator(opts)
 
         async for signal in orch.run():
@@ -494,6 +499,14 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                 entry["refused"] = bool(data.get("refused", False))
                 if data.get("detail_id"):
                     entry["detail_id"] = data["detail_id"]
+                # §20.5: без этого аналитика оговорок всегда пустая
+                caveat = data.get("caveat")
+                if isinstance(caveat, dict) and caveat.get("level"):
+                    entry["caveat_level"] = caveat["level"]
+                    entry["caveat_reasons"] = [
+                        r.get("code") for r in caveat.get("reasons") or []
+                        if isinstance(r, dict) and r.get("code")
+                    ]
                 yield sse.answer(data)
             elif kind == "refusal":
                 entry["refused"] = True
@@ -508,11 +521,21 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
             elif kind == "escalate":
                 entry["escalated"] = True
                 entry["ticket"] = data.get("ticket")
-                yield sse.escalate(data)
+                # §22.2: карточка письма едет тем же событием
+                from . import mail
+
+                payload = dict(data)
+                payload.setdefault("channel", "email")
+                payload["email"] = mail.email_block({
+                    "question": question,
+                    "created_at": entry["ts"],
+                    "asker": {"role_id": role_id, "business_line": business_line or ""},
+                })
+                yield sse.escalate(payload)
             elif kind == "error":
                 raise RuntimeError(str(data.get("message", "ошибка ядра")))
             # done от ядра не транслируем: elapsed/journal_id наши (§2)
-    except Exception as e:  # noqa: BLE001 — ошибку отдаём клиенту кадром error
+    except Exception as e:
         failed = True
         entry["error"] = str(e)
         yield sse.error(str(e), "orchestrator")
@@ -521,10 +544,8 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
     entry["elapsed_ms"] = elapsed
     if not failed and not closed_without_done:
         yield sse.done(elapsed, inference_path, journal_id)
-    try:
+    with contextlib.suppress(Exception):
         journal_append(entry)
-    except Exception:
-        pass
 
 
 # ---------- раскрытие ответа (§13.1) ----------
@@ -564,14 +585,57 @@ def form(form_id: str) -> dict | None:
 
 
 def form_download(form_id: str) -> Path | None:
+    """Файл бланка. Если в корпусе файла нет — собираем бланк из описания полей.
+
+    Ядро (`download_form_path`) обещает бланк-описание, но возвращает None,
+    когда рядом с `forms.json` нет файла. Пустой 404 тут хуже: форма есть,
+    полей хватает на бланк, и это честная производная от данных корпуса,
+    а не выдумка.
+    """
     m = core_modules()["orchestrator"]
     fn = getattr(m, "download_form_path", None) if m is not None else None
     if fn is not None:
         try:
-            return fn(config.CORPUS_DIR, form_id)
+            path = fn(config.CORPUS_DIR, form_id)
         except Exception:
-            pass
-    return None
+            path = None
+        if path is not None and Path(path).is_file():
+            return Path(path)
+    return _form_blank(form_id)
+
+
+def _form_blank(form_id: str) -> Path | None:
+    data = form(form_id)
+    if data is None:
+        return None
+    fields = data.get("fields") or []
+    lines = [f"# {data.get('title') or form_id}", "",
+             f"Документ-основание: {data.get('doc_id') or '—'}", ""]
+    if fields:
+        lines.append("| Поле | Тип | Обязательное | Подсказка |")
+        lines.append("|---|---|---|---|")
+        for f in fields:
+            if not isinstance(f, dict):
+                continue
+            hint = f.get("hint") or f.get("pattern") or f.get("example") or ""
+            lines.append(f"| {f.get('label') or f.get('key')} | {f.get('type', 'text')} "
+                         f"| {'да' if f.get('required') else 'нет'} | {hint} |")
+        lines.append("")
+        lines.append("## Заполнение")
+        lines.append("")
+        for f in fields:
+            if isinstance(f, dict):
+                lines.append(f"- **{f.get('label') or f.get('key')}**: ______________________")
+    else:
+        lines.append("_Полей в описании формы нет._")
+    text = "\n".join(lines) + "\n"
+
+    config.ensure_dirs()
+    out_dir = config.VAR_DIR / "form-blanks"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{form_id}.md"
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def form_fill(form_id: str, values: dict) -> dict | None:

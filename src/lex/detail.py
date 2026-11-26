@@ -69,7 +69,7 @@ def shorten(text: str, *, max_chars: int = MAX_SHORT_CHARS,
     sentences = [s.strip() for s in _SENT_SPLIT.split(body) if s.strip()]
     picked: list[str] = []
     for sent in sentences[:max_sentences]:
-        candidate = " ".join(picked + [sent])
+        candidate = " ".join([*picked, sent])
         if len(candidate) > max_chars and picked:
             break
         picked.append(sent)

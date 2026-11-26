@@ -21,8 +21,10 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from . import policy
 
 # Порог «это уже система, а не случайность». Один случай — наблюдение,
 # три — сигнал (§19.6). Порог в конфиге, потому что в настоящей организации
@@ -33,7 +35,7 @@ STATUSES = ("proposed", "accepted", "rejected", "merged")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass
@@ -137,7 +139,7 @@ class ChangeRequestStore:
         return out
 
     def next_id(self, year: int | None = None) -> str:
-        prefix = f"CR-{year or datetime.now(timezone.utc).year}-"
+        prefix = f"CR-{year or datetime.now(UTC).year}-"
         n = 0
         for cid in self._items:
             if cid.startswith(prefix):
@@ -199,10 +201,19 @@ class ChangeRequestStore:
             return cr
 
     def set_status(self, cr_id: str, status: str, *, by: str = "",
-                   merged_doc: str = "") -> ChangeRequest:
-        """§19.4: статус меняет человек. Агент только фиксирует решение."""
+                   merged_doc: str = "", by_role: str = "") -> ChangeRequest:
+        """§19.4/§23.3: статус меняет человек, и только руководство.
+
+        Качество собирает доказательства, но не решает, менять ли норму —
+        поэтому здесь `director`, а не «качество или руководство».
+        """
         if status not in STATUSES:
             raise ValueError(f"status={status!r} не из {STATUSES}")
+        if by_role and not policy.can_write(by_role, action="decide"):
+            raise PermissionError(
+                f"роль {by_role!r} не может решать судьбу предложения: это "
+                f"доступно {sorted(policy.DECIDE_ROLES)}"
+            )
         cr = self._items.get(cr_id)
         if cr is None:
             raise KeyError(f"предложение {cr_id} не найдено")
@@ -285,7 +296,7 @@ def recheck_after_merge(cases, corpus, *, rule_key: str, as_of=None) -> list[str
     for case in cases.cases:
         if case.rule_key != rule_key or not case.deviates_from:
             continue
-        deviates, text = detect_deviation(
+        deviates, _text = detect_deviation(
             corpus, question=case.question, answer=case.answer_in_practice,
             rule_key=rule_key, as_of=as_of,
         )

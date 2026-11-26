@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .corpus import Corpus
-from .editions import resolve_rule
 from .models import Rule
 
 FieldType = str  # text | date | money | choice | number
@@ -249,7 +248,7 @@ def validate(form: Form, values: dict, *, corpus: Corpus | None = None) -> Valid
     filled: dict = {}
     missing: list[str] = []
 
-    by_key = {f.key: f for f in form.fields}
+    {f.key: f for f in form.fields}
     consistency = consistency_rules(corpus) if corpus is not None else []
 
     for f in form.fields:

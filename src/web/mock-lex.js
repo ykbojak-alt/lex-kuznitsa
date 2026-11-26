@@ -21,7 +21,7 @@
     { key: 'decompose', title: 'Разбор вопроса', detail: 'направление: закупки · 2 подвопроса: срок согласования; кто визирует', ms: 230 },
     { key: 'retrieve', title: 'Поиск', detail: 'BM25 12 · вектор 10 → топ 5 · текст 24 · картинки 2 · сканы 1 (1 с плохим распознаванием)', ms: 208 },
     { key: 'cases', title: 'Поиск по кейсам', detail: 'найдено 4 кейса, из них по теме 1', ms: 41 },
-    { key: 'permissions', title: 'Проверка прав', detail: 'доступно 5 из 12, отброшено 7', ms: 9 },
+    { key: 'permissions', title: 'Права доступа', detail: 'чтение: полный корпус (27 документов) · запись: недоступна', ms: 9 },
     { key: 'resolve', title: 'Действующая редакция', detail: '3 редакции, действует Р2 от 2026-06-01', ms: 14 },
     { key: 'conflict', title: 'Сопоставление', detail: 'конфликтов: 0', ms: 11 },
     { key: 'compose', title: 'Сборка ответа', detail: 'краткая выжимка · 3 цитаты · есть форма', ms: 960 },
@@ -294,14 +294,6 @@
     sources: ['ТЗ-ЭКЗ-СР01-Р1']
   };
 
-  var REFUSAL_ACCESS = {
-    reason: 'Документы по этому вопросу в базе есть, но роли «ИТ-служба» они недоступны: '
-      + 'они ведутся Юридическим отделом и относятся к направлению «закупки».',
-    kind: 'no_access',
-    searched: { documents: 27, cases: 4, business_lines: ['закупки'] },
-    hint: 'Смените роль или уточните направление',
-    sources: []
-  };
 
   var CLARIFY_QUESTIONS = [
     {
@@ -374,7 +366,7 @@
       steps[2].detail = 'направление: определить не удалось · 1 подвопрос';
       steps[3].detail = 'BM25 0 · вектор 2 → топ 0 · документов 0, кейсов 0';
       steps[4].detail = 'найдено 0 кейсов по теме';
-      steps[5].detail = 'доступно 5 из 12, отброшено 7';
+      steps[5].detail = 'чтение: полный корпус (27 документов) · запись: недоступна';
       steps[6].detail = 'не проверялась: нет найденных документов';
       steps[7].detail = 'сравнивать нечего';
       steps[8].detail = 'ответ не собран: нет ни одной цитаты';
@@ -391,12 +383,6 @@
       steps[9].detail = 'проверка не нужна: ответа нет';
     } else if (scenario === 'refusal-date') {
       steps[6].detail = '1 редакция, действует с 2026-02-01 — на дату отсчёта не действует';
-    } else if (scenario === 'refusal-access') {
-      steps[1].detail = 'в компетенции: да · направление: закупки · доступных документов 0';
-      steps[5].detail = 'доступно 0 из 12, отброшено 12 (направление закрыто для роли)';
-      steps[6].detail = 'не проверялась: нет доступных документов';
-      steps[8].detail = 'ответ не собран: нет доступных источников';
-      steps[9].detail = 'утверждений 0 · покрыто 0 · отказ: нет прав';
     } else if (scenario === 'clarify') {
       /* §10: шаг уточнения встаёт третьим (n=3) — дальше агент ждёт ответа. */
       steps[2] = { key: 'clarify', title: 'Уточнение', detail: 'нужна дата: в корпусе три редакции SR-01 · запрошено 2 параметра', ms: 190 };
@@ -426,10 +412,11 @@
     if (/2027|после нового года|следующ\w* год|редакц\w* 3|оговорк/i.test(q)) return 'caveat';
     if (/срочно|сегодня же|любой ценой/i.test(q)) return 'caveat-high';
     if (asOf && asOf < '2026-02-01') return 'refusal-date';
-    if (roleId === 'it' && /закупк|согласован|договор/i.test(q)) return 'refusal-access';
     var hasDate = answers && answers.as_of;
     var skippedDate = answers && Object.prototype.hasOwnProperty.call(answers, 'as_of') && !answers.as_of;
-    if (!asOf && !hasDate && !skippedDate && /срок/i.test(q)) return 'clarify';
+    /* §10: уточнение — на расплывчатый вопрос, а не на любой вопрос со словом «срок». */
+    var vague = String(q).replace(/\s+/g, ' ').trim().length <= 34 && /срок|сколько|когда/i.test(q);
+    if (!asOf && !hasDate && !skippedDate && vague) return 'clarify';
     if (hasDate && String(hasDate) < '2026-02-01') return 'refusal-date';
     if (/покрыт|усеч|отброш/i.test(q)) return 'verify-trimmed';
     return 'answer';
@@ -495,7 +482,6 @@
       if (scenario === 'refusal-nocorpus') guard(handlers.onRefusal)(clone(REFUSAL_NOT_IN_CORPUS));
       else if (scenario === 'refusal-outofscope') guard(handlers.onRefusal)(clone(REFUSAL_OUT_OF_SCOPE));
       else if (scenario === 'refusal-date') guard(handlers.onRefusal)(clone(REFUSAL_DATE));
-      else if (scenario === 'refusal-access') guard(handlers.onRefusal)(clone(REFUSAL_ACCESS));
       else if (scenario === 'escalate') {
         /* §18 + §22: агент сам создаёт тикет и «отправляет письмо» — в демо имитация. */
         var tk = createTicket(question, roleId, 'закупки');
@@ -615,13 +601,18 @@
     { id: 'персонал', title: 'Персонал', docs: 4 }
   ];
 
-  /* §2: роли, как отдаёт GET /api/roles. */
+  /* §23: роли. Чтение единое у всех; запись — quality/director.
+     departments и business_lines остаются для аналитики, на выдачу не влияют. */
   var ROLES = [
     { id: 'lawyer', title: 'Юридический отдел', departments: ['Юридический отдел'], business_lines: ['закупки', 'лицензирование'], systems: [] },
     { id: 'quality', title: 'Отдел качества', departments: ['Отдел качества'], business_lines: ['качество', 'хранение'], systems: [] },
+    { id: 'manager', title: 'Менеджер', departments: ['Производственный отдел'], business_lines: ['закупки', 'хранение'], systems: [] },
     { id: 'it', title: 'ИТ-служба', departments: ['ИТ-служба'], business_lines: ['персонал'], systems: [] },
     { id: 'director', title: 'Руководитель', departments: ['*'], business_lines: ['*'], systems: ['*'] }
   ];
+
+  /* §23.1: кто может писать в базу. */
+  function canWrite(roleId) { return roleId === 'quality' || roleId === 'director'; }
 
   /* §22: письмо в службу качества. Адреса — example.invalid по RFC 2606,
      режим simulated обязателен: реальной отправки нет. */
@@ -891,6 +882,7 @@
   global.MockLex = {
     stream: stream,
     roles: function () { return clone(ROLES); },
+    canWrite: canWrite,
     businessLines: function () { return clone(BUSINESS_LINES); },
     cases: function () { return clone(CASES); },
     expand: function (detailId) { return clone(EXPAND[detailId] || null); },
@@ -908,6 +900,6 @@
     answerTicket: answerTicket,
     closeTicket: closeTicket,
     scenarios: ['answer', 'caveat', 'caveat-high', 'clarify', 'refusal-nocorpus',
-      'refusal-outofscope', 'refusal-date', 'refusal-access', 'verify-trimmed', 'escalate']
+      'refusal-outofscope', 'refusal-date', 'verify-trimmed', 'escalate']
   };
 })(window);

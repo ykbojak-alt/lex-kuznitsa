@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Генератор синтетического обезличенного корпуса документов для спринта ИИкузницы.
 
 Зачем: RAG-контур должен провереняться на данных, похожих на заказчика, но
@@ -44,10 +43,10 @@ import hashlib
 import json
 import random
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable
 
 WATERMARK = "СИНТЕТИЧЕСКИЙ ДОКУМЕНТ — все данные вымышлены, реальных документов заказчика здесь нет."
 
@@ -641,6 +640,9 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
         )
     docs.extend(conflict_docs)
 
+    for d in docs:
+        d.business_line = business_line_for(d)
+
     manifest = {
         "generator": "demo/gen-sample-corpus.py",
         "seed": seed,
@@ -823,6 +825,28 @@ def _rule_answer(rule: dict, as_of: date) -> str | None:
         if date.fromisoformat(eff_str) <= as_of:
             value = rev_value
     return value
+
+
+def business_line_for(doc: Doc) -> str:
+    """Определить бизнес-направление по данным документа (контракт v1.12 §11)."""
+    t = f"{doc.title} {doc.rule_key} {doc.kind} {doc.subtype} {doc.system} {doc.dept}".lower()
+    if doc.rule_key == "SR-01" or "согласования заявки на закупку" in t or "автоматического одобрения заявки" in t:
+        return "закупки"
+    if doc.rule_key == "SR-02" or "хранения журнала заявок" in t or ("хранени" in t and "журнал" in t):
+        return "хранение"
+    if doc.rule_key == "SR-03":
+        return "закупки"
+    if "лицензирован" in t or "лицензи" in t:
+        return "лицензирование"
+    if "качеств" in t or ("входн" in t and "контрол" in t):
+        return "качество"
+    if "персонал" in t or "кадр" in t or ("рол" in t and "ответствен" in t):
+        return "персонал"
+    if "приёмки поступающей партии" in t or "рекламац" in t:
+        return "закупки"
+    if "договорных изменений" in t or "поставк" in t or "отгруз" in t or "производственного заказа" in t:
+        return "общее"
+    return "общее"
 
 
 def validate(out_dir: Path, manifest: dict, count: int) -> list[str]:

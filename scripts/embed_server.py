@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, List, Union
+from typing import Any
 
 # CPU-инференс: torch должен видеть только CPU, иначе sentence-transformers
 # полезет искать CUDA и упадёт на отсутствии библиотек.
@@ -35,7 +35,7 @@ DEFAULT_MODEL_PATH = r"D:\models\bge-m3"
 
 class EmbedRequest(BaseModel):
     model: str | None = None
-    input: Union[str, List[str]] = Field(...)
+    input: str | list[str] = Field(...)
     encoding_format: str | None = None  # принимаем, но всегда отдаём float
     dimensions: int | None = None       # принимаем для совместимости, игнорируем
     user: str | None = None
@@ -109,7 +109,7 @@ def models() -> dict:
     }
 
 
-def _as_texts(inp: Union[str, List[str]]) -> List[str]:
+def _as_texts(inp: str | list[str]) -> list[str]:
     if isinstance(inp, str):
         return [inp]
     if isinstance(inp, list) and all(isinstance(x, str) for x in inp):
@@ -133,7 +133,7 @@ def embeddings(req: EmbedRequest) -> dict:
             show_progress_bar=False,
             convert_to_numpy=True,
         )
-    except Exception as e:  # noqa: BLE001 — отдаём клиенту текст ошибки модели
+    except Exception as e:
         log.exception("encode failed")
         raise HTTPException(status_code=500, detail=f"encode failed: {e}") from e
 

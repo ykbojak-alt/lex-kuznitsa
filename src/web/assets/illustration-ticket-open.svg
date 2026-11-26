@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 90" fill="none" stroke="#202122" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="ticket-open-title">
+  <title id="ticket-open-title">Заявка принята в работу</title>
+  <path d="M26 11h39l12 12v47H26z"/>
+  <path d="M65 11v12h12M36 34h31M36 42h24M36 50h18" stroke="#54595d"/>
+  <path d="M35 60h16" stroke="#3366cc"/>
+  <circle cx="77" cy="59" r="15" fill="#f8f9fa" stroke="#a2a9b1"/>
+  <path d="M77 50v9l6 4" stroke="#3366cc"/>
+  <path d="M69 80h32m-5-5 5 5-5 5" stroke="#54595d"/>
+</svg>

@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Any
 
 try:  # порядок и цвета — из ядра, если оно есть
-    from lex.models import STEP_COLORS as _CORE_COLORS, STEP_ORDER as _CORE_ORDER
+    from lex.models import STEP_COLORS as _CORE_COLORS
+    from lex.models import STEP_ORDER as _CORE_ORDER
 
     _ORDER: tuple[str, ...] = tuple(_CORE_ORDER)
     _COLOR: dict[str, str] = dict(_CORE_COLORS)
@@ -77,7 +78,11 @@ def step(n: int, key: str, detail: str, ms: int) -> str:
 
 
 def answer(data: dict) -> str:
-    """§13.1: короткая выжимка + detail_id; полный текст тоже отдаём."""
+    """§13.1: короткая выжимка + detail_id; полный текст тоже отдаём.
+
+    §20.2: оговорка — соседнее с ``short`` поле ``caveat``, а не отдельное
+    событие. Оговорка не отменяет ответ (§20.3).
+    """
     payload = {
         "text": data.get("text", ""),
         "short": data.get("short") or data.get("text", ""),
@@ -86,6 +91,9 @@ def answer(data: dict) -> str:
         "citations": data.get("citations") or [],
         "refused": bool(data.get("refused")),
     }
+    caveat = data.get("caveat")
+    if caveat:
+        payload["caveat"] = caveat
     for key in ("practice_only", "notes", "assumptions", "session_id",
                 "grounding", "forms"):
         value = data.get(key)
@@ -118,8 +126,13 @@ def clarify(data: dict) -> str:
 
 
 def escalate(data: dict) -> str:
-    """§15.3/§18.4: заявка создана — вместо answer/refusal."""
-    return frame("escalate", {
+    """§15.3/§18.4: заявка создана — вместо answer/refusal.
+
+    §22.2: карточка письма — часть этого же события, ``delivery`` всегда
+    ``simulated``. Отправку сюда не подставляем даже если SMTP когда-нибудь
+    подключат: событие описывает то, что видит сотрудник в демо.
+    """
+    payload = {
         "ticket": data.get("ticket", ""),
         "iterations": int(data.get("iterations", 0) or 0),
         "reason": data.get("reason", ""),
@@ -128,7 +141,12 @@ def escalate(data: dict) -> str:
         "eta": data.get("eta", ""),
         "status": data.get("status", "open"),
         "case_id": data.get("case_id"),
-    })
+    }
+    email = data.get("email")
+    if email:
+        payload["channel"] = data.get("channel") or "email"
+        payload["email"] = email
+    return frame("escalate", payload)
 
 
 def done(elapsed_ms: int, inference_path: str, journal_id: str | None) -> str:

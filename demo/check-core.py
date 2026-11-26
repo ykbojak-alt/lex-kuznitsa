@@ -24,15 +24,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lex import caveat as caveat_mod  # noqa: E402
-from lex.cases import CaseStore, detect_deviation  # noqa: E402
-from lex.changes import ChangeRequestStore  # noqa: E402
-from lex.corpus import load_corpus  # noqa: E402
-from lex.grounding import check_grounding, extract_anchors  # noqa: E402
-from lex.models import STEP_ORDER  # noqa: E402
-from lex.orchestrator import Orchestrator, RunOptions  # noqa: E402
-from lex.policy import evaluate, role_lines_from_id  # noqa: E402
-from lex.tickets import get_ticket_store  # noqa: E402
+from lex import caveat as caveat_mod
+from lex import policy
+from lex.cases import detect_deviation
+from lex.changes import ChangeRequestStore
+from lex.corpus import load_corpus
+from lex.grounding import check_grounding, extract_anchors
+from lex.models import STEP_ORDER
+from lex.orchestrator import Orchestrator, RunOptions
+from lex.policy import evaluate
+from lex.tickets import get_ticket_store
 
 CORPUS = ROOT / "sample-corpus"
 PASS: list[str] = []
@@ -52,32 +53,39 @@ def check_steps() -> None:
     expected = ("accept", "policy", "decompose", "inspect", "retrieve", "cases",
                 "permissions", "resolve", "conflict", "compose", "verify")
     check("§17 шаги: policy вторым, 11 шагов",
-          STEP_ORDER == expected, f"{len(STEP_ORDER)} шагов: {' -> '.join(STEP_ORDER[:3])}…")
+          expected == STEP_ORDER, f"{len(STEP_ORDER)} шагов: {' -> '.join(STEP_ORDER[:3])}…")
 
 
 # --------------------------------------------------------------- 2. policy
 
 
 def check_policy(corpus) -> None:
-    v = evaluate(corpus, "Какой срок согласования заявки на закупку?", "lawyer",
-                 role_lines=role_lines_from_id("lawyer"))
-    check("§17 policy пропускает вопрос по базе", v.ok,
-          v.step_detail())
+    v = evaluate(corpus, "Какой срок согласования заявки на закупку?", "lawyer")
+    check("§17 policy пропускает вопрос по базе", v.ok, v.step_detail())
 
-    v = evaluate(corpus, "Какая ставка НДС в России?", "lawyer",
-                 role_lines=role_lines_from_id("lawyer"))
+    v = evaluate(corpus, "Какая ставка НДС в России?", "lawyer")
     check("§17 policy отсекает НДС как out_of_scope", v.kind == "out_of_scope",
           v.step_detail())
 
-    v = evaluate(corpus, "Как обычно делают в других компаниях?", "lawyer",
-                 role_lines=role_lines_from_id("lawyer"))
+    v = evaluate(corpus, "Как обычно делают в других компаниях?", "lawyer")
     check("§12.4/§17 внешняя практика — out_of_scope", v.kind == "out_of_scope",
           v.step_detail())
 
-    v = evaluate(corpus, "Какой срок согласования заявки на закупку?", "quality",
-                 role_lines=role_lines_from_id("quality"))
-    check("§17 роль без прав — no_access, не «не найдено»", v.kind == "no_access",
-          v.step_detail())
+    # §23: чтение единое — вопрос по закупкам проходит для любой роли.
+    v1 = evaluate(corpus, "Какой срок согласования заявки на закупку?", "quality")
+    v2 = evaluate(corpus, "Какой срок согласования заявки на закупку?", "lawyer")
+    check("§23 чтение единое: одинаковый вердикт для разных ролей",
+          v1.ok == v2.ok == True and v1.business_line == v2.business_line,  # noqa: E712
+          f"{v1.business_line} / {v2.business_line}")
+
+    check("§23 запись: quality может, lawyer нет",
+          policy.can_write("quality") and not policy.can_write("lawyer"),
+          f"quality={policy.can_write('quality')} lawyer={policy.can_write('lawyer')}")
+    check("§23 решение по предложению — только director",
+          policy.can_write("director", action="decide")
+          and not policy.can_write("quality", action="decide"),
+          "director=True quality=False")
+    check("§23 чтение открыто всем", policy.can_read("lawyer") and policy.can_read(""), "")
 
 
 # --------------------------------------------------- 3. барьеры §12 и §21
@@ -180,7 +188,7 @@ def check_case_vs_norm(corpus) -> None:
         corpus, rule_key="SR-01", answer="согласовали за 2 рабочих дня",
         question="Какой срок согласования заявки на закупку?", as_of=date(2026, 3, 1))
     check("§19.2 практика «2 дня» против нормы «3 дня» ловится",
-          bool(deviates) and "3" in text, text or "нет расхождения")
+          bool(deviates) and "ТЗ-ЭКЗ-СР01-Р1" in deviates, text or "нет расхождения")
 
     deviates, text = detect_deviation(
         corpus, rule_key="SR-01", answer="согласовали за 3 рабочих дня",
@@ -267,10 +275,13 @@ def check_flow(corpus) -> None:
     check("DoD сквозной: 11 шагов, policy второй",
           len(steps) == 11 and getattr(steps[1], "key", "") == "policy",
           f"{len(steps)} шагов, второй — {getattr(steps[1], 'key', '?')}")
-    text = (final.data.text if final and final.kind == "answer" else "")
+    answer = final.data if final and final.kind == "answer" else None
+    " ".join(c.quote for c in (answer.citations if answer else []))
+    r1 = [c for c in (answer.citations if answer else [])
+          if c.doc_id == "ТЗ-ЭКЗ-СР01-Р1" and "трёх рабочих дней" in c.quote]
     check("DoD сквозной: цитата «трёх рабочих дней» (Р1 от 2026-01-15)",
-          "трёх рабочих дней" in text,
-          "есть" if "трёх рабочих дней" in text else "нет в ответе")
+          bool(r1) and r1[0].revision == 1 and r1[0].effective == "2026-01-15",
+          f"цитат {len(answer.citations) if answer else 0}, Р1 найдена={bool(r1)}")
 
     out = asyncio.run(_run("Какой срок согласования заявки на закупку?",
                            as_of=date(2025, 12, 1)))
@@ -293,7 +304,7 @@ def check_flow(corpus) -> None:
         q = json.loads(line)["question"]
         try:
             out = asyncio.run(_run(q, as_of=date(2026, 3, 1)))
-        except Exception as exc:  # noqa: BLE001 — падение и есть предмет проверки
+        except Exception as exc:
             bad.append(f"{q[:40]}: {exc}")
             continue
         if not any(s.kind in ("answer", "refusal", "clarify") for s in out):

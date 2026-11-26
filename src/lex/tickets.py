@@ -22,8 +22,10 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from . import policy
 
 # Что вообще заслуживает тикета. Список закрытый: расширять его — решение
 # владельца контракта, а не удобство вызывающего кода.
@@ -37,7 +39,20 @@ SLA_HOURS_HIGH = float(os.environ.get("TICKET_SLA_HOURS_HIGH", "8"))
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _require_write(role_id: str, action: str) -> None:
+    """§23.3: запись — только качество и руководство. Нарушение — ошибка.
+
+    Пустая роль означает «не из API»: внутренние вызовы (оркестратор сам
+    создаёт тикет) прав не требуют, иначе §18.1 был бы невыполним.
+    """
+    if role_id and not policy.can_write(role_id):
+        raise PermissionError(
+            f"роль {role_id!r} не может {action}: запись доступна "
+            f"{sorted(policy.WRITE_ROLES)}"
+        )
 
 
 def _iso(dt: datetime) -> str:
@@ -213,9 +228,13 @@ class TicketStore:
             self._tickets[ticket.id] = ticket
             return ticket
 
-    def assign(self, ticket_id: str, assignee: str) -> Ticket:
+    def assign(self, ticket_id: str, assignee: str, *, by_role: str = "") -> Ticket:
         """Взять в работу. §18.3: один человек на тикет — предупреждение, но
-        не запрет: в реальности людей двое, а вопрос один."""
+        не запрет: в реальности людей двое, а вопрос один.
+
+        §23.3: назначение — запись, только качество и руководство.
+        """
+        _require_write(by_role, "назначить тикет")
         ticket = self._require(ticket_id)
         with self._lock:
             ticket.assignee = assignee
@@ -223,7 +242,8 @@ class TicketStore:
             self._append(ticket)
         return ticket
 
-    def answer(self, ticket_id: str, text: str) -> Ticket:
+    def answer(self, ticket_id: str, text: str, *, by_role: str = "") -> Ticket:
+        _require_write(by_role, "ответить на тикет")
         ticket = self._require(ticket_id)
         if not (text or "").strip():
             raise ValueError("пустой ответ не закрывает тикет")
@@ -233,7 +253,8 @@ class TicketStore:
             self._append(ticket)
         return ticket
 
-    def close(self, ticket_id: str, reason: str = "") -> Ticket:
+    def close(self, ticket_id: str, reason: str = "", *, by_role: str = "") -> Ticket:
+        _require_write(by_role, "закрыть тикет")
         ticket = self._require(ticket_id)
         with self._lock:
             ticket.closed_reason = reason or ticket.closed_reason
@@ -241,8 +262,9 @@ class TicketStore:
             self._append(ticket)
         return ticket
 
-    def link_case(self, ticket_id: str, case_id: str) -> Ticket:
+    def link_case(self, ticket_id: str, case_id: str, *, by_role: str = "") -> Ticket:
         """§18.5: ответ службы качества превращается в кейс — связь хранится."""
+        _require_write(by_role, "связать тикет с кейсом")
         ticket = self._require(ticket_id)
         with self._lock:
             ticket.case_id = case_id
@@ -301,8 +323,7 @@ class TicketStore:
 
 
 _STOP = frozenset(
-    """как какой какая какие что кто где когда почему сколько можно нужно надо
-    если ли для про при над под это этот эта эти есть или не""".split()
+    ["как", "какой", "какая", "какие", "что", "кто", "где", "когда", "почему", "сколько", "можно", "нужно", "надо", "если", "ли", "для", "про", "при", "над", "под", "это", "этот", "эта", "эти", "есть", "или", "не"]
 )
 _WORD_RE = re.compile(r"[а-яёa-z]{4,}")
 

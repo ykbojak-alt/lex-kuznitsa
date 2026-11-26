@@ -13,7 +13,7 @@ import mimetypes
 import re
 from pathlib import Path
 
-from . import config, core
+from . import core
 
 TEXT_EXT = {".md", ".txt", ".rst", ".csv", ".json", ".yaml", ".yml", ".html"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
@@ -132,7 +132,7 @@ def document_html(doc_id: str, role_id: str) -> str:
 
 def _toc_from_html(body: str) -> str:
     items = []
-    for level, title in re.findall(r"<h([1-3])[^>]*>(.*?)</h\1>", body, re.S):
+    for _level, title in re.findall(r"<h([1-3])[^>]*>(.*?)</h\1>", body, re.S):
         text = re.sub(r"<[^>]+>", "", title).strip()
         if text:
             items.append(f'<li><a href="#{_anchor(text)}">{html.escape(text)}</a></li>')

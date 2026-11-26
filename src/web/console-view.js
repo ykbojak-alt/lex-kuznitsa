@@ -45,6 +45,10 @@
     var meta = STEP_META[key] || {};
     var cls = 'step step--' + key;
     if (!isLast) cls += ' step--old';
+    /* §20.4: шаг verify с оговоркой красится уровнем; high — оранжевый, заметнее. */
+    if (key === 'verify' && step.caveat_level) {
+      cls += ' step--verify-caveat step--verify-caveat--' + step.caveat_level;
+    }
 
     var row = el('div', cls);
     row.setAttribute('role', 'listitem');

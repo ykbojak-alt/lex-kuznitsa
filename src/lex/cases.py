@@ -20,12 +20,13 @@ import json
 import os
 import re
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 from .models import Chunk
+from .policy import WRITE_ROLES, can_write
 
 OUTCOMES = ("resolved", "escalated", "rejected", "open")
 CONTENT_TYPES = ("text", "image", "scan", "mixed")
@@ -196,7 +197,17 @@ class CaseStore:
         deviation: str = "",
         corpus=None,
         as_of=None,
+        by_role: str = "",
     ) -> Case:
+        """§23.3: добавление кейса — запись, значит нужна роль качества или
+        руководства. ``by_role=""`` означает «не из API» (внутренний вызов,
+        например подтверждение тикета после проверки прав выше по стеку).
+        """
+        if by_role and not can_write(by_role):
+            raise PermissionError(
+                f"роль {by_role!r} не может добавлять кейсы: запись доступна "
+                f"{sorted(WRITE_ROLES)}"
+            )
         question = (question or "").strip()
         answer = (answer_in_practice or "").strip()
         if not question:
@@ -227,7 +238,7 @@ class CaseStore:
                 raise ValueError(f"кейс {cid} уже есть")
             case = Case(
                 id=cid,
-                ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ts=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 author_role=author_role or "",
                 author_name=author_name or "",
                 question=question,
@@ -243,7 +254,7 @@ class CaseStore:
                 deviation=deviation_text,
                 confirmed_by=confirmed_by or "",
                 confirmed_at=(
-                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                     if confirmed_by else ""
                 ),
             )
@@ -335,6 +346,13 @@ def detect_deviation(
     практике назван другой срок по тому же правилу — это и есть расхождение.
     """
     from . import editions  # локально: cases не должен тянуть цикл импортов
+
+    # §19.2: сверяем с редакцией, действующей НА ДАТУ, а не с самой свежей
+    # существующей. ``as_of=None`` у ``resolve_rule`` означал бы «последняя
+    # редакция корпуса» — то есть будущую, ещё не вступившую в силу. Кейс
+    # противоречит тому, что действует сейчас.
+    if as_of is None:
+        as_of = datetime.now(UTC).date()
 
     key = (rule_key or "").strip()
     doc_ids: list[str] = []

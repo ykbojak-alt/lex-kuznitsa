@@ -18,9 +18,9 @@ import datetime as dt
 import json
 import re
 import threading
-import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from . import config, core
 
@@ -78,13 +78,13 @@ def _append(kind: str, row: dict) -> None:
 
 
 def _now() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_ts(value: str) -> dt.datetime | None:
     try:
         return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=dt.timezone.utc)
+            tzinfo=dt.UTC)
     except Exception:
         return None
 
@@ -101,7 +101,7 @@ def _next_esc_id(rows: list[dict]) -> str:
 
 
 def _next_ticket_id(rows: list[dict]) -> str:
-    year = dt.datetime.now(dt.timezone.utc).year
+    year = dt.datetime.now(dt.UTC).year
     best = 0
     for r in rows:
         m = re.fullmatch(r"LEX-(\d{4})-(\d+)", str(r.get("id", "")))
@@ -203,7 +203,7 @@ def create_ticket(payload: dict) -> dict:
                              and r.get("status") != "closed"), None)
             if existing is not None:
                 return existing
-        created = dt.datetime.now(dt.timezone.utc)
+        created = dt.datetime.now(dt.UTC)
         row = {
             "id": _next_ticket_id(rows),
             "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -243,7 +243,7 @@ def list_tickets(status: str | None = None, business_line: str | None = None,
         if "*" not in lines:
             rows = [r for r in rows
                     if (r.get("asker") or {}).get("business_line") in lines
-                    or r.get("session_id") and r.get("asker", {}).get("role_id") == role_id]
+                    or (r.get("session_id") and r.get("asker", {}).get("role_id") == role_id)]
     return rows[::-1][:limit]
 
 

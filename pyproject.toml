@@ -1,0 +1,48 @@
+[project]
+name = "lex-kuznitsa"
+version = "0.1.0"
+description = "LEX — агент поиска ответов по корпоративным регламентам (ИИкузница, спринт 26-28.11.2026)"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# Без этого ruff 0.17+ включает все 814 правил по умолчанию — CI красный
+# на стиле, а не на ошибках. Набор ниже — осознанный.
+extend-exclude = [".ruff_cache", "var", "sample-corpus", "docs", "__pycache__"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes — реальные ошибки (неопределённые имена, лишние импорты)
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+
+ignore = [
+    "E501",    # длину строк проверяет line-length, но не блокирует — тексты русские
+    "B008",    # вызов в значении по умолчанию — осознанно в FastAPI (Depends)
+    "SIM108",  # тернарник не всегда читается лучше
+    "RUF001",  # неоднозначные юникод-символы — у нас русский текст, это норма
+    "RUF002",
+    "RUF003",
+    "SIM105",  # try/except/pass с пояснительным комментарием читается лучше suppress()
+    "SIM113",  # индексная переменная нужна явно при двойном обходе
+    "SIM102",  # вложенный if иногда разделяет две разные проверки
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Демо-скрипты: sys.path.insert перед импортами ядра — намеренно.
+"demo/*.py" = ["E402"]
+"src/api/app.py" = ["E402"]
+# Тесты и самопроверки: assert и «широкий» except допустимы.
+"demo/check-*.py" = ["BLE001", "S110", "S112"]
+"src/api/selfcheck.py" = ["F841", "B007"]
+# demo_stand держит хендл лога весь прогон и закрывает вручную — это by design.
+"demo/demo_stand.py" = ["SIM115"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lex", "api"]

@@ -23,12 +23,15 @@ _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from . import (  # noqa: E402
+from . import (
     cases as cases_mod,
+)
+from . import (
     changes,
     config,
     core,
     documents,
+    mail,
     preview,
     probes,
     tickets,
@@ -56,8 +59,8 @@ app.add_middleware(
 # ---------- схемы ----------
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    role_id: str = Field(..., min_length=1)
+    question: str = ""
+    role_id: str = ""
     as_of: str | None = None
     session_id: str | None = None
     answers: dict | None = None
@@ -65,8 +68,8 @@ class AskRequest(BaseModel):
 
 
 class CaseRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    answer_in_practice: str = Field(..., min_length=1)
+    question: str = ""
+    answer_in_practice: str = ""
     outcome: str = "open"
     author_role: str = ""
     author_name: str = "—"
@@ -77,7 +80,7 @@ class CaseRequest(BaseModel):
 
 
 class ExpandRequest(BaseModel):
-    detail_id: str = Field(..., min_length=1)
+    detail_id: str = ""
     section: str = "all"
 
 
@@ -87,7 +90,7 @@ class FillRequest(BaseModel):
 
 
 class TicketRequest(BaseModel):
-    question: str = Field(..., min_length=1)
+    question: str = ""
     kind: str = "not_in_corpus"
     priority: str = "normal"
     session_id: str = ""
@@ -100,8 +103,10 @@ class TicketRequest(BaseModel):
 
 
 class EscalateRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    why_unresolved: str = Field(..., min_length=1)
+    # Обязательность проверяет tickets.create_escalation и отвечает 400 по §15.2.
+    # Если объявить Field(...) здесь, FastAPI вернёт 422 — контракт этого не разрешает.
+    question: str = ""
+    why_unresolved: str = ""
     kind: str = "not_in_corpus"
     session_id: str = ""
     role_id: str = ""
@@ -111,12 +116,18 @@ class EscalateRequest(BaseModel):
 
 
 class AnswerRequest(BaseModel):
-    answer: str = Field(..., min_length=1)
+    answer: str = ""
+    resolved_by: str = "quality"
+
+
+class ReplyRequest(BaseModel):
+    """§22.3: почтовый клиент присылает `body`, а не `answer`."""
+    body: str = ""
     resolved_by: str = "quality"
 
 
 class AssignRequest(BaseModel):
-    assignee: str = Field(..., min_length=1)
+    assignee: str = ""
     force: bool = False
 
 
@@ -125,14 +136,14 @@ class CloseRequest(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    case: dict
+    case: dict = Field(default_factory=dict)
     acknowledge_warnings: bool = False
     editor_role: str = ""
 
 
 class ChangeStatusRequest(BaseModel):
-    status: str
-    by: str
+    status: str = ""
+    by: str = ""
 
 
 # ---------- health / роли / направления ----------
@@ -150,6 +161,7 @@ async def health() -> dict:
                 "engine": documents.ocr_engine(), "lang": "rus"},
         "cases": {"count": cases_mod.count()},
         "tickets": {"open": len(tickets.list_tickets(status="open"))},
+        "email": mail.stats(),
         "corpus": {**core.corpus_stats(), "content_types": core.content_type_mix()},
         "core": {"ready": core.core_ready()},
     }
@@ -163,7 +175,7 @@ def get_roles() -> list[dict]:
 @app.get("/api/business-lines")
 def get_business_lines() -> list[dict]:
     """§11: направления из данных ядра, иначе — производные от корпуса."""
-    m = core.core_modules()["orchestrator"]
+    core.core_modules()["orchestrator"]
     policy_mod = core._try("lex.policy")
     c = core.corpus()
     if policy_mod is not None and c is not None and hasattr(policy_mod, "available_lines"):
@@ -178,6 +190,8 @@ def get_business_lines() -> list[dict]:
 
 @app.post("/api/ask")
 async def ask(req: AskRequest):
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="question обязателен")
     if req.role_id not in core.role_ids():
         raise HTTPException(status_code=400, detail=f"неизвестная роль: {req.role_id}")
     if req.as_of:
@@ -189,7 +203,7 @@ async def ask(req: AskRequest):
             raise HTTPException(status_code=400, detail="as_of должен быть YYYY-MM-DD") from None
 
     gen = core.stream_answer(req.question, req.role_id, req.as_of,
-                             req.session_id, req.answers)
+                             req.session_id, req.answers, req.tone)
     return StreamingResponse(
         gen,
         media_type="text/event-stream",
@@ -213,6 +227,7 @@ def get_journal(limit: int = Query(50, ge=1, le=1000),
 def get_analytics() -> dict:
     """§2 + §11 + §16.6 + §18.6 + §19.5 + §20.5 + §13 similar_questions."""
     base = core.analytics()
+    caveats = _caveats(base)
     base.update({
         "by_business_line": _by_business_line(),
         "missing_by_line": _missing_by_line(base),
@@ -220,7 +235,10 @@ def get_analytics() -> dict:
         "knowledge_loop": _knowledge_loop(),
         "tickets": _tickets_analytics(),
         "change_requests": changes.analytics(),
-        "caveats": _caveats(base),
+        "caveats": caveats,
+        # §20.5: самая честная метрика продукта — на верхнем уровне,
+        # чтобы её не приходилось выковыривать из блока оговорок.
+        "answer_rate": caveats["answer_rate"],
     })
     return base
 
@@ -330,12 +348,12 @@ def _tickets_analytics() -> dict:
     breached = 0
     import datetime as dt
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
 
     def _ts(value) -> dt.datetime | None:
         try:
             return dt.datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=dt.timezone.utc)
+                tzinfo=dt.UTC)
         except Exception:
             return None
 
@@ -375,9 +393,14 @@ def _tickets_analytics() -> dict:
 
 
 def _caveats(base: dict) -> dict:
-    """§20.5: оговорки по журналу. Уровни пишет ядро в запись журнала."""
+    """§20.5: оговорки по журналу.
+
+    Ключи `caveat_level` / `caveat_reasons` пишет транспорт (`core.stream_answer`):
+    ядро отдаёт оговорку вложенно в `AnswerData.caveat`, а в журнал сам её не
+    кладёт. Уровни, которых не было, отдаём нулями — UI не должен падать.
+    """
     rows = core.journal_read(limit=100_000)
-    by_level: dict[str, int] = {}
+    by_level = {"low": 0, "medium": 0, "high": 0}
     by_reason: dict[str, int] = {}
     caveated = 0
     refused = 0
@@ -386,11 +409,14 @@ def _caveats(base: dict) -> dict:
         level = r.get("caveat_level")
         if level:
             caveated += 1
-            by_level[str(level)] = by_level.get(str(level), 0) + 1
-            for reason in r.get("caveat_reasons") or []:
-                code = reason.get("code") if isinstance(reason, dict) else str(reason)
-                if code:
-                    by_reason[str(code)] = by_reason.get(str(code), 0) + 1
+            if level in by_level:
+                by_level[level] += 1
+            else:
+                by_level[str(level)] = by_level.get(str(level), 0) + 1
+            for code in r.get("caveat_reasons") or []:
+                key = code.get("code") if isinstance(code, dict) else str(code)
+                if key:
+                    by_reason[key] = by_reason.get(key, 0) + 1
         elif r.get("refused"):
             refused += 1
         else:
@@ -413,6 +439,8 @@ def post_ingest() -> dict:
 
 @app.post("/api/expand")
 def post_expand(req: ExpandRequest) -> dict:
+    if not req.detail_id.strip():
+        raise HTTPException(status_code=400, detail="detail_id обязателен")
     data = core.expand(req.detail_id, req.section)
     if data is None:
         raise HTTPException(
@@ -548,7 +576,7 @@ def doc_preview(doc_id: str, page: int = Query(1, ge=1), role_id: str = Query("l
 @app.post("/api/tickets")
 def post_ticket(req: TicketRequest) -> dict:
     try:
-        return tickets.create_ticket(req.model_dump())
+        return mail.decorate(tickets.create_ticket(req.model_dump()))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
 
@@ -557,8 +585,9 @@ def post_ticket(req: TicketRequest) -> dict:
 def get_tickets(status: str | None = None, business_line: str | None = None,
                 assignee: str | None = None, role_id: str | None = None,
                 limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
-    return tickets.list_tickets(status=status, business_line=business_line,
-                                assignee=assignee, role_id=role_id, limit=limit)
+    return [mail.decorate(r) for r in tickets.list_tickets(
+        status=status, business_line=business_line,
+        assignee=assignee, role_id=role_id, limit=limit)]
 
 
 def _ticket_or_404(tid: str) -> dict:
@@ -570,13 +599,13 @@ def _ticket_or_404(tid: str) -> dict:
 
 @app.get("/api/tickets/{tid}")
 def get_ticket(tid: str) -> dict:
-    return _ticket_or_404(tid)
+    return mail.decorate(_ticket_or_404(tid))
 
 
 @app.post("/api/tickets/{tid}/assign")
 def assign_ticket(tid: str, req: AssignRequest) -> dict:
     try:
-        return tickets.assign_ticket(tid, req.assignee, force=req.force)
+        return mail.decorate(tickets.assign_ticket(tid, req.assignee, force=req.force))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
     except PermissionError as e:
@@ -588,7 +617,7 @@ def assign_ticket(tid: str, req: AssignRequest) -> dict:
 @app.post("/api/tickets/{tid}/answer")
 def answer_ticket(tid: str, req: AnswerRequest) -> dict:
     try:
-        return tickets.answer_ticket(tid, req.answer, req.resolved_by)
+        return mail.decorate(tickets.answer_ticket(tid, req.answer, req.resolved_by))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
     except ValueError as e:
@@ -598,9 +627,46 @@ def answer_ticket(tid: str, req: AnswerRequest) -> dict:
 @app.post("/api/tickets/{tid}/close")
 def close_ticket(tid: str, req: CloseRequest) -> dict:
     try:
-        return tickets.close_ticket(tid, req.reason)
+        return mail.decorate(tickets.close_ticket(tid, req.reason))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
+
+
+# ---------- входящие службы качества (§22.3) ----------
+
+@app.get("/api/inbox")
+def get_inbox(status: str | None = None, role_id: str | None = None,
+              limit: int = Query(100, ge=1, le=1000)) -> dict:
+    """Входящие как почтовый ящик: обёртка над тикетами, своего хранилища нет."""
+    try:
+        letters = mail.list_inbox(status=status, role_id=role_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    return {
+        "mode": config.EMAIL_MODE,
+        "mailbox": config.QUALITY_EMAIL,
+        "delivery": "simulated",
+        "stats": mail.stats(),
+        "letters": letters,
+    }
+
+
+@app.get("/api/inbox/{tid}")
+def get_inbox_letter(tid: str) -> dict:
+    letter = mail.open_letter(tid)
+    if letter is None:
+        raise HTTPException(status_code=404, detail=f"письмо не найдено: {tid}")
+    return letter
+
+
+@app.post("/api/inbox/{tid}/reply")
+def reply_inbox(tid: str, req: ReplyRequest) -> dict:
+    try:
+        return mail.reply(tid, req.body, req.resolved_by)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"письмо не найдено: {tid}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @app.get("/api/tickets/{tid}/draft")
@@ -608,7 +674,7 @@ def ticket_draft(tid: str) -> dict:
     data = tickets.ticket_draft(tid)
     if data is None:
         raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}")
-    return data
+    return data | {"email": mail.email_block(_ticket_or_404(tid)), "channel": "email"}
 
 
 @app.post("/api/tickets/{tid}/confirm")

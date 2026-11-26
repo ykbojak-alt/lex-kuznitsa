@@ -12,8 +12,8 @@ import datetime as dt
 import json
 import re
 import threading
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from . import config, core
 
@@ -58,11 +58,11 @@ def _write_all(rows: Iterable[dict]) -> None:
 
 
 def _now() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _next_id(rows: list[dict]) -> str:
-    year = dt.datetime.now(dt.timezone.utc).year
+    year = dt.datetime.now(dt.UTC).year
     best = 0
     for r in rows:
         m = re.fullmatch(r"CR-(\d{4})-(\d+)", str(r.get("id", "")))

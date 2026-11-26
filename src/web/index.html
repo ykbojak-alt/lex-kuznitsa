@@ -111,8 +111,11 @@
     </div>
   </main>
 
-  <aside class="console" aria-label="Console Lex, шаги агента">
-    <section class="infobox" aria-labelledby="ibTitle">
+  <aside class="console" id="console" aria-label="Console Lex, шаги агента">
+    <button class="console__toggle" type="button" id="consoleToggle" aria-expanded="true" aria-controls="consolePanel">
+      Шаги агента
+    </button>
+    <section class="infobox" id="consolePanel" aria-labelledby="ibTitle">
       <h2 class="infobox__title" id="ibTitle">Шаги агента</h2>
       <div class="infobox__cap">
         <button class="linkish" type="button" id="srcBadge"

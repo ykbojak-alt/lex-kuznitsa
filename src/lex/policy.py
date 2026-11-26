@@ -1,17 +1,19 @@
-"""Policy на входе (контракт §17, v1.9).
+"""Policy на входе (контракт §17 v1.9, упрощён §23 v1.15).
 
 Владелец: «Policy на входе должен проверять: касается ли вообще вопрос его
 компетенции и роли спрашивающего».
 
-Это проверка **до всякого поиска**: не «нашли, но не покажем», а «не ищем
-вообще». Три независимых вопроса, все должны пройти:
+**§23 отменил вторую половину этого требования:** «Права доступа к базе на
+чтение у пользователей единые». Значит, проверять «роль имеет доступ к
+направлению» больше не нужно — при едином чтении каждый видит весь корпус.
+
+Остаются две проверки:
 
 1. тема в компетенции — иначе ``refusal.kind = out_of_scope``;
-2. роль имеет доступ к направлению — иначе ``no_access``;
-3. направление определимо — иначе ``clarify``.
+2. направление определимо — иначе ``clarify``.
 
-Порядок важен: сначала «наша ли тема», потом «можно ли этой роли». Иначе вопрос
-про НДС получит «нет доступа» — это дезинформирует.
+Итог: ``in_scope`` (да/нет) + ``business_line`` (определено/нет).
+Отказ ``no_access`` из чтения исчез: если документ существует, его видно всем.
 
 Определение — по данным, а не «моделью на глаз»: статьи направления
 (``docs/db/ARTICLES-DRAFT.md``, синонимы) и дешёвый BM25 по названиям и первым
@@ -23,9 +25,8 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from .corpus import Corpus, estimate_tokens
+from .corpus import Corpus
 from .index import tokenize
 
 # Порог близости к направлению: сколько терминов вопроса должно совпасть со
@@ -69,8 +70,7 @@ BUSINESS_LINES: dict[str, dict] = {
 # Слова, которые не должны выдавать «в компетенции» сами по себе: они есть в
 # любом регламенте и потому ничего не говорят о теме.
 _GENERIC = frozenset(
-    """документ регламент порядок процедур срок сроки какой какая какие сколько
-    нужно надо можн должно должн организац компани систем контур работа процесс""".split()
+    ["документ", "регламент", "порядок", "процедур", "срок", "сроки", "какой", "какая", "какие", "сколько", "нужно", "надо", "можн", "должно", "должн", "организац", "компани", "систем", "контур", "работа", "процесс"]
 )
 
 
@@ -97,7 +97,7 @@ class PolicyVerdict:
     lines_available: list[str] = field(default_factory=list)
     reason: str = ""
     detail: str = ""
-    kind: str = ""  # "" | out_of_scope | no_access | need_clarify
+    kind: str = ""  # "" | out_of_scope | need_clarify
     matched_terms: list[str] = field(default_factory=list)
 
     @property
@@ -107,12 +107,10 @@ class PolicyVerdict:
     def step_detail(self) -> str:
         if self.kind == "out_of_scope":
             return f"ВНЕ КОМПЕТЕНЦИИ: база не покрывает «{self.business_line or 'эту тему'}»"
-        if self.kind == "no_access":
-            return f"нет доступа роли к направлению {self.business_line}"
         if self.kind == "need_clarify":
             return "направление не определено — нужно уточнение"
         line = self.business_line or "—"
-        return f"в компетенции: да · направление: {line} · доступно {self.accessible_docs} документов"
+        return f"в компетенции: да · направление: {line}"
 
 
 def available_lines(corpus: Corpus) -> list[dict]:
@@ -169,7 +167,7 @@ def _coverage(corpus: Corpus, question: str) -> float:
         if path and path.exists():
             try:
                 raw = path.read_text(encoding="utf-8")
-                head = raw[: int(1200)]  # примерно первые абзацы
+                head = raw[: 1200]  # примерно первые абзацы
             except OSError:
                 head = ""
         terms = set(tokenize(f"{doc.title} {head}")) - _GENERIC
@@ -186,16 +184,14 @@ def evaluate(
     role_id: str = "lawyer",
     *,
     business_line: str | None = None,
-    role_lines: list[str] | None = None,
-    accessible: dict[str, int] | None = None,
 ) -> PolicyVerdict:
-    """Три проверки §17.2 по порядку: тема -> роль -> определимость.
+    """Две проверки §23: тема в компетенции -> направление определимо.
 
-    ``accessible`` — сколько документов направления роль видит (считает
-    access.py, если он есть; без него — все документы направления).
+    Проверки «роль допущена к направлению» больше нет — §23 сделал чтение
+    единым для всех ролей. ``role_id`` остаётся в сигнатуре для аналитики
+    (кто о чём спрашивает), но на выдачу не влияет.
     """
     lines = available_lines(corpus)
-    line_counts = {x["id"]: x["docs"] for x in lines}
     known = [x["id"] for x in lines if x["docs"] >= POLICY_MIN_LINES]
 
     # 0. §12.4 п.4: вопрос про внешнюю практику — не наша база знаний.
@@ -220,37 +216,7 @@ def evaluate(
             detail="База покрывает: " + ", ".join(known),
         )
 
-    # 2. Роль имеет доступ к направлению.
-    allowed_lines = role_lines if role_lines is not None else known
-    if business_line is None and line is not None:
-        scoped = accessible or {}
-        if line not in allowed_lines and "*" not in allowed_lines:
-            return PolicyVerdict(
-                in_scope=True, business_line=line, score=round(score, 3),
-                coverage=round(coverage, 3), lines_available=known, matched_terms=hits,
-                kind="no_access",
-                reason=f"Вопрос относится к направлению «{line}», но роль {role_id} к нему не допущена",
-                detail="Доступные направления: " + ", ".join(allowed_lines or ["—"]),
-            )
-        docs = scoped.get(line, line_counts.get(line, 0))
-        if docs < POLICY_MIN_LINES:
-            # Нет документов направления в корпусе — это «не покрыто», а не
-            # «нет доступа»: права тут ни при чём, материала просто нет. Для
-            # сотрудника разница важная: «пополните базу» vs «вам не положено».
-            return PolicyVerdict(
-                in_scope=True, business_line=line, score=round(score, 3),
-                coverage=round(coverage, 3), lines_available=known, matched_terms=hits,
-                kind="out_of_scope",
-                reason=f"Направление «{line}» в базе знаний не покрыто: документов нет",
-                detail="База покрывает: " + ", ".join(known or ["—"]),
-            )
-        return PolicyVerdict(
-            in_scope=True, business_line=line, score=round(score, 3),
-            coverage=round(coverage, 3), accessible_docs=docs,
-            lines_available=known, matched_terms=hits,
-        )
-
-    # 3. Направление определимо. Не определено — не догадываемся, а спрашиваем
+    # 2. Направление определимо. Не определено — не догадываемся, а спрашиваем
     # (§10), но только если направлений больше одного: при одном спрашивать
     # нечего.
     if line is None:
@@ -264,20 +230,54 @@ def evaluate(
             )
         line = known[0] if known else None
 
-    docs = (accessible or {}).get(line, line_counts.get(line, 0)) if line else 0
     return PolicyVerdict(
         in_scope=True, business_line=line, score=round(score, 3),
-        coverage=round(coverage, 3), accessible_docs=docs,
-        lines_available=known, matched_terms=hits,
+        coverage=round(coverage, 3), lines_available=known, matched_terms=hits,
     )
 
 
-def role_lines_from_id(role_id: str) -> list[str]:
-    """Направления по умолчанию для роли (§11: ``default_lines[]``).
+# ----------------------------------------------------- §23: чтение и запись
 
-    Настоящие роли приходят из ``GET /api/roles``; здесь — разумное умолчание,
-    чтобы policy не блокировала демо. Юрист и руководитель работают по всем
-    направлениям, отраслевые роли — по своему.
+# Кто может писать в базу. Список закрытый и короткий: «править может не
+# всякий» — это и есть защита целостности. Руководство утверждает изменения
+# регламентов, качество отвечает на вопросы; сотрудник не делает ни того, ни
+# другого.
+WRITE_ROLES = frozenset({"quality", "director"})
+
+# Решение по предложению об изменении регламента — только руководство (§23.3):
+# качество собирает доказательства, но не решает, менять ли норму.
+DECIDE_ROLES = frozenset({"director"})
+
+
+def can_read(role_id: str | None) -> bool:
+    """§23.1: чтение единое. Аргумент оставлен, чтобы вызовы читались явно."""
+    return True
+
+
+def can_write(role_id: str | None, *, action: str = "") -> bool:
+    """§23.3: запись — только качество и руководство.
+
+    ``action="decide"`` (смена статуса предложения об изменении) сужается до
+    руководства: это решение об изменении нормы, а не ответ на вопрос.
+    """
+    role = (role_id or "").strip().lower()
+    if action == "decide":
+        return role in DECIDE_ROLES
+    return role in WRITE_ROLES
+
+
+def write_denied(role_id: str | None, *, write: bool = True) -> dict:
+    """Тело ошибки записи (§23.3): 403 с понятной причиной, не тишина."""
+    need = sorted(DECIDE_ROLES) if not write else sorted(WRITE_ROLES)
+    return {"error": "write_forbidden", "role": role_id or "", "need": need}
+
+
+def role_lines_from_id(role_id: str) -> list[str]:
+    """Направления по умолчанию для роли (аналитика, не доступ).
+
+    §23: на выдачу это больше не влияет — чтение единое. Функция осталась,
+    потому что аналитика (§23.5) сохраняет разрез по ролям: кто о чём
+    спрашивает, нужно для приоритизации обновления регламентов.
     """
     mapping = {
         "lawyer": ["*"],

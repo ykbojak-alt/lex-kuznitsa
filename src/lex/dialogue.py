@@ -29,16 +29,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Literal
 
 QuestionKind = Literal["date", "choice", "text", "doc_id"]
 
@@ -290,7 +292,7 @@ class Session:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Session":
+    def from_dict(cls, data: dict[str, Any]) -> Session:
         return cls(
             session_id=str(data.get("session_id") or ""),
             role_id=str(data.get("role_id") or ""),
@@ -396,7 +398,7 @@ class SessionStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             record = {
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "session_id": session.session_id,
                 "state": session.to_dict(),
             }
@@ -495,10 +497,8 @@ class RuleInfo:
         for rev in self.revisions:
             digits = re.sub(r"[^0-9]", "", str(rev.get("value") or ""))
             if digits and str(rev.get("value") or "").lower().find("руб") >= 0:
-                try:
+                with contextlib.suppress(ValueError):
                     out.append(int(digits))
-                except ValueError:
-                    pass
         return sorted(set(out))
 
 
@@ -994,7 +994,7 @@ class Dialogue:
         last_search = searched or (session.searches[-1] if session.searches else {})
         ticket: dict[str, Any] = {
             "id": self._next_ticket_id(),
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session_id": session_id,
             "role_id": session.role_id,
             "business_line": business_line or session.params.get("business_line") or "",
@@ -1033,9 +1033,7 @@ class Dialogue:
         """
         if not self.knowledge.in_corpus(question or ""):
             words = {w[:5] for w in _norm(question).split()}
-            if words & GENERIC_QUESTION_STEMS:
-                return False
-            return True
+            return not words & GENERIC_QUESTION_STEMS
         return False
 
     def _fallback_question(self, question: str | None) -> Question:
@@ -1281,7 +1279,7 @@ class Dialogue:
             "round": session.clarification_iterations,
             "iteration": session.clarification_iterations,
             "questions": [item.to_dict() for item in questions],
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
 
     def _normalize_args(
@@ -1326,7 +1324,7 @@ class Dialogue:
                     "key": key,
                     "value": value or "не знаю",
                     "skipped": True,
-                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
                 self._attach_answer(session, value or "не знаю")
                 continue
@@ -1342,7 +1340,7 @@ class Dialogue:
                 "key": key,
                 "value": value,
                 "skipped": False,
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
             self._attach_answer(session, value)
 
@@ -1595,18 +1593,18 @@ class Dialogue:
 
 
 __all__ = [
+    "MAX_CLARIFY_ITERATIONS",
+    "MAX_CLARIFY_ROUNDS",
+    "MAX_QUESTIONS_PER_ROUND",
+    "MIN_CLARIFY_ITERATIONS",
     "Assumption",
     "CorpusKnowledge",
+    "Decision",
     "Dialogue",
     "Question",
     "RuleInfo",
     "Session",
     "SessionStore",
-    "MAX_CLARIFY_ROUNDS",
-    "MAX_CLARIFY_ITERATIONS",
-    "MIN_CLARIFY_ITERATIONS",
-    "Decision",
-    "MAX_QUESTIONS_PER_ROUND",
     "extract_amount",
     "extract_date",
     "match_department",

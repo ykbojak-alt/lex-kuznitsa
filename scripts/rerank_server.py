@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, List
+from typing import Any
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -34,7 +34,7 @@ MAX_LENGTH = 512
 
 class RerankRequest(BaseModel):
     query: str = Field(..., description="поисковый запрос")
-    documents: List[str] = Field(..., description="кандидаты на ранжирование")
+    documents: list[str] = Field(..., description="кандидаты на ранжирование")
     top_n: int | None = Field(None, description="вернуть только N лучших")
     return_documents: bool = Field(True, description="включать текст документа в ответ")
     model: str | None = None
@@ -101,10 +101,10 @@ def models() -> dict:
     }
 
 
-def _score_pairs(query: str, docs: List[str]) -> List[float]:
+def _score_pairs(query: str, docs: list[str]) -> list[float]:
     import torch
 
-    out: List[float] = []
+    out: list[float] = []
     bs = 8
     for i in range(0, len(docs), bs):
         batch = docs[i:i + bs]
@@ -130,7 +130,7 @@ def rerank(req: RerankRequest) -> dict:
         return {"model": req.model or MODEL_NAME, "results": []}
     try:
         scores = _score_pairs(req.query, req.documents)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("rerank failed")
         raise HTTPException(status_code=500, detail=f"rerank failed: {e}") from e
 

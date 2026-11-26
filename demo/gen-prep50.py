@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Генератор расширенного набора вопросов для прогона RAG-контура ИИкузницы.
 
 Пишет ``sample-corpus/questions-prep50.jsonl`` — 50 вопросов в пяти классах
@@ -20,7 +19,6 @@
 """
 import argparse
 import glob
-import io
 import json
 import os
 import re
@@ -160,7 +158,7 @@ def load_docs(corpus_dir="sample-corpus"):
     for path in sorted(glob.glob(os.path.join(corpus_dir, "*.md"))):
         if path.endswith("INDEX.md"):
             continue
-        with io.open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             text = fh.read()
 
         def field(name, _t=text):
@@ -187,7 +185,7 @@ def verify(rows, docs, manifest_path="sample-corpus/manifest.json"):
 
     rules = {}
     if os.path.exists(manifest_path):
-        with io.open(manifest_path, encoding="utf-8") as fh:
+        with open(manifest_path, encoding="utf-8") as fh:
             manifest = json.load(fh)
         for rule in manifest.get("conflict_rules", []):
             rules[rule["key"]] = sorted(
@@ -271,9 +269,8 @@ def verify(rows, docs, manifest_path="sample-corpus/manifest.json"):
                 if row["as_of"] >= first:
                     errors.append(f"{q[:50]}: дата {row['as_of']} не раньше первой редакции {first}")
 
-        elif kind == "journal":
-            if did is not None:
-                errors.append(f"{q[:50]}: journal-вопрос не должен указывать doc_id")
+        elif kind == "journal" and did is not None:
+            errors.append(f"{q[:50]}: journal-вопрос не должен указывать doc_id")
 
     return errors
 
@@ -304,7 +301,7 @@ def main(argv=None):
         print("по классам:", json.dumps(counts, ensure_ascii=False, sort_keys=True))
         return 0
 
-    with io.open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+    with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 

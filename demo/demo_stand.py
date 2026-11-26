@@ -204,14 +204,14 @@ class LLMClient:
     коннект (без http_proxy), как и api().
     """
 
-    def __init__(self, config_path: Optional[str] = None,
+    def __init__(self, config_path: str | None = None,
                  model: str = "claude-sonnet-5"):
         cfg_path = config_path or _LLM_DEFAULT_CONFIG
         if not os.path.isfile(cfg_path):
             raise LLMUnavailable(
                 f"config.json не найден: {cfg_path} — agentic требует "
                 f"NexusLink-конфиг (incoming_token)")
-        with open(cfg_path, "r", encoding="utf-8") as stream:
+        with open(cfg_path, encoding="utf-8") as stream:
             cfg = json.load(stream)
         token = cfg.get("incoming_token")
         port = int(cfg.get("port") or 5679)
@@ -255,7 +255,7 @@ class LLMClient:
     def chat_json(self, prompt: str, max_tokens: int = 512) -> dict:
         """Ответ модели как JSON-объект: ищем первый {...}-блок в тексте.
         До 2 повторов при неудачном парсинге."""
-        for attempt in range(3):
+        for _attempt in range(3):
             text = self.chat(prompt, max_tokens=max_tokens)
             start, end = text.find("{"), text.rfind("}")
             if start >= 0 and end > start:
@@ -270,7 +270,7 @@ class LLMClient:
         raise LLMUnavailable("LLM не дал валидный JSON за 3 попытки")
 
 
-def _agent_write_doc_v1(api_base: str, llm: Optional[LLMClient]) -> tuple[str, str]:
+def _agent_write_doc_v1(api_base: str, llm: LLMClient | None) -> tuple[str, str]:
     """A → handoff-doc v1. Scripted: фиксированная строка. Agentic: LLM
     сам выбирает поля (JSON-документ). Возвращает (content, label)."""
     if llm is None:
@@ -283,7 +283,7 @@ def _agent_write_doc_v1(api_base: str, llm: Optional[LLMClient]) -> tuple[str, s
     return json.dumps(doc, ensure_ascii=False), f"agentic(LLM {llm.model})"
 
 
-def _agent_write_doc_v2(api_base: str, llm: Optional[LLMClient]) -> tuple[str, str]:
+def _agent_write_doc_v2(api_base: str, llm: LLMClient | None) -> tuple[str, str]:
     """A → handoff-doc v2 (CAS base_version=1)."""
     if llm is None:
         return ("task-42: step-2, continue by agent-B", "scripted")
@@ -294,7 +294,7 @@ def _agent_write_doc_v2(api_base: str, llm: Optional[LLMClient]) -> tuple[str, s
     return json.dumps(doc, ensure_ascii=False), f"agentic(LLM {llm.model})"
 
 
-def _agent_request_kill_proddb(api_base: str, llm: Optional[LLMClient]) -> tuple[dict, str]:
+def _agent_request_kill_proddb(api_base: str, llm: LLMClient | None) -> tuple[dict, str]:
     """B → gated-запрос kill prod-db. Ожидается deny 403."""
     if llm is None:
         return ({"term": "prod-db", "stage": "terminate"}, "scripted")
@@ -309,7 +309,7 @@ def _agent_request_kill_proddb(api_base: str, llm: Optional[LLMClient]) -> tuple
     return req, f"agentic(LLM {llm.model})"
 
 
-def _agent_request_doc_put(api_base: str, llm: Optional[LLMClient]) -> tuple[dict, str]:
+def _agent_request_doc_put(api_base: str, llm: LLMClient | None) -> tuple[dict, str]:
     """B → gated-запрос doc_put (require_approval). Ожидается 202 → approve."""
     if llm is None:
         return ({"action": "doc_put",
@@ -463,7 +463,7 @@ def _run_scenes(url, proc, llm, base, args) -> int:
                 {"content": content2, "base_version": v1})
     report(f"A пишет версию 2 (CAS base_version=1) [{label2}]",
            st == 200 and d.get("version") == 2, json.dumps(d))
-    v2 = d.get("version")
+    d.get("version")
 
     st, d = api(url, "GET", "/api/core/doc/latest")
     content_ok = d.get("content") == "task-42: step-2, continue by agent-B"
