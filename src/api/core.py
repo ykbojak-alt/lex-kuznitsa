@@ -764,9 +764,15 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                 if queue_ticket.get("id"):
                     payload["ticket_id"] = str(queue_ticket["id"])
                     entry["ticket_id"] = payload["ticket_id"]
-                payload["email"] = mail.email_block({
+                # §5 S3 заказчика: письмо должно РЕАЛЬНО уйти, а не нарисоваться.
+                # Отправка не роняет ответ: сбой SMTP даёт delivery=failed, и
+                # карточка честно говорит, что письмо не ушло.
+                payload["email"] = mail.deliver({
                     "question": question,
                     "created_at": entry["ts"],
+                    "why_unresolved": str(payload.get("reason") or ""),
+                    "searched": payload.get("searched") or {},
+                    "kind": payload.get("kind") or "",
                     "asker": {"role_id": role_id, "business_line": business_line or ""},
                 })
                 yield sse.escalate(payload)

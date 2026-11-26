@@ -53,12 +53,24 @@ CR_MIN_CASES = int(
     os.environ.get("LEX_CR_MIN_CASES") or os.environ.get("CR_MIN_CASES", "3")
 )
 
-# §22.4: обращение в службу качества в демо — имитация письма.
-# Домен example.invalid зарезервирован RFC 2606: письмо физически некуда отправить,
-# и это намеренно — демо публичное, реальные адреса подставлять нельзя.
+# §22.4: обращение в службу качества как письмо на почту.
+#
+# Режим ``simulated`` — письмо только рисуется в UI, никуда не уходит. Режим
+# ``smtp`` — реальная отправка. Домен example.invalid зарезервирован RFC 2606:
+# на проде писать на него нельзя, поэтому для smtp-режима адреса задаются
+# явно (на демо-стенде — синтетический ящик отдела качества на Mailpit).
 QUALITY_EMAIL = os.environ.get("QUALITY_EMAIL", "quality@example.invalid")
 EMAIL_MODE = os.environ.get("EMAIL_MODE", "simulated")
 EMPLOYEE_EMAIL_DOMAIN = os.environ.get("EMPLOYEE_EMAIL_DOMAIN", "example.invalid")
+
+# SMTP — только для демо-стенда. Заказчик требует реальной отправки письма
+# (§5 S3): пустой SMTP_HOST означает «отправлять некуда», и режим smtp без
+# хоста честно вернёт simulated, а не притворится отправкой.
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT") or 25)
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 
 
 def employee_email(role_id: str) -> str:
