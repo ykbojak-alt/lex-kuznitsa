@@ -123,14 +123,16 @@ def extract_date(text: str | None) -> str | None:
     """Ищет явную дату отсчёта в тексте вопроса. Возвращает ISO YYYY-MM-DD."""
     raw = text or ""
     for pattern, order in ((_ISO_DATE_RE, "ymd"), (_DOT_DATE_RE, "dmy"),
-                            (_TEXT_DATE_RE, "dmy")):
+                            (_TEXT_DATE_RE, "dmt")):
         m = pattern.search(raw)
         if not m:
             continue
         if order == "ymd":
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        else:
+        elif order == "dmy":
             d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            d, mo, y = int(m.group(1)), _MONTHS.get(_norm(m.group(2)), 0), int(m.group(3))
         try:
             return date(y, mo, d).isoformat()
         except ValueError:
@@ -398,7 +400,7 @@ class RuleInfo:
     key: str
     short: str = ""
     topic: str = ""
-    field: str = ""
+    rule_field: str = ""
     revisions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -513,7 +515,7 @@ class CorpusKnowledge:
                 key=key,
                 short=str(raw.get("short") or ""),
                 topic=str(raw.get("topic") or ""),
-                field=str(raw.get("field") or ""),
+                rule_field=str(raw.get("field") or ""),
                 revisions=revisions,
             )
 
@@ -528,22 +530,64 @@ class CorpusKnowledge:
 
     # ---- поиск ----
 
+    def _stem_index(self) -> None:
+        """Основания правил -> уникальные для правила основы слов.
+
+        Основа — первые 4 буквы слова. Слово считается «своим» для правила,
+        если не встречается ни в одном другом правиле: так «срок» и «заявка»
+        (общие для нескольких правил) не тянут лишние совпадения, а
+        «автоматического» / «одобрения» тянут.
+        """
+        if getattr(self, "_stems_by_rule", None) is not None:
+            return
+        stems_by_rule: dict[str, set[str]] = {}
+        freq: dict[str, int] = {}
+        for key, rule in self.rules.items():
+            stems: set[str] = set()
+            for phrase in (rule.short, rule.topic, rule.rule_field):
+                for word in _norm(phrase).split():
+                    if len(word) >= 4:
+                        stems.add(word[:4])
+            stems_by_rule[key] = stems
+            for stem in stems:
+                freq[stem] = freq.get(stem, 0) + 1
+        self._stems_by_rule = stems_by_rule
+        self._stem_freq = freq
+
     def match_rules(self, question: str) -> list[str]:
-        """Ключи правил, тема которых упомянута в вопросе."""
+        """Ключи правил, тема которых упомянута в вопросе.
+
+        Сначала точное вхождение фразы правила (short/topic/field), затем —
+        словоформенный запас: не менее двух основ, уникальных для правила.
+        Возвращает все правила с лучшим счётом (несколько = неоднозначно).
+        """
         hay = _norm(question)
         if not hay:
             return []
-        found: list[tuple[int, str]] = []
+        self._stem_index()
+        q_words = [word for word in hay.split() if len(word) >= 4]
+        scores: dict[str, int] = {}
         for key, rule in self.rules.items():
             best = 0
-            for phrase in (rule.short, rule.topic, rule.field, key):
+            for phrase in (rule.short, rule.topic, rule.rule_field, key):
                 norm = _norm(phrase)
                 if norm and norm in hay:
-                    best = max(best, len(norm))
+                    best = max(best, 100 + len(norm))
+            if best < 100:
+                unique = {stem for stem in self._stems_by_rule.get(key, set())
+                          if self._stem_freq.get(stem, 0) == 1}
+                hits = 0
+                for stem in unique:
+                    if any(stem in word for word in q_words):
+                        hits += 1
+                if hits >= 2:
+                    best = max(best, hits)
             if best:
-                found.append((best, key))
-        found.sort(key=lambda pair: (-pair[0], pair[1]))
-        return [key for _, key in found]
+                scores[key] = best
+        if not scores:
+            return []
+        top = max(scores.values())
+        return sorted(key for key, score in scores.items() if score == top)
 
     def match_topic(self, question: str) -> str | None:
         """Тема документа (вид регламента), если она названа в вопросе."""
