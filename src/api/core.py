@@ -613,6 +613,25 @@ def _step_record(data: dict) -> dict:
     return rec
 
 
+_LINE_EMPTY = frozenset({"", "—", "–", "-", "не определено", "не определено —", "нет"})
+_LINE_RE = re.compile(r"направление:\s*([^·]+)")
+
+
+def _line_from_policy_detail(detail: str) -> str:
+    """Направление из detail шага policy. Пустая строка — направления нет.
+
+    Ядро пишет «направление: —», когда направление не определено. Прочерк —
+    это законный символ «нет», и записывать его в аналитику как направление
+    значит завести направление по имени «—»: в разрезе появится строка,
+    которой не существует.
+    """
+    m = _LINE_RE.search(str(detail or ""))
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    return "" if value.lower() in _LINE_EMPTY else value
+
+
 async def stream_answer(question: str, role_id: str, as_of: str | None,
                         session_id: str | None = None,
                         answers: dict | None = None,
@@ -674,10 +693,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                 if data.get("key") == "policy" and not entry.get("business_line"):
                     detected = data.get("business_line") or data.get("line") or ""
                     if not detected:
-                        det = str(data.get("detail") or "")
-                        mline = re.search(r"направление:\s*([^·]+)", det)
-                        if mline:
-                            detected = mline.group(1).strip()
+                        detected = _line_from_policy_detail(str(data.get("detail") or ""))
                     if detected and detected.lower() not in ("не определено", "нет"):
                         entry["business_line"] = detected
                 if "subject_coverage" in rec or "top_cosine" in rec:
