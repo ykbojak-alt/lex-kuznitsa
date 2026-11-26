@@ -424,6 +424,38 @@ html[data-theme="dark"] .nav__item[aria-current="page"]:hover { color: var(--pag
 .screen { display: none; }
 .screen.is-active { display: block; }
 
+/* Вкладка «Почта качества»: ящик Mailpit в рамках страницы.
+   Высота в экран минус шапка — чтобы ящик был рабочим, а не полоской. */
+.mailframe {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+}
+.mailframe__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel-hover);
+}
+.mailframe__title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.mailframe__open { font-size: 12px; color: var(--link); text-decoration: none; }
+.mailframe__open:hover { text-decoration: underline; }
+.mailframe__frame {
+  display: block;
+  width: 100%;
+  height: calc(100vh - 230px);
+  min-height: 420px;
+  border: 0;
+  background: #fff;
+}
+.mailframe__empty { padding: 40px 24px; text-align: center; }
+.mailframe__empty-t { margin: 0 0 8px; font-weight: 600; }
+.mailframe__empty-x { margin: 0; color: var(--text-2); font-size: 13px; max-width: 46ch; margin-inline: auto; }
+
 .turn { margin: 0 0 22px; }
 
 /* вопрос пользователя */

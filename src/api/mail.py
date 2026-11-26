@@ -243,4 +243,7 @@ def stats() -> dict:
     for row in rows:
         counts[inbox_status(row)] += 1
     return {"mode": config.EMAIL_MODE, "quality_email": config.QUALITY_EMAIL,
+            # Адрес веб-ящика для встроенной вкладки. Пусто, когда почта
+            # симулирована: встраивать нечего, и клиент честно скажет об этом.
+            "mail_ui": config.MAIL_UI_URL if smtp_configured() else "",
             **counts, "total": len(rows)}

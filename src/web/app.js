@@ -376,7 +376,8 @@
     lines: ['Бизнес-направления', 'Регламенты привязаны к направлению, а не только к отделу.'],
     cases: ['Кейсы', 'Наблюдения из практики. Не отменяют регламент, но видны в поиске с меньшим приоритетом.'],
     tickets: ['Заявки в службу качества', 'Агент создаёт тикет сам, когда ответа в базе нет. Доступно службе качества и руководителю.'],
-    stats: ['Аналитика', 'По журналу запросов: отказы, латентность, где не хватает документов.']
+    stats: ['Аналитика', 'По журналу запросов: отказы, латентность, где не хватает документов.'],
+    mail: ['Почта качества', 'Синтетический ящик отдела качества: сюда приходят письма агента, отсюда эксперт отвечает.']
   };
 
   function goScreen(name) {
@@ -397,7 +398,41 @@
     if (name === 'cases') renderCasesScreen();
     if (name === 'tickets') renderTicketsScreen();
     if (name === 'stats') renderStatsScreen();
+    if (name === 'mail') renderMailScreen();
     $('feed').scrollTop = 0;
+  }
+
+  /* Ящик отдела качества. Адрес Mailpit приходит с сервера (/api/health ->
+     mail_ui), а не зашит в клиент: на локальном стенде ящика может не быть,
+     и тогда вместо пустого iframe показываем честное объяснение. */
+  var mailLoaded = false;
+  function renderMailScreen() {
+    var frame = $('mailFrameSrc');
+    var open = $('mailOpen');
+    if (!frame) return;
+    if (mailLoaded) return;
+    mailLoaded = true;
+    // Адрес спрашиваем у сервера: на локальном стенде почта симулирована,
+    // и mail_ui пустой — тогда вкладка объясняет это, а не показывает пустоту.
+    fetch('api/health').then(function (r) { return r.json(); }).then(function (h) {
+      showMail((h && h.email && h.email.mail_ui) || '');
+    }).catch(function () { showMail(''); });
+
+    function showMail(url) {
+      if (!url) {
+        var box = $('mailFrame');
+        if (box) {
+          box.innerHTML = '<div class="mailframe__empty">'
+            + '<p class="mailframe__empty-t">Почта качества не подключена на этом стенде</p>'
+            + '<p class="mailframe__empty-x">Письма формируются, но не отправляются '
+            + '(EMAIL_MODE=simulated). На демо-стенде ящик подключён — там видно весь цикл: '
+            + 'вопрос → письмо → ответ эксперта → кейс в базе.</p></div>';
+        }
+        return;
+      }
+      frame.src = url;
+      if (open) { open.href = url; open.removeAttribute('hidden'); }
+    }
   }
 
   var navItems = doc.querySelectorAll('.nav__item');
@@ -988,12 +1023,15 @@
       tr.appendChild(el('td', 'num', value === null || value === undefined ? '— (пока не измерялось)' : String(value)));
       t.appendChild(tr);
     }
-    row('Prompt-токенов', tu.prompt_tokens);
-    row('Completion-токенов', tu.completion_tokens);
-    row('Всего токенов', tu.total_tokens);
-    row('Среднее на запрос', tu.avg_total_per_request);
-    row('p95 на запрос', tu.p95_total_per_request);
-    row('LLM-вызовов', tu.llm_calls);
+    var w = tu.window20 || {};
+    row('Prompt-токенов · за всё время', tu.prompt_tokens);
+    row('Completion-токенов · за всё время', tu.completion_tokens);
+    row('Всего токенов · за всё время', tu.total_tokens);
+    row('Среднее на запрос · за всё время', tu.avg_total_per_request);
+    row('p95 на запрос · за всё время', tu.p95_total_per_request);
+    row('Среднее на запрос · последние 20', w.avg_total_per_request);
+    row('p95 на запрос · последние 20', w.p95_total_per_request);
+    row('LLM-вызовов · за всё время', tu.llm_calls);
     row('Оценочная стоимость', tu.cost_estimate);
     host.appendChild(t);
   }
@@ -1093,6 +1131,13 @@
       + ' · среднее время заявка→кейс: ' + na(c3.avg_ticket_to_case_hours) + ' ч'
       + ' · вопросов отвечено из кейсов: ' + na(c3.answered_from_cases)));
 
+    var lat = s.latency || {};
+    if (!lat.empty && lat.all_time && lat.recent20) {
+      host.appendChild(el('p', 'section-sub', 'Скорость ответа · за всё время: avg '
+        + lat.all_time.avg_ms + ' мс · p95 ' + lat.all_time.p95_ms + ' мс (' + lat.all_time.records
+        + ' запросов); последние 20: avg ' + lat.recent20.avg_ms + ' мс · p95 '
+        + lat.recent20.p95_ms + ' мс.'));
+    }
     var days = s.timeline || [];
     host.appendChild(el('h3', 'detail-h', 'Ответы по дням'));
     if (!days.length) {

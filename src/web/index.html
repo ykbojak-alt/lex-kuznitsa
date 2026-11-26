@@ -27,6 +27,7 @@
       <li><button class="nav__item" type="button" data-screen="cases">Кейсы</button></li>
       <li><button class="nav__item" type="button" data-screen="tickets" id="navTickets" hidden>Заявки</button></li>
       <li><button class="nav__item" type="button" data-screen="stats">Аналитика</button></li>
+      <li><button class="nav__item" type="button" data-screen="mail" id="navMail">Почта качества</button></li>
     </ul>
     <p class="nav__count" id="navCount"></p>
   </nav>
@@ -72,6 +73,19 @@
         <div class="screen" id="screen-cases"></div>
         <div class="screen" id="screen-tickets"></div>
         <div class="screen" id="screen-stats"></div>
+        <div class="screen" id="screen-mail">
+          <!-- Синтетический отдел качества: ящик Mailpit, куда LEX шлёт письма.
+               Встроен, чтобы на демо был виден весь цикл в одном окне:
+               вопрос → письмо → ответ эксперта → кейс в базе. -->
+          <div class="mailframe" id="mailFrame">
+            <div class="mailframe__bar">
+              <span class="mailframe__title">Отдел качества — входящие</span>
+              <a class="mailframe__open" id="mailOpen" href="#" target="_blank" rel="noopener">Открыть в новом окне</a>
+            </div>
+            <iframe class="mailframe__frame" id="mailFrameSrc" title="Почта отдела качества"
+                    loading="lazy" referrerpolicy="no-referrer"></iframe>
+          </div>
+        </div>
 
       </section>
 

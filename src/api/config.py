@@ -71,6 +71,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT") or 25)
 SMTP_FROM = os.environ.get("SMTP_FROM", "")
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+# Веб-ящик отдела качества для встроенной вкладки на странице стенда.
+# Пусто — вкладка объяснит, что почта не подключена.
+MAIL_UI_URL = os.environ.get("MAIL_UI_URL", "")
 
 
 def employee_email(role_id: str) -> str:
