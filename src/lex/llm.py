@@ -118,7 +118,9 @@ def base_url() -> str:
 
 
 def model_name() -> str:
-    return os.environ.get("NEXUS_LINK_MODEL") or "claude-sonnet-4-7"
+    # Дефолт — живой слот: 27.11.2026 claude-sonnet-4-7 попал в чёрный список
+    # апстрима целиком, и стенд без переменной окружения отвечал ошибкой.
+    return os.environ.get("NEXUS_LINK_MODEL") or "claude-sonnet-4-6"
 
 
 def model_chain() -> list[str]:

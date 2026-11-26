@@ -205,7 +205,7 @@ class LLMClient:
     """
 
     def __init__(self, config_path: str | None = None,
-                 model: str = "claude-sonnet-5"):
+                 model: str = "claude-sonnet-4-6"):
         cfg_path = config_path or _LLM_DEFAULT_CONFIG
         if not os.path.isfile(cfg_path):
             raise LLMUnavailable(
@@ -336,8 +336,8 @@ def main() -> int:
     ap.add_argument("--agentic", action="store_true",
                     help="agentic-режим: agent A/B — реальные LLM-агенты "
                          "через NexusLink (по умолчанию — scripted/deterministic)")
-    ap.add_argument("--agentic-model", default="claude-sonnet-5",
-                    help="слот модели в NexusLink (default: claude-sonnet-5)")
+    ap.add_argument("--agentic-model", default="claude-sonnet-4-6",
+                    help="слот модели в NexusLink (default: claude-sonnet-4-6)")
     ap.add_argument("--agentic-config", default=None,
                     help="путь к config.json NexusLink (default: ~/.nexuslink/config.json)")
     args = ap.parse_args()
