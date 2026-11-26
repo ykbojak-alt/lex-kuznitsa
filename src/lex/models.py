@@ -120,12 +120,38 @@ class AnswerData(BaseModel):
     # §8: кейс противоречит регламенту либо регламент не покрывает.
     practice_only: bool = False
     notes: list[str] = Field(default_factory=list)
+    # §10: что предположили, если сотрудник пропустил уточнение.
+    assumptions: list[dict] = Field(default_factory=list)
+    session_id: str | None = None
+    # §12: результат проверки покрытия — то же, что в шаге verify.
+    grounding: dict | None = None
+
+
+class ClarifyQuestion(BaseModel):
+    key: str
+    text: str
+    reason: str
+    kind: Literal["date", "choice", "text", "doc_id"] = "text"
+    options: list[str] = Field(default_factory=list)
+
+
+class ClarifyData(BaseModel):
+    """§10: уточнение вместо ответа. Это не отказ — вопрос просто неполон."""
+
+    session_id: str
+    questions: list[ClarifyQuestion] = Field(default_factory=list)
+    partial: dict = Field(default_factory=dict)
+    can_skip: bool = True
 
 
 class RefusalData(BaseModel):
+    """§12.3: пустое «не знаю» — плохой отказ. Всегда говорим, что искали."""
+
     reason: str
     sources: list[str] = Field(default_factory=list)
     kind: RefusalKind
+    searched: dict = Field(default_factory=dict)
+    hint: str = ""
 
 
 class DoneData(BaseModel):

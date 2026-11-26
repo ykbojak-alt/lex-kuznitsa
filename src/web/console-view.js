@@ -1,31 +1,34 @@
-/* console-view.js — Console Lex: виртуализированный список шагов агента.
-   Шаги приходят из SSE (event: step) и рисуются человеческим языком, не JSON.
-   Виртуализация окном: в DOM живут только строки, попавшие в видимую область
-   плюс запас; высота держится двумя распорками. Это рассчитано на сотни шагов
-   без просадки прокрутки.
+/* console-view.js — Console Lex: шаги агента в виде строк инфобокса.
+   Правый столбец по контракту: 3/4 ширины чат, 1/3 консоль.
+   Строка = «ключ | значение», цвета шагов приглушены (см. lex.css).
 
-   Классический скрипт (не ES-модуль): UI открывается как статика по file://,
+   Виртуализация окном: в DOM живут только строки, попавшие в видимую область
+   плюс запас; высота держится двумя распорками. Рассчитано на сотни шагов.
+
+   Классический скрипт, не ES-модуль: UI открывается как статика по file://,
    а модули в Chrome с file:// не грузятся из-за CORS. */
 
 (function (global) {
   'use strict';
 
-  var ROW_H = 44;        // базовая высота строки, px
-  var OVERSCAN = 6;      // строк сверху и снизу за пределами окна
-  var STEP_COLORS = {
-    accept: 'slate',
-    decompose: 'violet',
-    retrieve: 'cyan',
-    permissions: 'amber',
-    resolve: 'blue',
-    conflict: 'rose',
-    compose: 'emerald',
-    verify: 'green'
-  };
+  var ROW_H = 42;
+  var OVERSCAN = 6;
 
-  function colorOf(key) {
-    return STEP_COLORS[key] || 'slate';
-  }
+  /* Порядок и цвета — docs/API-CONTRACT.md §3, §8, §9, §10, §12.5.
+     color в событии не используется: цвета мапит UI сам, как требует §3. */
+  var STEP_META = {
+    accept: { title: 'Запрос принят' },
+    decompose: { title: 'Разбор вопроса' },
+    clarify: { title: 'Уточнение' },
+    inspect: { title: 'Разбор источников' },
+    retrieve: { title: 'Поиск' },
+    cases: { title: 'Поиск по кейсам' },
+    permissions: { title: 'Проверка прав' },
+    resolve: { title: 'Действующая редакция' },
+    conflict: { title: 'Сопоставление' },
+    compose: { title: 'Сборка ответа' },
+    verify: { title: 'Самопроверка' }
+  };
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -34,32 +37,29 @@
     return node;
   }
 
-  /* Строка шага. kind: 'step' | 'error' | 'done'. */
-  function rowNode(step, index, total, isLast) {
+  function rowNode(step, isLast) {
     var kind = step.kind || 'step';
-    var cls = 'step step--' + (kind === 'error' ? 'error' : kind === 'done' ? 'done' : colorOf(step.key));
+    var key = kind === 'step' ? (step.key || 'accept') : kind;
+    var meta = STEP_META[key] || {};
+    var cls = 'step step--' + key;
     if (!isLast) cls += ' step--old';
 
     var row = el('div', cls);
-    row.dataset.key = step.key || kind;
     row.setAttribute('role', 'listitem');
 
-    var num = kind === 'step' && step.n && step.total
+    var n = kind === 'step' && step.n && step.total
       ? '[' + step.n + '/' + step.total + ']'
-      : kind === 'error' ? '[!]' : '[✓]';
-    row.appendChild(el('span', 'step__n', num));
+      : kind === 'error' ? '[!]' : kind === 'done' ? '[✓]' : '[·]';
+    row.appendChild(el('span', 'step__n', n));
 
-    var content = el('div', 'step__content');
-    content.appendChild(el('div', 'step__title', step.title || step.key || ''));
-    row.appendChild(content);
+    var main = el('div', 'step__main');
+    var head = el('div', 'step__key');
+    head.appendChild(el('span', null, step.title || meta.title || key));
+    if (step.ms != null) head.appendChild(el('span', 'step__ms', step.ms + ' мс'));
+    main.appendChild(head);
 
-    row.appendChild(el('span', 'step__ms', step.ms != null ? step.ms + ' мс' : ''));
-
-    if (step.detail) {
-      var d = el('div', 'step__detail', step.detail);
-      d.style.gridColumn = '2 / -1';
-      row.appendChild(d);
-    }
+    if (step.detail) main.appendChild(el('div', 'step__val', step.detail));
+    row.appendChild(main);
     return row;
   }
 
@@ -68,10 +68,12 @@
     this.metaNode = metaNode;
     this.statusNode = statusNode;
     this.steps = [];
+    this.paramsNode = null;
+
     this.vlist = el('div', 'vlist');
     this.padTop = el('div', 'vlist__pad');
-    this.padBottom = el('div', 'vlist__pad');
     this.windowNode = el('div', 'vlist__window');
+    this.padBottom = el('div', 'vlist__pad');
     this.vlist.appendChild(this.padTop);
     this.vlist.appendChild(this.windowNode);
     this.vlist.appendChild(this.padBottom);
@@ -88,21 +90,23 @@
   ConsoleView.prototype.clear = function () {
     this.steps = [];
     this.windowNode.textContent = '';
+    this.setParams(null);
     this.renderEmpty(true);
     this.updateMeta();
   };
 
   ConsoleView.prototype.renderEmpty = function (show) {
-    var existing = this.body.querySelector('.console-empty');
+    var existing = this.body.querySelector('.infobox__empty');
     if (show) {
       if (!existing) {
-        var note = el('div', 'console-empty', 'Здесь появятся шаги агента: разбор, поиск, права, редакция, сборка, самопроверка.');
+        var note = el('p', 'infobox__empty',
+          'Здесь появятся шаги агента: разбор вопроса, разбор источников, поиск, права, редакция, сборка, самопроверка.');
         this.body.insertBefore(note, this.vlist);
       }
-      this.vlist.style.display = 'none';
+      this.vlist.hidden = true;
     } else {
       if (existing) existing.remove();
-      this.vlist.style.display = '';
+      this.vlist.hidden = false;
     }
   };
 
@@ -111,50 +115,64 @@
     this.steps.push(step);
     this.renderWindow();
     this.updateMeta();
-    // автоскролл к новому шагу, если пользователь не отлистал вверх вручную
     var nearBottom = this.body.scrollTop + this.body.clientHeight >= this.body.scrollHeight - ROW_H * 2;
-    if (nearBottom) {
-      this.body.scrollTop = this.body.scrollHeight;
-    }
+    if (nearBottom) this.body.scrollTop = this.body.scrollHeight;
   };
 
-  /* Перерисовка видимого окна: только строки в области просмотра ± OVERSCAN.
-     Окно намеренно пересобирается целиком — при 8-30 строках это дешевле
-     учёта отдельных узлов и не даёт рассинхрона индексов. */
+  /* Окно: только строки в области просмотра ± OVERSCAN. */
   ConsoleView.prototype.renderWindow = function () {
     var total = this.steps.length;
     if (!total) return;
-
     var top = this.body.scrollTop;
     var view = this.body.clientHeight || 400;
     var first = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
     var last = Math.min(total, Math.ceil((top + view) / ROW_H) + OVERSCAN);
 
-    // Высота списка держится распорками, чтобы скроллбар был честным.
     this.padTop.style.height = (first * ROW_H) + 'px';
     this.padBottom.style.height = ((total - last) * ROW_H) + 'px';
 
     this.windowNode.textContent = '';
     for (var i = first; i < last; i++) {
-      this.windowNode.appendChild(rowNode(this.steps[i], i, total, i === total - 1));
+      this.windowNode.appendChild(rowNode(this.steps[i], i === total - 1));
     }
   };
 
   ConsoleView.prototype.updateMeta = function () {
-    var steps = this.steps.filter(function (s) { return (s.kind || 'step') === 'step'; });
+    if (!this.metaNode) return;
+    var n = this.steps.filter(function (s) { return (s.kind || 'step') === 'step'; }).length;
     var ms = 0;
     for (var i = 0; i < this.steps.length; i++) {
       if (this.steps[i].ms) ms = Math.max(ms, Number(this.steps[i].ms) || 0);
     }
-    if (this.metaNode) {
-      this.metaNode.textContent = steps.length + ' шагов · ' + (ms / 1000).toFixed(1) + ' с';
+    this.metaNode.textContent = ms ? n + ' шагов · ' + (ms / 1000).toFixed(1) + ' с' : n + ' шагов';
+  };
+
+  /* §10: какие параметры известны, какие запрошены, какие пропущены с умолчанием. */
+  ConsoleView.prototype.setParams = function (params) {
+    if (this.paramsNode) { this.paramsNode.remove(); this.paramsNode = null; }
+    if (!params || !params.length) return;
+
+    var box = el('div', 'params');
+    box.appendChild(el('div', 'params__title', 'Параметры диалога'));
+    for (var i = 0; i < params.length; i++) {
+      var p = params[i];
+      var row = el('div', 'params__row');
+      row.appendChild(el('span', 'params__k', p.key));
+      var v = el('span', 'params__v params__v--' + p.state,
+        p.state === 'known' ? 'известно: ' + p.value
+          : p.state === 'asked' ? 'запрошено'
+            : 'умолчание: ' + p.value);
+      row.appendChild(v);
+      box.appendChild(row);
     }
+    this.body.insertBefore(box, this.vlist);
+    this.paramsNode = box;
   };
 
   ConsoleView.prototype.setStatus = function (text, tone) {
     if (!this.statusNode) return;
     this.statusNode.textContent = text;
-    this.statusNode.className = 'console-status' + (tone ? ' console-status--' + tone : '');
+    this.statusNode.className = tone ? 'console-status--' + tone : '';
   };
 
   ConsoleView.prototype.destroy = function () {
@@ -163,5 +181,5 @@
   };
 
   global.ConsoleView = ConsoleView;
-  global.LEX_STEP_COLORS = STEP_COLORS;
+  global.LEX_STEP_META = STEP_META;
 })(window);

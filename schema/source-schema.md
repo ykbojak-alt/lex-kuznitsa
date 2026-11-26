@@ -1,0 +1,187 @@
+# Архитектура источника документов (source schema)
+
+> Статус: draft для подготовки к подключению демо-БД заказчика.  
+> Основание: `sample-corpus/manifest.json` (27 документов, as_of 2026-11-26) как текущая эталонная реализация.
+
+## Цель
+
+Дать агенту и адаптерам единое понимание: **что искать и где искать** в произвольном источнике документов заказчика, до того как реальная БД будет предоставлена.
+
+Источник может быть файловым деревом, PostgreSQL, MongoDB или другой системой. Внутренний RAG-контур работает не с «таблицами заказчика», а с нормализованным контрактом документа.
+
+## 1. Нормализованная модель (внутренний контракт)
+
+### 1.1 Document (логическая сущность)
+
+| Поле | Тип | Обяз. для RAG | Описание | В manifest.json сейчас |
+|---|---:|:---:|---|---|
+| `doc_id` | string | да | Устойчивый идентификатор документа/редакции | `doc_id` |
+| `title` | string | да | Человекочитаемый заголовок | `title` |
+| `text` | text/markdown | да | Полный текст или собранный текст секций | тело `.md` файла `file` |
+| `source_uri` | string | да | Где лежит оригинал (путь/URL/таблица+pk) | `file` (относительный путь) |
+| `doc_kind` | string | да | Вид: регламент/инструкция/порядок/стандарт/чек-лист/... | `kind` |
+| `doc_subtype` | string | желат. | Подтип: редакция правила, инструкция и т.д. | `subtype` |
+| `department` | string | да | Подразделение-владелец/область действия | `department` |
+| `system` | string | желат. | Контур/система учёта | `system` |
+| `owner` | string | желат. | Ответственный | `owner` |
+| `version` | string | желат. | Версия документа | `version` |
+| `issued_at` | date | да | Дата введения/выпуска | `issued` |
+| `effective_at` | date | желат. | Дата вступления в силу (может отличаться от issued) | для SR-* ред.: `issued` = effective; в тексте `Действует с` |
+| `valid_to` | date/null | желат. | Дата окончания действия; null = действует | нет явного поля; выводится по новой редакции |
+| `status` | enum | желат. | `draft/active/superseded/archived/future` | выводится: SR-01-R3 effective 2027-01-01 > as_of 2026-11-26 => future; R1 superseded, R2 active |
+| `rule_key` | string/null | желат. | Ключ бизнес-правила для группы редакций | `rule_key` (SR-01/SR-02/SR-03 или пусто) |
+| `replaces_doc_id` | string/null | желат. | Какую редакцию заменяет | в тексте `Заменяет редакцию от ...`; в manifest можно вывести из conflict_rules |
+| `sections` | string[]/objects | желат. | Структура документа для точечного цитирования | `sections` (массив заголовков) |
+| `hash` | string | желат. | Контроль целостности/изменений | `sha256` |
+| `acl_departments` | string[] | да | Кто имеет право видеть документ | нет явного поля; сейчас fallback = `[department]` |
+
+### 1.2 Rule/Revision group (для конфликтов редакций)
+
+Текущий `manifest.json` содержит `conflict_rules[]` — это не отдельный источник истины, а удобная проекция:
+
+| Поле | Описание | Пример (SR-01) |
+|---|---|---|
+| `rule_key` | Ключ правила | `SR-01` |
+| `field` | Какое поле меняется между редакциями | `Срок согласования заявки` |
+| `topic` | Тема/предмет | `согласования заявки на закупку` |
+| `revisions[].doc_id` | ID редакции | `ТЗ-ЭКЗ-СР01-Р2` |
+| `revisions[].effective` | Дата вступления | `2026-06-01` |
+| `revisions[].value` | Значение правила в редакции | `пяти рабочих дней` |
+| `in_force_at_as_of` | Значение, действующее на дату среза | `пяти рабочих дней` (as_of=2026-11-26) |
+
+Это критично для RAG: агент не должен отвечать «трёх рабочих дней» только потому, что нашёл R1.
+
+## 2. Обязательные поля для RAG-контура
+
+Минимум, без которого источник нельзя подключать в боевой контур:
+
+| Поле | Почему обязательно | Если поля нет в БД заказчика |
+|---|---|---|
+| `doc_id` | Цитирование, дедупликация, аудит | Сгенерировать стабильный суррогат: `source_pk`/hash URI; хранить маппинг исходного PK. |
+| `title` | Ранжирование, показ пользователю, сниппеты | Брать первый заголовок/имя файла/`<h1>`; помечать `title_quality=derived`. |
+| `text` | Индексация и ответ | Извлечь из BLOB/PDF/DOCX/HTML; если извлечь нельзя — документ не индексируется, фиксируется в отчёте импорта. |
+| `issued_at`/`effective_at` | Выбор актуальной редакции, ответ «на какую дату» | Искать в метаданных/тексте; если нет — `unknown`, документ помечается низким приоритетом в конфликтах; запрещать уверенный ответ «действует сейчас». |
+| `department` | ACL, фильтр области | Маппить из owner/org_unit; если нет — ставить `department=UNKNOWN` и **не выдавать** в обычный поиск до ручной классификации, кроме admin/debug. |
+| `doc_kind` | Фильтр намерения (регламент vs чек-лист) | Классифицировать правилом/моделью; хранить `kind_confidence`. |
+
+## 3. Маппинг из БД заказчика в контракт
+
+### 3.1 Общий алгоритм
+
+1. **Inventory**: получить схему/коллекции, размеры, форматы полей, образцы.
+2. **Field map**: сопоставить поля заказчика с нормализованным контрактом.
+3. **Identity**: выбрать стабильный `doc_id` (PK, UUID, внешний номер + редакция).
+4. **Text extraction**: привести тело документа в plain text/markdown.
+5. **Version/effective resolution**: определить `issued_at`, `effective_at`, `rule_key`, `replaces_doc_id`, `status`.
+6. **ACL map**: вычислить `acl_departments`; отсутствие = запрет по умолчанию.
+7. **Validation**: прогнать schema checks; невалидные записи попадают в quarantine report.
+
+### 3.2 Таблица маппинга (шаблон)
+
+| Нормализованное поле | Источник A: PostgreSQL | Источник B: MongoDB | Источник C: File corpus |
+|---|---|---|---|
+| `doc_id` | `documents.id` или `documents.external_no || '-' || rev` | `_id` / `docId` | `manifest.documents[].doc_id` |
+| `title` | `documents.title` | `title` | `manifest.documents[].title` |
+| `text` | `document_versions.body_text` / `sections.content` | `body` / `sections[].text` | содержимое `file` |
+| `source_uri` | `postgres://.../documents/<id>` | `mongo://.../docs/<_id>` | относительный путь `file` |
+| `doc_kind` | `documents.kind_code` + справочник | `kind` | `kind` |
+| `department` | `documents.department_id -> departments.name` | `department` | `department` |
+| `issued_at` | `versions.issued_at` | `issuedAt` | `issued` |
+| `effective_at` | `versions.effective_from` | `effectiveFrom` | `issued`/текст `Действует с` |
+| `rule_key` | `documents.rule_key` | `ruleKey` | `rule_key` |
+| `sections` | `sections(doc_id, order, heading, text)` | `sections[]` | `sections[]` |
+| `hash` | `versions.sha256` | `hash` | `sha256` |
+| `acl_departments` | `document_acl(department_id)` | `acl.departments[]` | derive from `department` (временный fallback) |
+
+## 4. Типичные варианты источников
+
+### 4.1 PostgreSQL (ожидаемый production-кейс)
+
+```sql
+-- Минимальная модель, к которой удобно адаптироваться
+documents(
+  id uuid pk,
+  external_no text,
+  title text not null,
+  kind text not null,
+  subtype text,
+  department_id uuid not null,
+  owner text,
+  system text,
+  rule_key text,
+  current_version_id uuid
+);
+document_versions(
+  id uuid pk,
+  document_id uuid not null,
+  version text,
+  issued_at date not null,
+  effective_from date,
+  valid_to date,
+  status text,
+  body_text text not null,
+  sha256 text
+);
+sections(
+  id uuid pk,
+  version_id uuid not null,
+  ord int not null,
+  heading text not null,
+  body text
+);
+document_acl(
+  document_id uuid not null,
+  department_id uuid not null,
+  role text
+);
+```
+
+Риски: тело в PDF/BLOB без `body_text`; даты в строках; ACL в отдельной системе.
+
+### 4.2 MongoDB
+
+```json
+{
+  "_id": "...",
+  "docId": "ТЗ-ЭКЗ-0001",
+  "title": "...",
+  "kind": "регламент",
+  "department": "Отдел качества",
+  "issuedAt": "2025-06-28",
+  "effectiveFrom": "2025-06-28",
+  "ruleKey": null,
+  "sections": [{"heading": "...", "text": "..."}],
+  "acl": {"departments": ["Отдел качества"]},
+  "hash": "sha256..."
+}
+```
+
+Риски: неоднородные поля, разные имена дат, вложенные ACL, отсутствие schema enforcement.
+
+### 4.3 Файловое дерево (текущий sample-corpus)
+
+Текущая реализация: `sample-corpus/manifest.json` + Markdown-файлы.
+
+Плюсы: просто версионировать, прозрачно для demo.  
+Минусы: нет нормального ACL, нет транзакций, effective/status частично выводятся, поиск по полям ограничен.
+
+## 5. Правила нормализации
+
+- **Даты**: хранить ISO `YYYY-MM-DD`; исходный формат сохранять в `raw`.
+- **Редакции**: одна редакция = один индексируемый документ; группа редакций связывается `rule_key`.
+- **Статус**: вычислять относительно `as_of`/now: `future` если `effective_at > as_of`, `superseded` если есть более новая действующая редакция, `active` если действует.
+- **ACL по умолчанию**: deny. Документ без `acl_departments` не попадает в выдачу обычной роли.
+- **Пустой department**: quarantine до классификации.
+- **Текст**: сохранять исходник и извлечённый текст отдельно; в RAG индексировать извлечённый текст с привязкой к секциям.
+
+## 6. Проверка готовности источника
+
+Источник считается готовым к подключению, когда:
+
+- [ ] есть маппинг всех обязательных RAG-полей;
+- [ ] `doc_id` стабилен между импортами;
+- [ ] `department` заполнен или есть правило классификации;
+- [ ] даты парсятся в ISO;
+- [ ] редакции одного правила связаны (`rule_key` или эквивалент);
+- [ ] есть quarantine report по невалидным записям;
+- [ ] есть smoke-запросы по 8-10 темам из `docs/db/ARTICLES-DRAFT.md`.
