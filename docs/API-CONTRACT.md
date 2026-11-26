@@ -26,6 +26,12 @@
 
 Стек: Python 3.11+, FastAPI + uvicorn. Порт разработки — **8874**, на sage-pl — за Caddy (`:4437`).
 
+**Примеры сняты с живого стенда 26.11.2026** (внешний `https://2.27.5.234.nip.io:4437`,
+корпус `corpus-real` — 4 документа, 154 чанка, модель `claude-opus-4-6`): role_id,
+состав ролей, тексты вопросов, цитаты и номера заявок — реальные. Примеры с
+`ТЗ-ЭКЗ-*`, направлением «закупки» и «27 документами» — из синтетического
+`sample-corpus`: они показывают форму ответа, а не данные заказчика.
+
 ---
 
 ## 1. Структура репозитория
@@ -71,18 +77,23 @@ src/
 
 ### `GET /api/roles`
 ```json
-[{"id":"lawyer","title":"Юридический отдел","departments":["Юридический отдел"],"systems":[]},
- {"id":"quality","title":"Отдел качества","departments":["Отдел качества"],"systems":[]},
- {"id":"it","title":"ИТ-служба","departments":["ИТ-служба"],"systems":[]},
- {"id":"director","title":"Руководитель","departments":["*"],"systems":["*"]}]
+[{"id":"dbrct","title":"ДБРЦТ","departments":["ДБРЦТ"],"systems":[],"default_lines":[]},
+ {"id":"ib","title":"Дирекция ИБ","departments":["Дирекция ИБ"],"systems":[],"default_lines":[]},
+ {"id":"technical","title":"Техническая дирекция","departments":["Техническая дирекция"],"systems":[],"default_lines":[]},
+ {"id":"quality","title":"Служба качества","departments":["*"],"systems":["*"],"default_lines":["*"]},
+ {"id":"director","title":"Руководитель","departments":["*"],"systems":["*"],"default_lines":["*"]}]
 ```
-`*` = все. Отделы берутся из `manifest.json → documents[].department`.
+`*` = все. Отделы берутся из `manifest.json → documents[].department`, а набор ролей
+выводится из манифеста (`src/lex/access.py:219`) — поэтому он меняется вместе с
+корпусом. Значения `lawyer` и `it` на стенде **не принимаются**: `POST /api/ask`
+с такой ролью → `400` («неизвестная роль: lawyer» + перечень доступных ролей —
+`src/api/app.py:224`).
 
 ### `POST /api/ask` → `text/event-stream`
 Запрос:
 ```json
-{"question":"Какой срок согласования заявки на закупку?",
- "role_id":"lawyer",
+{"question":"Как проводится анкетирование заказчика о качестве выполненного проекта?",
+ "role_id":"director",
  "as_of":"2026-03-01"}
 ```
 - `as_of` — необязательная дата (YYYY-MM-DD). Если задана — действует редакция,
@@ -91,17 +102,17 @@ src/
 
 ### `GET /api/journal?limit=50&role_id=`
 ```json
-[{"id":"q-001","ts":"2026-11-26T10:31:02Z","role_id":"lawyer",
+[{"id":"q-001","ts":"2026-11-26T10:31:02Z","role_id":"director",
   "question":"…","refused":false,"elapsed_ms":3410,"steps":[{"key":"retrieve","ms":210}],
-  "doc_ids":["ТЗ-ЭКЗ-СР01-Р2"],"inference_path":"nexus-link"}]
+  "doc_ids":["КД-ПД-03"],"inference_path":"nexus-link"}]
 ```
 
 ### `GET /api/analytics`
 ```json
 {"total":42,"refusals":7,"refusal_rate":0.167,"avg_latency_ms":3800,"p95_latency_ms":9100,
  "top_missing":[{"topic":"лицензирование продукта X","count":4}],
- "top_sources":[{"doc_id":"ТЗ-ЭКЗ-СР01-Р2","count":12}],
- "by_role":[{"role_id":"lawyer","count":20}],
+ "top_sources":[{"doc_id":"КД-ПД-03","count":12}],
+ "by_role":[{"role_id":"director","count":20}],
  "unanswered":[{"question":"…","ts":"…"}]}
 ```
 `top_missing` — из отказов и пустых выдач. Это критерий «Соответствие задаче партнёра».
@@ -401,7 +412,7 @@ OCR на старте — **уже готовый движок, не обуча�
 
 ```json
 {"question":"Какой срок согласования заявки?",
- "role_id":"lawyer","session_id":"s-7f3a1c"}
+ "role_id":"director","session_id":"s-7f3a1c"}
 ```
 
 Первый запрос — без `session_id`, сервер создаёт сессию.
@@ -413,10 +424,10 @@ OCR на старте — **уже готовый движок, не обуча�
 ```json
 event: clarify
 data: {"session_id":"s-7f3a1c",
-       "questions":[{"key":"as_of","text":"На какую дату определить действующую редакцию?","reason":"в корпусе три редакции правила SR-01, без даты нельзя выбрать","kind":"date"},
-                    {"key":"amount","text":"Сумма заявки больше 500 000 рублей?","reason":"от суммы зависит порядок согласования","kind":"choice","options":["до 500 000","свыше 500 000","не знаю"]}],
-       "partial":{"retrieved":12,"accessible":5},
-       "can_skip":true}
+       "questions":[{"key":"business_line","text":"Возможные направления: проектная деятельность, пресейл","reason":"без направления неясно, какие документы смотреть","kind":"choice","options":["проектная деятельность","пресейл"]},
+                    {"key":"subject","text":"О каком заказе, договоре или поставщике идёт речь? (номер или предмет)","reason":"все параметры есть, но нужного документа не нашлось — уточню предмет, чтобы искать не кота в темноте","kind":"text"}],
+       "partial":{"business_lines":["проектная деятельность","пресейл"]},
+       "can_skip":false}
 ```
 
 `kind`: `date` | `choice` | `text` | `doc_id`.
@@ -426,9 +437,9 @@ data: {"session_id":"s-7f3a1c",
 несёт `session_id` и `answers`:
 
 ```json
-{"question":"Какой срок согласования заявки?","role_id":"lawyer",
+{"question":"Как проводится анкетирование заказчика о качестве выполненного проекта?","role_id":"director",
  "session_id":"s-7f3a1c",
- "answers":{"as_of":"2026-07-01","amount":"свыше 500 000"}}
+ "answers":{"business_line":"проектная деятельность","subject":"проект заказчика №42"}}
 ```
 
 Значение `"не знаю"` или отсутствие ключа = «пропустить».
@@ -486,7 +497,7 @@ data: {…, "assumptions":[{"key":"as_of","value":"2026-11-26","note":"дата 
 Документ и кейс получают поле `business_line` (обязательное для новых данных):
 
 ```json
-{"doc_id":"ТЗ-ЭКЗ-СР01-Р2","business_line":"закупки","department":"Юридический отдел"}
+{"doc_id":"КД-ПД-01","business_line":"проектная деятельность","department":"Техническая дирекция"}
 ```
 
 Список направлений — из данных, не из кода:
@@ -744,7 +755,7 @@ data: {"short":"Пять рабочих дней (ТЗ-ЭКЗ-СР01-Р2, ред
   {"key":"amount","label":"Сумма","type":"money","required":true,"min":0},
   {"key":"deadline","label":"Требуемый срок","type":"date","required":true},
   {"key":"department","label":"Подразделение","type":"choice","required":true,
-   "options":["Отдел качества","Юридический отдел",…]}
+   "options":["Служба качества","Техническая дирекция",…]}
  ]}
 ```
 
@@ -756,14 +767,14 @@ data: {"short":"Пять рабочих дней (ТЗ-ЭКЗ-СР01-Р2, ред
 `POST /api/forms/{form_id}/fill`
 ```json
 {"session_id":"s-7f3a1c",
- "values":{"number":"ЗК-2026-42","amount":"450 000","department":"Отдел качества"}}
+ "values":{"number":"ЗК-2026-42","amount":"450 000","department":"Служба качества"}}
 ```
 ```json
 {"ok":false,
  "errors":[{"field":"number","value":"ЗК-2026-42","message":"номер не соответствует формату ЗК-ГГГГ-НННН","expected":"ЗК-2026-0042"},
            {"field":"deadline","message":"поле обязательное","expected":"дата в формате ГГГГ-ММ-ДД"}],
  "warnings":[{"field":"amount","message":"сумма близка к порогу 500 000 — согласование пойдёт по другому порядку","doc_id":"ТЗ-ЭКЗ-СР01-Р3"}],
- "filled":{"number":"ЗК-2026-42","amount":450000,"department":"Отдел качества","deadline":null},
+ "filled":{"number":"ЗК-2026-42","amount":450000,"department":"Служба качества","deadline":null},
  "missing":["deadline"],
  "progress":"3 из 4 полей"}
 ```
@@ -925,14 +936,12 @@ data: {"short":"Пять рабочих дней (ТЗ-ЭКЗ-СР01-Р2, ред
 `POST /api/escalate` (внутренний, вызывается оркестратором автоматически)
 
 ```json
-{"id":"esc-0003","ts":"2026-11-26T11:20:00Z",
- "session_id":"s-7f3a1c","role_id":"lawyer","business_line":"закупки",
- "question":"Как согласовать закупку, если поставщик единственный?",
- "clarifications":[{"iteration":1,"asked":["На какую дату?"],"answers":["2026-07-01"]},
-                   {"iteration":2,"asked":["Сумма?"],"answers":["не знаю"]},
-                   {"iteration":3,"asked":["Направление?"],"answers":["закупки"]}],
- "searched":{"documents":27,"cases":4,"accessible":5,"top":["ТЗ-ЭКЗ-СР01-Р2"]},
- "why_unresolved":"в корпусе нет порядка для единственного поставщика",
+{"id":"esc-0001","ts":"2026-11-26T11:20:00Z",
+ "session_id":"s-7f3a1c","role_id":"director","business_line":"проектная деятельность",
+ "question":"Какой порядок выдачи справок о выполненных работах по проекту?",
+ "clarifications":[],
+ "searched":{"documents":4,"cases":0,"accessible":0,"top":["КД-ПД-03","КД-ПД-01","КД-ПД-01","КД-ПД-01"]},
+ "why_unresolved":"в корпусе нет документа по теме «порядок выдачи справок о выполненных работах по проекту» (ближайшее по теме: КД-ПД-03, КД-ПД-01, КД-ПД-01, ответа по теме в них нет)",
  "kind":"not_in_corpus",
  "status":"open"}
 ```
@@ -1298,13 +1307,13 @@ data: {"kind":"out_of_scope",
 `POST /api/tickets` (создаёт оркестратор, не пользователь)
 
 ```json
-{"id":"LEX-2026-0042","created_at":"2026-11-26T11:20:00Z",
+{"id":"LEX-2026-0001","created_at":"2026-11-26T11:20:00Z",
  "created_by":"agent","session_id":"s-7f3a1c",
- "question":"Как согласовать закупку, если поставщик единственный?",
- "asker":{"role_id":"lawyer","business_line":"закупки"},
- "clarifications":[...3 итерации...],
- "searched":{"documents":27,"cases":4,"accessible":5,"top":["ТЗ-ЭКЗ-СР01-Р2"]},
- "why_unresolved":"в корпусе нет порядка для единственного поставщика",
+ "question":"Какой порядок выдачи справок о выполненных работах по проекту?",
+ "asker":{"role_id":"director","business_line":"проектная деятельность"},
+ "clarifications":[],
+ "searched":{"documents":4,"cases":0,"accessible":0,"top":["КД-ПД-03","КД-ПД-01","КД-ПД-01","КД-ПД-01"]},
+ "why_unresolved":"в корпусе нет документа по теме «порядок выдачи справок о выполненных работах по проекту» (ближайшее по теме: КД-ПД-03, КД-ПД-01, КД-ПД-01, ответа по теме в них нет)",
  "kind":"not_in_corpus",
  "priority":"normal",
  "assignee":null,
@@ -1733,7 +1742,7 @@ data: {"short":"Пять рабочих дней (ТЗ-ЭКЗ-СР01-Р2, ред
 ```json
 {"ticket":"LEX-2026-0042","channel":"email",
  "email":{"to":"quality@example.invalid",
-          "from":"lawyer@example.invalid",
+          "from":"director@example.invalid",
           "subject":"[LEX] Вопрос без ответа в базе: согласование с единственным поставщиком",
           "sent_at":"2026-11-26T11:20:00Z",
           "delivery":"simulated"}}
@@ -1843,6 +1852,13 @@ v1.15 объявлял «чтение единое»: весь корпус до
 `sample-corpus` они продолжают отдавать ровно те же документы, что до v1.16, —
 а при отсутствии отдела падают в `technical`, не в `director`. Дать «юристу»
 права руководителя на весь корпус — это не совместимость, а утечка.
+
+**Важно: HTTP-слой псевдонимы не пропускает.** `POST /api/ask` проверяет `role_id`
+по списку ролей активного корпуса (`src/api/app.py:224`), а не по псевдонимам, —
+поэтому клиентский запрос с `role_id=lawyer` на стенде получает `400`
+(«неизвестная роль: lawyer. Доступные роли: dbrct, ib, technical, quality, director»;
+в сборке стенда до 18:40 — без перечня). Псевдоним работает внутри кода и в
+тестах на `sample-corpus`, но наружу через API эти id не принимаются.
 
 ### 23.2. Правило фильтра
 
