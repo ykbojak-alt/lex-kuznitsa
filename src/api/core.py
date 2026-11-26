@@ -1,33 +1,37 @@
 """Адаптер между HTTP-слоем и ядром src/lex.
 
-Здесь НЕТ логики RAG: только поиск модулей ядра и приведение их ответов к форме,
-которую ждёт SSE. Пока ядро не написано (FORGE), используется заглушка —
-она отдаёт все шаги и честный ответ-плейсхолдер, чтобы контракт SSE можно
-было проверить end-to-end.
+Здесь НЕТ логики RAG: только вызов ядра и приведение его сигналов к кадрам SSE.
+Ядро (`lex.orchestrator.Orchestrator`) отдаёт ``Signal(kind, data)``, где data —
+pydantic-модели из ``lex.models``; HTTP-слой превращает их в строки.
 
-Ожидаемый интерфейс ядра (согласовать с FORGE):
-    lex.orchestrator.stream(question, role_id, as_of) -> AsyncIterator[(event, data)]
-        event ∈ {"step","answer","refusal","error"}; data — как в §3 контракта.
-    lex.corpus.stats() -> {"documents": int, "chunks": int}
-    lex.corpus.reload() -> {"documents": int, "chunks": int, "added": [str]}
-    lex.access.roles() -> list[dict]   (форма §2 /api/roles)
-    lex.journal.append(entry: dict) -> None
-    lex.journal.read(limit: int, role_id: str | None) -> list[dict]
-    lex.journal.aggregate() -> dict    (форма §2 /api/analytics)
-    lex.cases.* -> см. api/cases.py
+Интерфейс ядра, на который опираемся (согласован с FORGE):
+    lex.orchestrator.Orchestrator(RunOptions).run() -> AsyncIterator[Signal]
+        kind ∈ step|answer|refusal|clarify|escalate|done|error
+    lex.orchestrator.expand(detail_id, section) -> dict | None
+    lex.orchestrator.available_forms(corpus_root) -> list[dict]
+    lex.orchestrator.download_form_path(corpus_root, form_id) -> Path | None
+    lex.orchestrator.journal_entry(opts, ...) -> dict
+    lex.forms.validate(form, values, corpus=corpus) -> ValidationResult
+    lex.forms.get_form(corpus_root, form_id) -> Form | None
+    lex.corpus.load_corpus(root) -> Corpus
+    lex.access.roles() -> list[dict]           (появится у ACE; пока свои роли)
+
+Пока какого-то куска нет — используется честная заглушка, и это видно в ответе
+(поле ``stub``) и в отчёте. Молча подменять ядро нельзя.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import importlib
 import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from . import config, sse
-from .sse import step_keys
 
 CoreEvent = tuple[str, dict]
 
@@ -45,18 +49,60 @@ def core_modules() -> dict[str, Any]:
     return {
         "orchestrator": _try("lex.orchestrator"),
         "corpus": _try("lex.corpus"),
+        "models": _try("lex.models"),
+        "forms": _try("lex.forms"),
         "access": _try("lex.access"),
         "journal": _try("lex.journal"),
         "cases": _try("lex.cases"),
+        "media": _try("lex.media"),
     }
 
 
 def core_ready() -> bool:
     m = core_modules()
-    return m["orchestrator"] is not None and m["corpus"] is not None
+    return m["orchestrator"] is not None and hasattr(m["orchestrator"], "Orchestrator")
 
 
-# ---------- корпус (метаданные манифеста; не RAG) ----------
+def _as_dict(obj: Any) -> dict:
+    if isinstance(obj, dict):
+        return obj
+    for attr in ("model_dump", "dict", "to_dict"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                continue
+    return {}
+
+
+# ---------- корпус ----------
+
+_corpus_cache: dict[str, Any] = {}
+
+
+def corpus():
+    """Загруженный корпус ядра (кэш по корневому каталогу)."""
+    key = str(config.CORPUS_DIR.resolve())
+    if key in _corpus_cache:
+        return _corpus_cache[key]
+    m = core_modules()["corpus"]
+    if m is None or not hasattr(m, "load_corpus"):
+        return None
+    try:
+        c = m.load_corpus(config.CORPUS_DIR)
+    except Exception:
+        return None
+    _corpus_cache[key] = c
+    return c
+
+
+def reload_corpus() -> None:
+    _corpus_cache.clear()
+    m = core_modules()["corpus"]
+    if m is not None and hasattr(m, "load_corpus"):
+        corpus()
+
 
 def manifest() -> dict:
     path = config.CORPUS_DIR / "manifest.json"
@@ -80,30 +126,76 @@ def content_type_mix() -> dict[str, int]:
     return mix
 
 
-def has_nontext() -> bool:
-    mix = content_type_mix()
-    return any(mix[k] for k in ("image", "scan", "mixed"))
-
-
 def corpus_stats() -> dict:
-    m = core_modules()["corpus"]
-    if m is not None and hasattr(m, "stats"):
+    c = corpus()
+    if c is not None and hasattr(c, "stats"):
         try:
-            s = m.stats()
-            if isinstance(s, dict):
-                return {"documents": int(s.get("documents", 0)),
-                        "chunks": int(s.get("chunks", 0))}
+            s = c.stats
+            return {"documents": int(getattr(s, "documents", 0)),
+                    "chunks": int(getattr(s, "chunks", 0))}
         except Exception:
             pass
     return {"documents": len(manifest_documents()), "chunks": 0}
 
 
+def business_lines() -> list[dict]:
+    """§11: направления из данных. Поля business_line в манифесте ещё нет —
+    выводим из ``system`` и честно помечаем ``derived: true``."""
+    docs = manifest_documents()
+    counts: dict[str, int] = {}
+    explicit = False
+    for d in docs:
+        line = d.get("business_line")
+        if line:
+            explicit = True
+        else:
+            line = _line_from_system(str(d.get("system") or ""))
+        counts[line] = counts.get(line, 0) + 1
+    out = [{"id": k, "title": k.capitalize(), "docs": v} for k, v in counts.items()]
+    out.sort(key=lambda x: -x["docs"])
+    for item in out:
+        item["derived"] = not explicit
+    return out
+
+
+_LINE_HINTS: list[tuple[str, str]] = [
+    ("закуп", "закупки"),
+    ("продаж", "продажи"),
+    ("логист", "логистика"),
+    ("качеств", "качество"),
+    ("инженер", "производство"),
+    ("производ", "производство"),
+    ("финанс", "финансы"),
+    ("выплат", "персонал"),
+    ("юрид", "юридическое"),
+    ("охраны труда", "охрана труда"),
+    ("пропуск", "охрана труда"),
+    ("ит-", "ИТ"),
+    ("заявк", "закупки"),
+]
+
+
+def _line_from_system(system: str) -> str:
+    low = system.lower()
+    for needle, line in _LINE_HINTS:
+        if needle in low:
+            return line
+    return "общее"
+
+
 # ---------- роли ----------
 
 def default_roles() -> list[dict]:
-    """Роли из §2 контракта; отделы — из manifest.json."""
-    docs = manifest_documents()
-    departments = sorted({d.get("department") for d in docs if d.get("department")})
+    """Роли из §2 контракта; отделы — из корпуса."""
+    c = corpus()
+    if c is not None and hasattr(c, "departments"):
+        try:
+            departments = list(c.departments())
+        except Exception:
+            departments = []
+    else:
+        departments = sorted({d.get("department") for d in manifest_documents()
+                              if d.get("department")})
 
     def pick(pred: Callable[[str], bool]) -> list[str]:
         return [x for x in departments if pred(x.lower())]
@@ -136,9 +228,21 @@ def role_ids() -> set[str]:
     return {r.get("id") for r in roles()}
 
 
+def role_departments(role_id: str) -> list[str]:
+    for r in roles():
+        if r.get("id") == role_id:
+            return list(r.get("departments") or [])
+    return []
+
+
+def role_can_read(role_id: str, department: str) -> bool:
+    deps = role_departments(role_id)
+    return "*" in deps or not deps or department in deps
+
+
 # ---------- журнал ----------
 
-def _journal_path():
+def _journal_path() -> Path:
     config.ensure_dirs()
     return config.JOURNAL_PATH
 
@@ -240,86 +344,118 @@ def analytics() -> dict:
 
 def ingest() -> dict:
     m = core_modules()["corpus"]
-    if m is not None and hasattr(m, "reload"):
+    if m is not None and hasattr(m, "load_corpus"):
         try:
-            r = m.reload()
-            if isinstance(r, dict):
-                return {
-                    "ok": True,
-                    "documents": int(r.get("documents", 0)),
-                    "chunks": int(r.get("chunks", 0)),
-                    "added": list(r.get("added") or []),
-                }
+            c = m.load_corpus(config.CORPUS_DIR)
+            reload_corpus()
+            stats = c.stats
+            return {"ok": True, "documents": int(getattr(stats, "documents", 0)),
+                    "chunks": int(getattr(stats, "chunks", 0)), "added": []}
         except Exception as e:  # noqa: BLE001 — ошибку ядра отдаём как есть
             return {"ok": False, "documents": 0, "chunks": 0, "added": [], "error": str(e)}
     return {"ok": True, "documents": len(manifest_documents()), "chunks": 0,
             "added": [], "stub": True}
 
 
+# ---------- документы (§13.2) ----------
+
+def doc_meta(doc_id: str) -> dict | None:
+    c = corpus()
+    if c is not None and hasattr(c, "doc"):
+        try:
+            d = c.doc(doc_id)
+            if d is not None:
+                return _as_dict(d)
+        except Exception:
+            pass
+    return next((d for d in manifest_documents() if d.get("doc_id") == doc_id), None)
+
+
+def doc_path(doc_id: str) -> Path | None:
+    meta = doc_meta(doc_id)
+    if meta and meta.get("file"):
+        p = config.CORPUS_DIR / str(meta["file"])
+        if p.is_file():
+            return p
+    for p in sorted(config.CORPUS_DIR.iterdir()):
+        if p.is_file() and p.name.startswith(doc_id):
+            return p
+    return None
+
+
+def doc_sections(doc_id: str) -> list[dict]:
+    """Разделы документа из чанков корпуса — для оглавления."""
+    c = corpus()
+    if c is None:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ch in getattr(c, "chunks", []):
+        if getattr(ch, "doc_id", "") != doc_id:
+            continue
+        title = (getattr(ch, "section", "") or "").strip() or "Документ"
+        if title in seen:
+            continue
+        seen.add(title)
+        out.append({"title": title, "anchor": _anchor(title)})
+    return out
+
+
+def _anchor(title: str) -> str:
+    import re
+    low = title.lower().strip()
+    low = re.sub(r"[^\w\s-]", "", low, flags=re.UNICODE)
+    return "#" + re.sub(r"[\s_]+", "-", low)
+
+
 # ---------- поток ответа ----------
 
-STUB_STEP_DELAY = float(os.environ.get("LEX_STUB_STEP_DELAY", "0.12"))
-
-
-def _stub_detail(key: str, question: str, role_id: str, as_of: str | None) -> str:
-    n = len(manifest_documents())
-    mix = content_type_mix()
-    return {
-        "accept": f"роль {role_id}, дата отсчёта {as_of or 'сегодня'}",
-        "decompose": "1 подвопрос: " + question[:80],
-        "inspect": (f"текст {mix['text']} · картинки {mix['image']} · "
-                    f"сканы {mix['scan']} · смешанные {mix['mixed']}"),
-        "retrieve": f"документов {n}, кейсов 0 · вектор 0 → топ 0",
-        "cases": "найдено 0 кейсов, из них по теме 0",
-        "permissions": f"доступно 0 из {n}, отброшено {n}",
-        "resolve": "0 редакций, действующей нет",
-        "conflict": "конфликтов: 0",
-        "compose": "из 0 цитат",
-        "verify": "покрыто 0 из 0 утверждений",
-    }.get(key, "")
-
-
-async def _stub_stream(question: str, role_id: str, as_of: str | None,
-                       keys: list[str]) -> AsyncIterator[CoreEvent]:
-    """Заглушка: все шаги плана по порядку, затем честный ответ-плейсхолдер."""
-    for i, key in enumerate(keys, start=1):
-        await asyncio.sleep(STUB_STEP_DELAY)
-        yield ("step", {"n": i, "key": key,
-                        "detail": _stub_detail(key, question, role_id, as_of),
-                        "ms": int(STUB_STEP_DELAY * 1000)})
-    yield ("answer", {
-        "text": "Ядро LEX (src/lex) ещё не подключено — это ответ HTTP-слоя-заглушки. "
-                "SSE-контракт при этом соблюдён: шаги, затем answer, затем done.",
-        "citations": [],
-        "refused": False,
-        "stub": True,
-    })
-
-
-def _core_stream(question: str, role_id: str, as_of: str | None) -> AsyncIterator[CoreEvent]:
+def _run_options(question: str, role_id: str, as_of: str | None,
+                 session_id: str | None, answers: dict | None,
+                 tone: str = "plain", business_line: str | None = None):
     m = core_modules()["orchestrator"]
-    fn = getattr(m, "stream", None)
-    if fn is None:
-        raise RuntimeError("lex.orchestrator.stream не найден")
-    return fn(question, role_id, as_of)
+    RunOptions = getattr(m, "RunOptions", None)
+    if RunOptions is None:
+        raise RuntimeError("lex.orchestrator.RunOptions не найден")
+    kwargs: dict[str, Any] = {
+        "question": question,
+        "role_id": role_id,
+        "corpus_root": config.CORPUS_DIR,
+        "cases_path": config.CASES_PATH,
+        # без этого ядро само запишет тикеты/предложения в свои пути по умолчанию
+        "tickets_path": config.TICKETS_PATH,
+        "changes_path": config.CHANGE_REQUESTS_PATH,
+    }
+    if as_of:
+        kwargs["as_of"] = dt.date.fromisoformat(as_of)
+    if session_id:
+        kwargs["session_id"] = session_id
+    if answers:
+        kwargs["answers"] = answers
+    if tone in ("plain", "formal"):
+        kwargs["tone"] = tone
+    if business_line:
+        kwargs["business_line"] = business_line
+    return RunOptions(**kwargs)
 
 
-async def stream_answer(question: str, role_id: str, as_of: str | None) -> AsyncIterator[str]:
-    """Единая точка: поток кадров SSE с гарантией завершения.
+def _detail_id(entry: dict) -> str:
+    return "q-" + str(entry.get("id") or uuid.uuid4().hex[:6]).removeprefix("q-")
 
-    Инварианты, которые держит именно этот слой:
-      * шаги идут в фиксированном порядке плана (пропущенные дополняются);
-      * ровно одно answer ИЛИ refusal;
-      * затем всегда done; при ошибке — event: error вместо answer/refusal.
+
+async def stream_answer(question: str, role_id: str, as_of: str | None,
+                        session_id: str | None = None,
+                        answers: dict | None = None) -> AsyncIterator[str]:
+    """Поток SSE по сигналам ядра.
+
+    Инварианты, которые держит этот слой:
+      * шаг `escalate` (если пришёл) заменяет answer/refusal;
+      * затем всегда done, кроме clarify — по §10 поток там закрывается;
+      * при ошибке ядра — кадр error вместо финального события.
     """
     started = time.perf_counter()
     journal_id = "q-" + uuid.uuid4().hex[:10]
     inference_path = "nexus-link" if config.NEXUS_LINK_BASE_URL else "local"
-    include_inspect = has_nontext()
-    keys = step_keys(include_inspect)
-    emitted = 0
-    terminal_sent = False
-    failed = False
     entry: dict[str, Any] = {
         "id": journal_id,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -331,71 +467,51 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
         "doc_ids": [],
         "inference_path": inference_path,
         "as_of": as_of,
+        "session_id": session_id,
     }
-
-    def fill_until(upto: int) -> list[str]:
-        nonlocal emitted
-        out = []
-        ms = int((time.perf_counter() - started) * 1000)
-        for idx in range(emitted, upto):
-            out.append(sse.step(idx + 1, keys[idx], "шаг не сообщён ядром", ms,
-                                include_inspect))
-        emitted = max(emitted, upto)
-        return out
-
-    def fill_rest() -> list[str]:
-        return fill_until(len(keys))
+    failed = False
+    closed_without_done = False
 
     try:
-        source = (_core_stream(question, role_id, as_of) if core_ready()
-                  else _stub_stream(question, role_id, as_of, keys))
-        async for event, data in source:
-            if event == "step":
-                key = str(data.get("key", ""))
-                if key not in keys:
-                    continue
-                n = keys.index(key) + 1
-                if n <= emitted:
-                    continue  # повтор/перестановка: порядок фиксирован контрактом
-                for extra in fill_until(n - 1):
-                    yield extra
-                emitted = n
-                ms = int(data.get("ms", 0) or 0)
-                entry["steps"].append({"key": key, "ms": ms})
-                yield sse.step(n, key, str(data.get("detail", "")), ms, include_inspect)
-            elif event == "answer":
-                for extra in fill_rest():
-                    yield extra
-                entry["refused"] = bool(data.get("refused", False))
+        m = core_modules()["orchestrator"]
+        if not core_ready():
+            raise RuntimeError("ядро LEX (src/lex/orchestrator.py) недоступно")
+        opts = _run_options(question, role_id, as_of, session_id, answers)
+        orch = m.Orchestrator(opts)
+
+        async for signal in orch.run():
+            kind = getattr(signal, "kind", "")
+            data = _as_dict(getattr(signal, "data", {}))
+            if kind == "step":
+                entry["steps"].append({"key": data.get("key"), "ms": data.get("ms")})
+                yield sse.step(int(data.get("n", 0)), str(data.get("key", "")),
+                               str(data.get("detail", "")), int(data.get("ms", 0) or 0))
+            elif kind == "answer":
                 entry["doc_ids"] = sorted({
                     c.get("doc_id") for c in (data.get("citations") or [])
                     if isinstance(c, dict) and c.get("doc_id")
                 })
-                yield sse.answer(str(data.get("text", "")),
-                                 list(data.get("citations") or []),
-                                 bool(data.get("refused", False)),
-                                 list(data.get("assumptions") or []) or None)
-                terminal_sent = True
-            elif event == "refusal":
-                for extra in fill_rest():
-                    yield extra
+                entry["refused"] = bool(data.get("refused", False))
+                if data.get("detail_id"):
+                    entry["detail_id"] = data["detail_id"]
+                yield sse.answer(data)
+            elif kind == "refusal":
                 entry["refused"] = True
                 entry["doc_ids"] = list(data.get("sources") or [])
                 entry["refusal_reason"] = str(data.get("reason", ""))
                 entry["refusal_kind"] = str(data.get("kind", ""))
-                yield sse.refusal(str(data.get("reason", "")),
-                                  list(data.get("sources") or []),
-                                  str(data.get("kind", "not_in_corpus")))
-                terminal_sent = True
-            elif event == "error":
+                yield sse.refusal(data)
+            elif kind == "clarify":
+                entry["clarified"] = True
+                closed_without_done = True
+                yield sse.clarify(data)
+            elif kind == "escalate":
+                entry["escalated"] = True
+                entry["ticket"] = data.get("ticket")
+                yield sse.escalate(data)
+            elif kind == "error":
                 raise RuntimeError(str(data.get("message", "ошибка ядра")))
-        if not terminal_sent:
-            for extra in fill_rest():
-                yield extra
-            entry["refused"] = True
-            entry["refusal_kind"] = "not_in_corpus"
-            entry["refusal_reason"] = "ядро не вернуло answer или refusal"
-            yield sse.refusal("ядро не вернуло answer или refusal", [], "not_in_corpus")
+            # done от ядра не транслируем: elapsed/journal_id наши (§2)
     except Exception as e:  # noqa: BLE001 — ошибку отдаём клиенту кадром error
         failed = True
         entry["error"] = str(e)
@@ -403,9 +519,117 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
 
     elapsed = int((time.perf_counter() - started) * 1000)
     entry["elapsed_ms"] = elapsed
-    if not failed:
+    if not failed and not closed_without_done:
         yield sse.done(elapsed, inference_path, journal_id)
     try:
         journal_append(entry)
     except Exception:
         pass
+
+
+# ---------- раскрытие ответа (§13.1) ----------
+
+def expand(detail_id: str, section: str = "all") -> dict | None:
+    m = core_modules()["orchestrator"]
+    fn = getattr(m, "expand", None) if m is not None else None
+    if fn is None:
+        return None
+    try:
+        return fn(detail_id, section)
+    except Exception:
+        return None
+
+
+# ---------- формы (§13.3-§13.4) ----------
+
+def forms() -> list[dict]:
+    m = core_modules()["orchestrator"]
+    fn = getattr(m, "available_forms", None) if m is not None else None
+    if fn is not None:
+        try:
+            return list(fn(config.CORPUS_DIR))
+        except Exception:
+            pass
+    fm = core_modules()["forms"]
+    if fm is not None and hasattr(fm, "load_forms"):
+        try:
+            return [f.to_dict() for f in fm.load_forms(config.CORPUS_DIR)]
+        except Exception:
+            pass
+    return []
+
+
+def form(form_id: str) -> dict | None:
+    return next((f for f in forms() if f.get("form_id") == form_id), None)
+
+
+def form_download(form_id: str) -> Path | None:
+    m = core_modules()["orchestrator"]
+    fn = getattr(m, "download_form_path", None) if m is not None else None
+    if fn is not None:
+        try:
+            return fn(config.CORPUS_DIR, form_id)
+        except Exception:
+            pass
+    return None
+
+
+def form_fill(form_id: str, values: dict) -> dict | None:
+    """Проверка заполнения силами ядра (`lex.forms.validate`)."""
+    fm = core_modules()["forms"]
+    if fm is None or not hasattr(fm, "get_form") or not hasattr(fm, "validate"):
+        return None
+    try:
+        f = fm.get_form(config.CORPUS_DIR, form_id)
+        if f is None:
+            return None
+        result = fm.validate(f, values, corpus=corpus())
+        return _as_dict(result)
+    except Exception:
+        return None
+
+
+# ---------- кейсы (§8) ----------
+
+def case_store():
+    m = core_modules()["cases"]
+    if m is None or not hasattr(m, "get_case_store"):
+        return None
+    try:
+        return m.get_case_store(config.CASES_PATH)
+    except Exception:
+        return None
+
+
+def add_case(payload: dict) -> dict:
+    store = case_store()
+    if store is None:
+        raise RuntimeError("lex.cases недоступен")
+    case = store.add(
+        question=str(payload.get("question") or ""),
+        answer_in_practice=str(payload.get("answer_in_practice") or ""),
+        outcome=str(payload.get("outcome") or "open"),
+        author_role=str(payload.get("author_role") or ""),
+        author_name=str(payload.get("author_name") or ""),
+        linked_docs=[str(x) for x in (payload.get("linked_docs") or [])],
+        tags=[str(x) for x in (payload.get("tags") or [])],
+        rule_key=str(payload.get("rule_key") or ""),
+        content_type=str(payload.get("content_type") or "text"),
+    )
+    return {"id": case.id, "ok": True, "in_index": True}
+
+
+def list_cases(limit: int = 50, role_id: str | None = None,
+               tag: str | None = None, rule_key: str | None = None) -> list[dict]:
+    store = case_store()
+    if store is None:
+        return []
+    return [c.to_dict() for c in store.find(limit=limit, role_id=role_id,
+                                            tag=tag, rule_key=rule_key)]
+
+
+def cases_count() -> int:
+    store = case_store()
+    if store is None:
+        return 0
+    return len(store.cases)

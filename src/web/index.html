@@ -39,6 +39,8 @@
                 aria-controls="panelSettings" data-tab="role">Роли <span class="tab__badge" id="badgeRole">не выбрана</span></button>
         <button class="tab" type="button" role="tab" id="tabLine" aria-selected="false"
                 aria-controls="panelSettings" data-tab="line">Направление <span class="tab__badge" id="badgeLine">авто</span></button>
+        <button class="tab" type="button" role="tab" id="tabTone" aria-selected="false"
+                aria-controls="panelSettings" data-tab="tone">Тон <span class="tab__badge" id="badgeTone">простой</span></button>
         <button class="tab" type="button" role="tab" id="tabMode"
                 aria-controls="panelSettings" data-tab="mode">Режим <span class="tab__badge" id="badgeMode">мок</span></button>
       </div>
@@ -72,6 +74,23 @@
 
       </section>
 
+      <div class="progress" id="progress" hidden>
+        <div class="progress__row">
+          <div class="progress__track" role="progressbar" id="progressBar"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+               aria-label="Прогресс размышлений агента">
+            <span class="progress__fill" id="progressFill"></span>
+            <span class="progress__shimmer" aria-hidden="true"></span>
+          </div>
+          <span class="progress__count" id="progressCount">0 из 0</span>
+        </div>
+        <div class="progress__caption">
+          <span class="progress__now" id="progressNow" aria-live="polite"></span>
+          <span class="progress__detail" id="progressDetail"></span>
+        </div>
+        <ol class="progress__dots" id="progressDots" aria-hidden="true"></ol>
+      </div>
+
       <form class="composer" id="composer" autocomplete="off">
         <div class="composer__field">
           <label class="sr-only" for="question">Вопрос по документам</label>
@@ -101,6 +120,7 @@
                 title="Что значит «только из базы знаний»">источник: база знаний организации</button>
         <span id="consoleMeta">0 шагов</span>
       </div>
+      <div class="ibprog" id="ibProgress" hidden><span class="ibprog__fill" id="ibProgressFill"></span></div>
       <p class="infobox__empty" id="srcNote" hidden>
         Агент отвечает только по документам и кейсам базы знаний организации. Общие знания модели
         не используются; каждое утверждение обязано иметь цитату. Нет цитаты — нет утверждения,
@@ -119,6 +139,7 @@
 <noscript>Для работы LEX нужен JavaScript.</noscript>
 
 <script src="console-view.js"></script>
+<script src="progress-view.js"></script>
 <script src="mock-lex.js"></script>
 <script src="app.js"></script>
 </body>

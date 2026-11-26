@@ -120,6 +120,30 @@ class Citation(BaseModel):
     low_confidence: bool = False
 
 
+class CaveatReason(BaseModel):
+    """§20.2: одна причина оговорки — с кодом, чтобы считалась аналитика."""
+
+    code: str
+    text: str
+
+
+class Caveat(BaseModel):
+    """§20: ответ есть, но уверенность ниже порога.
+
+    ``level``: low — отвечаю уверенно, оговорка информационная; medium — стоит
+    проверить; high — лучше не действовать без человека. Оговорка НИКОГДА не
+    превращается в отказ: отказ дороже, он отправляет человека искать сам.
+    """
+
+    level: Literal["low", "medium", "high"] = "low"
+    reasons: list[CaveatReason] = Field(default_factory=list)
+    advice: str = ""
+
+    @property
+    def present(self) -> bool:
+        return bool(self.reasons)
+
+
 class AnswerData(BaseModel):
     text: str
     # §13.1: первый ответ — выжимка (2-4 предложения, <=400 знаков), подробности
@@ -139,6 +163,13 @@ class AnswerData(BaseModel):
     grounding: dict | None = None
     # §13.3: если в ответе есть форма — карточка «Есть форма: …».
     forms: list[dict] = Field(default_factory=list)
+    # §21: тон формулировки. Смысл от него не зависит.
+    tone: Literal["plain", "formal"] = "plain"
+    # §20: третий исход — ответ с оговоркой. None означает «оговорки нет»,
+    # и это нормальное состояние: оговорка на каждом ответе обесценивается.
+    caveat: Caveat | None = None
+    # §18: если ответить нечем — тикет, созданный агентом. Номер человекочитаемый.
+    ticket_id: str | None = None
 
 
 class ClarifyQuestion(BaseModel):
@@ -183,6 +214,8 @@ class AskRequest(BaseModel):
     question: str
     role_id: str
     as_of: date | None = None
+    # §21.3: переключатель тона. Смысл ответа от него не зависит.
+    tone: Literal["plain", "formal"] = "plain"
 
 
 # ------------------------------------------------------------------ корпус

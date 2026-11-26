@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,6 +44,15 @@ class Case:
     tags: list[str] = field(default_factory=list)
     rule_key: str = ""
     content_type: str = "text"
+    # §19.2: флаг не-нормативности — обязателен и всегда False. Поле читается
+    # явно, чтобы никто не спутал кейс с регламентом «по умолчанию».
+    normative: bool = False
+    source: str = ""
+    escalation_id: str = ""
+    deviates_from: list[str] = field(default_factory=list)
+    deviation: str = ""
+    confirmed_by: str = ""
+    confirmed_at: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +67,14 @@ class Case:
             "tags": list(self.tags),
             "rule_key": self.rule_key,
             "content_type": self.content_type,
+            "kind": "case",
+            "normative": False,
+            "source": self.source,
+            "escalation_id": self.escalation_id,
+            "deviates_from": list(self.deviates_from),
+            "deviation": self.deviation,
+            "confirmed_by": self.confirmed_by,
+            "confirmed_at": self.confirmed_at,
         }
 
     @property
@@ -172,6 +190,12 @@ class CaseStore:
         rule_key: str = "",
         content_type: str = "text",
         case_id: str | None = None,
+        source: str = "",
+        escalation_id: str = "",
+        confirmed_by: str = "",
+        deviation: str = "",
+        corpus=None,
+        as_of=None,
     ) -> Case:
         question = (question or "").strip()
         answer = (answer_in_practice or "").strip()
@@ -183,6 +207,19 @@ class CaseStore:
             raise ValueError(f"outcome={outcome!r} не из {OUTCOMES}")
         if content_type not in CONTENT_TYPES:
             raise ValueError(f"content_type={content_type!r} не из {CONTENT_TYPES}")
+
+        # §19.2: deviates_from заполняется автоматически. «Противоречит» —
+        # значит практика называет иное значение, чем действующая на дату
+        # редакция того же правила. Проверка консервативная: сомнительное
+        # молчание лучше ложного обвинения регламента.
+        deviates: list[str] = []
+        deviation_text = (deviation or "").strip()
+        if corpus is not None:
+            deviates, auto_text = detect_deviation(
+                corpus, question=question, answer=answer,
+                rule_key=rule_key, as_of=as_of,
+            )
+            deviation_text = deviation_text or auto_text
 
         with self._lock:
             cid = case_id or self.next_id()
@@ -200,6 +237,15 @@ class CaseStore:
                 tags=[str(t) for t in (tags or [])],
                 rule_key=rule_key or "",
                 content_type=content_type,
+                source=source or ("escalation" if escalation_id else "manual"),
+                escalation_id=escalation_id or "",
+                deviates_from=deviates,
+                deviation=deviation_text,
+                confirmed_by=confirmed_by or "",
+                confirmed_at=(
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if confirmed_by else ""
+                ),
             )
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
@@ -223,7 +269,124 @@ def _case_from_dict(raw: dict) -> Case:
         tags=[str(x) for x in (raw.get("tags") or [])],
         rule_key=str(raw.get("rule_key") or ""),
         content_type=str(raw.get("content_type") or "text"),
+        normative=False,          # §19.2: кейс нормой не бывает никогда
+        source=str(raw.get("source") or ""),
+        escalation_id=str(raw.get("escalation_id") or ""),
+        deviates_from=[str(x) for x in (raw.get("deviates_from") or [])],
+        deviation=str(raw.get("deviation") or ""),
+        confirmed_by=str(raw.get("confirmed_by") or ""),
+        confirmed_at=str(raw.get("confirmed_at") or ""),
     )
+
+
+# ------------------------------------------------- §19.2: расхождение с нормой
+
+_QUANT_RE = re.compile(
+    r"(\d+[\d\s]*(?:[.,]\d+)?)\s*"
+    r"(рабоч\w*\s+дн\w*|календарн\w*\s+дн\w*|дн\w*|час\w*|руб\w*|процент\w*|%)",
+    re.IGNORECASE,
+)
+
+_NUM_WORDS = {
+    "один": 1, "одного": 1, "одну": 1, "два": 2, "двух": 2, "три": 3, "трёх": 3,
+    "трех": 3, "четыре": 4, "четырёх": 4, "пять": 5, "пяти": 5, "шесть": 6,
+    "шести": 6, "семь": 7, "семи": 7, "восемь": 8, "восьми": 8, "девять": 9,
+    "десяти": 10, "десять": 10, "пятнадцать": 15, "тридцать": 30,
+}
+
+# «Три рабочих дня» и «3 рабочих дня» — одно и то же. Без нормализации
+# сравнение промахивается мимо половины корпуса, где числа записаны словами.
+_WORD_NUM_RE = re.compile(
+    r"\b(" + "|".join(sorted(_NUM_WORDS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _quantities(text: str) -> set[tuple[float, str]]:
+    """Сколько-чего из текста: {(3.0, "раб.дн"), (150000.0, "руб")}."""
+    low = (text or "").lower()
+    low = _WORD_NUM_RE.sub(lambda m: str(_NUM_WORDS[m.group(1).lower()]), low)
+    out: set[tuple[float, str]] = set()
+    for raw_num, unit in _QUANT_RE.findall(low):
+        try:
+            num = float(raw_num.replace(" ", "").replace(",", "."))
+        except ValueError:
+            continue
+        unit_key = "раб.дн" if "раб" in unit else (
+            "кал.дн" if "календар" in unit else unit.rstrip("аыи"))
+        out.add((num, unit_key))
+    return out
+
+
+def detect_deviation(
+    corpus,
+    *,
+    question: str,
+    answer: str,
+    rule_key: str = "",
+    as_of=None,
+) -> tuple[list[str], str]:
+    """§19.2: противоречит ли практика действующей редакции.
+
+    Возвращает ``(deviates_from, deviation)``. Пусто — не противоречит либо
+    доказать нечем: обвинять регламент на догадке нельзя, это дороже молчания.
+
+    Сравниваются **величины**: срок в днях, сумма в рублях, проценты. Если в
+    практике назван другой срок по тому же правилу — это и есть расхождение.
+    """
+    from . import editions  # локально: cases не должен тянуть цикл импортов
+
+    key = (rule_key or "").strip()
+    doc_ids: list[str] = []
+    parts: list[str] = []
+
+    practice = _quantities(answer)
+
+    if key:
+        rule = corpus.rules.get(key)
+        if rule is None:
+            # Имя правила могло быть дано вольно — ищем по подстроке.
+            rule = next((r for k, r in corpus.rules.items() if k.lower() == key.lower()), None)
+        if rule is not None:
+            res = editions.resolve_rule(rule, as_of)
+            if res is not None and res.in_force is not None:
+                norm = _quantities(res.in_force.value)
+                clash = _clash(practice, norm)
+                if clash:
+                    doc_ids.append(res.in_force.doc_id)
+                    parts.append(
+                        f"регламент {rule.key} ({res.in_force.doc_id}) требует "
+                        f"«{res.in_force.value}»; в практике — «{answer.strip()}»"
+                    )
+        return doc_ids, "; ".join(parts)
+
+    # rule_key не назван: ищем по теме вопроса. Правило считается «про это»,
+    # если и наш вопрос, и значение правила дают общую величину с разными
+    # числами — это единственный надёжный признак без модели.
+    for rkey, rule in corpus.rules.items():
+        if not practice:
+            break
+        res = editions.resolve_rule(rule, as_of)
+        if res is None or res.in_force is None:
+            continue
+        norm = _quantities(res.in_force.value)
+        clash = _clash(practice, norm)
+        if clash:
+            doc_ids.append(res.in_force.doc_id)
+            parts.append(
+                f"регламент {rkey} ({res.in_force.doc_id}) требует "
+                f"«{res.in_force.value}»; в практике иначе"
+            )
+    return doc_ids, "; ".join(parts)
+
+
+def _clash(practice: set[tuple[float, str]], norm: set[tuple[float, str]]) -> bool:
+    """Есть ли общая единица с разными числами."""
+    for p_num, p_unit in practice:
+        for n_num, n_unit in norm:
+            if p_unit == n_unit and abs(p_num - n_num) > 1e-9:
+                return True
+    return False
 
 
 _STORES: dict[str, CaseStore] = {}

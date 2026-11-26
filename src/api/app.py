@@ -4,18 +4,17 @@
     uvicorn api.app:app --port 8874        (из src/)
     uvicorn src.api.app:app --port 8874    (из корня репозитория)
 
-Эндпоинты и события — ровно по docs/API-CONTRACT.md v1. Логики RAG здесь нет.
+Эндпоинты и события — по docs/API-CONTRACT.md v1.13. Логики RAG здесь нет:
+всё содержательное живёт в src/lex, этот слой только транспорт.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Запуск из корня репозитория (`uvicorn src.api.app:app`) — ядро лежит в src/lex,
@@ -24,12 +23,27 @@ _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from . import cases as cases_mod, config, core, preview, probes  # noqa: E402
+from . import (  # noqa: E402
+    cases as cases_mod,
+    changes,
+    config,
+    core,
+    documents,
+    preview,
+    probes,
+    tickets,
+)
 
-app = FastAPI(title="LEX API", version=config.VERSION, docs_url="/api/docs",
-              openapi_url="/api/openapi.json")
+app = FastAPI(
+    title="LEX API",
+    version=config.VERSION,
+    description="HTTP-слой LEX: поиск по базе знаний организации, кейсы, формы, "
+                "тикеты службы качества. Логики RAG здесь нет — только транспорт.",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 
-# Статика отдаётся этим же приложением — UI и API на одном origin.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,6 +59,9 @@ class AskRequest(BaseModel):
     question: str = Field(..., min_length=1)
     role_id: str = Field(..., min_length=1)
     as_of: str | None = None
+    session_id: str | None = None
+    answers: dict | None = None
+    tone: str = "plain"
 
 
 class CaseRequest(BaseModel):
@@ -59,7 +76,66 @@ class CaseRequest(BaseModel):
     content_type: str = "text"
 
 
-# ---------- health / roles ----------
+class ExpandRequest(BaseModel):
+    detail_id: str = Field(..., min_length=1)
+    section: str = "all"
+
+
+class FillRequest(BaseModel):
+    session_id: str = ""
+    values: dict = Field(default_factory=dict)
+
+
+class TicketRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    kind: str = "not_in_corpus"
+    priority: str = "normal"
+    session_id: str = ""
+    role_id: str = ""
+    business_line: str = ""
+    why_unresolved: str = ""
+    clarifications: list[dict] = Field(default_factory=list)
+    searched: dict = Field(default_factory=dict)
+    escalation_id: str = ""
+
+
+class EscalateRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    why_unresolved: str = Field(..., min_length=1)
+    kind: str = "not_in_corpus"
+    session_id: str = ""
+    role_id: str = ""
+    business_line: str = ""
+    clarifications: list[dict] = Field(default_factory=list)
+    searched: dict = Field(default_factory=dict)
+
+
+class AnswerRequest(BaseModel):
+    answer: str = Field(..., min_length=1)
+    resolved_by: str = "quality"
+
+
+class AssignRequest(BaseModel):
+    assignee: str = Field(..., min_length=1)
+    force: bool = False
+
+
+class CloseRequest(BaseModel):
+    reason: str = ""
+
+
+class ConfirmRequest(BaseModel):
+    case: dict
+    acknowledge_warnings: bool = False
+    editor_role: str = ""
+
+
+class ChangeStatusRequest(BaseModel):
+    status: str
+    by: str
+
+
+# ---------- health / роли / направления ----------
 
 @app.get("/api/health")
 async def health() -> dict:
@@ -70,16 +146,32 @@ async def health() -> dict:
         "llm": probed["llm"],
         "embed": probed["embed"],
         "rerank": probed["rerank"],
-        "ocr": {"available": preview.ocr_available(),
-                "engine": "tesseract", "lang": "rus"},
+        "ocr": {"available": documents.ocr_available(),
+                "engine": documents.ocr_engine(), "lang": "rus"},
         "cases": {"count": cases_mod.count()},
+        "tickets": {"open": len(tickets.list_tickets(status="open"))},
         "corpus": {**core.corpus_stats(), "content_types": core.content_type_mix()},
+        "core": {"ready": core.core_ready()},
     }
 
 
 @app.get("/api/roles")
 def get_roles() -> list[dict]:
     return core.roles()
+
+
+@app.get("/api/business-lines")
+def get_business_lines() -> list[dict]:
+    """§11: направления из данных ядра, иначе — производные от корпуса."""
+    m = core.core_modules()["orchestrator"]
+    policy_mod = core._try("lex.policy")
+    c = core.corpus()
+    if policy_mod is not None and c is not None and hasattr(policy_mod, "available_lines"):
+        try:
+            return list(policy_mod.available_lines(c))
+        except Exception:
+            pass
+    return core.business_lines()
 
 
 # ---------- ask (SSE) ----------
@@ -91,11 +183,13 @@ async def ask(req: AskRequest):
     if req.as_of:
         try:
             import datetime as _dt
+
             _dt.date.fromisoformat(req.as_of)
         except ValueError:
             raise HTTPException(status_code=400, detail="as_of должен быть YYYY-MM-DD") from None
 
-    gen = core.stream_answer(req.question, req.role_id, req.as_of)
+    gen = core.stream_answer(req.question, req.role_id, req.as_of,
+                             req.session_id, req.answers)
     return StreamingResponse(
         gen,
         media_type="text/event-stream",
@@ -107,16 +201,207 @@ async def ask(req: AskRequest):
     )
 
 
-# ---------- journal / analytics / ingest ----------
+# ---------- журнал / аналитика / ingest ----------
 
 @app.get("/api/journal")
-def get_journal(limit: int = Query(50, ge=1, le=1000), role_id: str | None = None) -> list[dict]:
+def get_journal(limit: int = Query(50, ge=1, le=1000),
+                role_id: str | None = None) -> list[dict]:
     return core.journal_read(limit=limit, role_id=role_id)
 
 
 @app.get("/api/analytics")
 def get_analytics() -> dict:
-    return core.analytics()
+    """§2 + §11 + §16.6 + §18.6 + §19.5 + §20.5 + §13 similar_questions."""
+    base = core.analytics()
+    base.update({
+        "by_business_line": _by_business_line(),
+        "missing_by_line": _missing_by_line(base),
+        "similar_questions": _similar_questions(),
+        "knowledge_loop": _knowledge_loop(),
+        "tickets": _tickets_analytics(),
+        "change_requests": changes.analytics(),
+        "caveats": _caveats(base),
+    })
+    return base
+
+
+def _by_business_line() -> list[dict]:
+    counts: dict[str, dict[str, int]] = {}
+    for row in core.journal_read(limit=100_000):
+        line = str(row.get("business_line") or "общее")
+        slot = counts.setdefault(line, {"count": 0, "refusals": 0})
+        slot["count"] += 1
+        if row.get("refused"):
+            slot["refusals"] += 1
+    return [{"line": k, **v} for k, v in sorted(counts.items(), key=lambda kv: -kv[1]["count"])]
+
+
+def _missing_by_line(base: dict) -> list[dict]:
+    out: dict[str, int] = {}
+    for row in core.journal_read(limit=100_000):
+        if not row.get("refused"):
+            continue
+        line = str(row.get("business_line") or "общее")
+        out[line] = out.get(line, 0) + 1
+    return [{"line": k, "count": v} for k, v in sorted(out.items(), key=lambda kv: -kv[1])]
+
+
+def _normalise_question(text: str) -> str:
+    import re
+
+    low = (text or "").lower().strip()
+    low = re.sub(r"[^\w\s]", " ", low, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", low).strip()
+
+
+def _similar_questions() -> list[dict]:
+    """§13 (v1.6): группировка похожих вопросов по нормализованному тексту.
+
+    Группировку журнала делает ACE; пока её нет — считаем здесь по журналу,
+    и это честно помечено в отчёте. Канонический вопрос — самый частый вариант.
+    """
+    groups: dict[str, dict] = {}
+    for row in core.journal_read(limit=100_000):
+        question = str(row.get("question") or "")
+        key = _normalise_question(question)
+        if not key:
+            continue
+        slot = groups.setdefault(key, {"variants": {}, "count": 0, "refusals": 0,
+                                       "last_seen": ""})
+        slot["count"] += 1
+        slot["refusals"] += 1 if row.get("refused") else 0
+        slot["variants"][question] = slot["variants"].get(question, 0) + 1
+        ts = str(row.get("ts") or "")
+        if ts > slot["last_seen"]:
+            slot["last_seen"] = ts
+
+    out = []
+    for slot in groups.values():
+        variants = sorted(slot["variants"].items(), key=lambda kv: -kv[1])
+        canonical = variants[0][0]
+        out.append({
+            "canonical": canonical,
+            "count": slot["count"],
+            "variants": [v for v, _ in variants if v != canonical][:5],
+            "last_seen": slot["last_seen"],
+            "refusal_rate": round(slot["refusals"] / slot["count"], 3) if slot["count"] else 0.0,
+        })
+    out.sort(key=lambda x: -x["count"])
+    return out[:20]
+
+
+def _knowledge_loop() -> dict:
+    """§16.6: эскалации → ответы → кейсы."""
+    esc = tickets.list_escalations(limit=10_000)
+    answered = [e for e in esc if e.get("status") == "answered" or e.get("answer")]
+    converted = [e for e in esc if e.get("case_id")]
+    hours: list[float] = []
+    for e in answered:
+        import datetime as dt
+
+        try:
+            t0 = dt.datetime.strptime(str(e.get("ts")), "%Y-%m-%dT%H:%M:%SZ")
+            t1 = dt.datetime.strptime(str(e.get("answered_at")), "%Y-%m-%dT%H:%M:%SZ")
+            hours.append((t1 - t0).total_seconds() / 3600)
+        except Exception:
+            continue
+    not_converted = [
+        {"ticket": e.get("id"), "why": "ответ не оформлен кейсом"}
+        for e in answered if not e.get("case_id")
+    ]
+    return {
+        "escalations_total": len(esc),
+        "answered": len(answered),
+        "converted_to_cases": len(converted),
+        "avg_hours_to_answer": round(sum(hours) / len(hours), 1) if hours else 0.0,
+        "questions_now_covered": len(converted),
+        "not_converted": not_converted[:20],
+    }
+
+
+def _tickets_analytics() -> dict:
+    """§18.6: очередь службы качества."""
+    rows = tickets.list_tickets(limit=10_000)
+    by_status: dict[str, int] = {}
+    by_line: dict[str, int] = {}
+    topics: dict[str, int] = {}
+    to_assign: list[float] = []
+    to_answer: list[float] = []
+    breached = 0
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def _ts(value) -> dt.datetime | None:
+        try:
+            return dt.datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=dt.timezone.utc)
+        except Exception:
+            return None
+
+    for r in rows:
+        st = str(r.get("status") or "open")
+        by_status[st] = by_status.get(st, 0) + 1
+        line = str((r.get("asker") or {}).get("business_line") or "общее")
+        by_line[line] = by_line.get(line, 0) + 1
+        topic = _normalise_question(str(r.get("question") or ""))[:60]
+        if topic:
+            topics[topic] = topics.get(topic, 0) + 1
+        created = _ts(r.get("created_at"))
+        assigned = _ts(r.get("assigned_at"))
+        answered = _ts(r.get("answered_at"))
+        if created and assigned:
+            to_assign.append((assigned - created).total_seconds() / 3600)
+        if created and answered:
+            to_answer.append((answered - created).total_seconds() / 3600)
+        due = _ts(r.get("sla_due"))
+        if due and st not in ("closed",) and now > due:
+            breached += 1
+
+    return {
+        "total": len(rows),
+        "open": by_status.get("open", 0),
+        "assigned": by_status.get("assigned", 0),
+        "answered": by_status.get("answered", 0),
+        "closed": by_status.get("closed", 0),
+        "by_business_line": [{"line": k, "count": v}
+                             for k, v in sorted(by_line.items(), key=lambda kv: -kv[1])],
+        "avg_hours_to_assign": round(sum(to_assign) / len(to_assign), 1) if to_assign else 0.0,
+        "avg_hours_to_answer": round(sum(to_answer) / len(to_answer), 1) if to_answer else 0.0,
+        "sla_breached": breached,
+        "top_topics": [{"topic": k, "count": v}
+                       for k, v in sorted(topics.items(), key=lambda kv: -kv[1])[:10]],
+    }
+
+
+def _caveats(base: dict) -> dict:
+    """§20.5: оговорки по журналу. Уровни пишет ядро в запись журнала."""
+    rows = core.journal_read(limit=100_000)
+    by_level: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    caveated = 0
+    refused = 0
+    plain = 0
+    for r in rows:
+        level = r.get("caveat_level")
+        if level:
+            caveated += 1
+            by_level[str(level)] = by_level.get(str(level), 0) + 1
+            for reason in r.get("caveat_reasons") or []:
+                code = reason.get("code") if isinstance(reason, dict) else str(reason)
+                if code:
+                    by_reason[str(code)] = by_reason.get(str(code), 0) + 1
+        elif r.get("refused"):
+            refused += 1
+        else:
+            plain += 1
+    return {
+        "total": caveated,
+        "by_level": by_level,
+        "by_reason": [{"code": k, "count": v}
+                      for k, v in sorted(by_reason.items(), key=lambda kv: -kv[1])],
+        "answer_rate": {"plain": plain, "caveated": caveated, "refused": refused},
+    }
 
 
 @app.post("/api/ingest")
@@ -124,7 +409,24 @@ def post_ingest() -> dict:
     return core.ingest()
 
 
-# ---------- кейсы (§8 v1.1) ----------
+# ---------- раскрытие ответа (§13.1) ----------
+
+@app.post("/api/expand")
+def post_expand(req: ExpandRequest) -> dict:
+    data = core.expand(req.detail_id, req.section)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"detail_id не найден: {req.detail_id} "
+                   "(развёрнутая версия живёт в памяти ядра того процесса, "
+                   "который ответил; после перезапуска её нет)")
+    out = {k: data.get(k) for k in ("short", "detailed", "sections", "tables", "citations")}
+    if data.get("section_requested"):
+        out["section_requested"] = data["section_requested"]
+    return out
+
+
+# ---------- кейсы (§8) ----------
 
 @app.post("/api/cases")
 def post_case(req: CaseRequest) -> dict:
@@ -142,33 +444,277 @@ def get_cases(limit: int = Query(50, ge=1, le=1000),
     return cases_mod.list_cases(limit=limit, role_id=role_id, tag=tag, rule_key=rule_key)
 
 
-# ---------- превью источника (§9 v1.1) ----------
+# ---------- формы (§13.3-§13.4) ----------
+
+@app.get("/api/forms")
+def get_forms() -> list[dict]:
+    out = []
+    for f in core.forms():
+        out.append({
+            "form_id": f.get("form_id"),
+            "title": f.get("title"),
+            "doc_id": f.get("doc_id"),
+            "fields": len(f.get("fields") or []),
+            "format": f.get("format", "md"),
+            "business_line": f.get("business_line", ""),
+        })
+    return out
+
+
+@app.get("/api/forms/{form_id}")
+def get_form(form_id: str) -> dict:
+    data = core.form(form_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"форма не найдена: {form_id}")
+    return data
+
+
+@app.get("/api/forms/{form_id}/download")
+def download_form(form_id: str):
+    path = core.form_download(form_id)
+    if path is None or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail=f"бланк формы не найден: {form_id}")
+    return FileResponse(path, filename=Path(path).name,
+                        media_type="text/markdown; charset=utf-8")
+
+
+@app.post("/api/forms/{form_id}/fill")
+def fill_form(form_id: str, req: FillRequest) -> dict:
+    result = core.form_fill(form_id, req.values)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"форма не найдена или ядро не умеет проверку: {form_id}")
+    return result
+
+
+# ---------- документы (§13.2) ----------
+
+def _doc_or_error(doc_id: str, role_id: str) -> dict:
+    try:
+        return documents.check_access(doc_id, role_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"документ не найден: {doc_id}") from None
+    except documents.AccessDenied as e:
+        raise HTTPException(status_code=403, detail=e.reason) from None
+
+
+@app.get("/api/doc/{doc_id}", response_class=HTMLResponse)
+def get_document(doc_id: str, role_id: str = Query("lawyer")):
+    _doc_or_error(doc_id, role_id)
+    try:
+        return HTMLResponse(documents.document_html(doc_id, role_id))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"файл документа отсутствует: {doc_id}") from None
+
+
+@app.get("/api/doc/{doc_id}/download")
+def download_document(doc_id: str, role_id: str = Query("lawyer")):
+    _doc_or_error(doc_id, role_id)
+    path = documents.resolve(doc_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"файл документа отсутствует: {doc_id}")
+    return FileResponse(path, filename=path.name,
+                        media_type=documents.content_type_for(path),
+                        headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
+
 
 @app.get("/api/doc/{doc_id}/preview")
-def doc_preview(doc_id: str, page: int = Query(1, ge=1)):
-    path = preview.resolve(doc_id)
-    if path is None:
-        raise HTTPException(status_code=404, detail=f"документ не найден: {doc_id}")
+def doc_preview(doc_id: str, page: int = Query(1, ge=1), role_id: str = Query("lawyer")):
+    _doc_or_error(doc_id, role_id)
+    got = documents.preview_bytes(doc_id, page)
+    if got is not None:
+        data, ctype = got
+        return Response(content=data, media_type=ctype,
+                        headers={"Cache-Control": "public, max-age=300"})
 
+    path = documents.resolve(doc_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"файл документа отсутствует: {doc_id}")
     suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        rendered = preview.pdf_page_png(path, page)
-        if rendered is not None:
-            data, ctype = rendered
-            from fastapi import Response
-            return Response(content=data, media_type=ctype,
-                            headers={"Cache-Control": "public, max-age=300"})
-        # движка нет — отдаём сам PDF, честно указывая, что это не страница
-        return FileResponse(path, media_type="application/pdf",
-                            filename=path.name,
+    if suffix in documents.PDF_EXT:
+        return FileResponse(path, media_type="application/pdf", filename=path.name,
                             headers={"X-Preview-Note": "pdf-page-render-unavailable",
                                      "Cache-Control": "public, max-age=300"})
-
     ctype = preview.content_type_for(path)
     if ctype.startswith("text/") or suffix in (".md", ".txt"):
         ctype = "text/plain; charset=utf-8"
     return FileResponse(path, media_type=ctype,
                         headers={"Cache-Control": "public, max-age=300"})
+
+
+# ---------- тикеты (§18) ----------
+
+@app.post("/api/tickets")
+def post_ticket(req: TicketRequest) -> dict:
+    try:
+        return tickets.create_ticket(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/api/tickets")
+def get_tickets(status: str | None = None, business_line: str | None = None,
+                assignee: str | None = None, role_id: str | None = None,
+                limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
+    return tickets.list_tickets(status=status, business_line=business_line,
+                                assignee=assignee, role_id=role_id, limit=limit)
+
+
+def _ticket_or_404(tid: str) -> dict:
+    row = tickets.get_ticket(tid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}")
+    return row
+
+
+@app.get("/api/tickets/{tid}")
+def get_ticket(tid: str) -> dict:
+    return _ticket_or_404(tid)
+
+
+@app.post("/api/tickets/{tid}/assign")
+def assign_ticket(tid: str, req: AssignRequest) -> dict:
+    try:
+        return tickets.assign_ticket(tid, req.assignee, force=req.force)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
+    except PermissionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.post("/api/tickets/{tid}/answer")
+def answer_ticket(tid: str, req: AnswerRequest) -> dict:
+    try:
+        return tickets.answer_ticket(tid, req.answer, req.resolved_by)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.post("/api/tickets/{tid}/close")
+def close_ticket(tid: str, req: CloseRequest) -> dict:
+    try:
+        return tickets.close_ticket(tid, req.reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
+
+
+@app.get("/api/tickets/{tid}/draft")
+def ticket_draft(tid: str) -> dict:
+    data = tickets.ticket_draft(tid)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}")
+    return data
+
+
+@app.post("/api/tickets/{tid}/confirm")
+def confirm_ticket(tid: str, req: ConfirmRequest) -> dict:
+    try:
+        return tickets.confirm_ticket(tid, req.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"тикет не найден: {tid}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+# ---------- эскалации (§15) ----------
+
+@app.post("/api/escalate")
+def post_escalation(req: EscalateRequest) -> dict:
+    try:
+        return tickets.create_escalation(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/api/escalate")
+def get_escalations(status: str | None = None,
+                    limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
+    return tickets.list_escalations(status=status, limit=limit)
+
+
+@app.get("/api/escalate/{eid}")
+def get_escalation(eid: str) -> dict:
+    row = tickets.get_escalation(eid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"заявка не найдена: {eid}")
+    return row
+
+
+@app.post("/api/escalate/{eid}/answer")
+def answer_escalation(eid: str, req: AnswerRequest) -> dict:
+    try:
+        return tickets.answer_escalation(eid, req.answer, req.resolved_by)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"заявка не найдена: {eid}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+@app.get("/api/escalate/{eid}/draft")
+def escalation_draft(eid: str) -> dict:
+    row = tickets.get_escalation(eid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"заявка не найдена: {eid}")
+    return {"ticket": eid, "status": row.get("status"),
+            "quality_answer": row.get("answer", ""),
+            "resolved_by": row.get("resolved_by"),
+            "answered_at": row.get("answered_at"),
+            "draft": {"question": row.get("question", ""),
+                      "answer_in_practice": row.get("answer", ""),
+                      "outcome": "resolved" if row.get("answer") else "open",
+                      "business_line": row.get("business_line", ""),
+                      "linked_docs": [], "tags": [],
+                      "rule_key": None, "author_role": "quality",
+                      "author_name": "служба качества", "content_type": "text",
+                      "source": "escalation", "escalation_id": eid},
+            "suggestions": {"missing": [], "conflicts": []}}
+
+
+@app.post("/api/escalate/{eid}/confirm")
+def confirm_escalation(eid: str, req: ConfirmRequest) -> dict:
+    row = tickets.get_escalation(eid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"заявка не найдена: {eid}")
+    try:
+        case = dict(req.case)
+        case.setdefault("source", "escalation")
+        case.setdefault("escalation_id", eid)
+        return core.add_case(case) | {"ticket_status": "resolved"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from None
+
+
+# ---------- предложения об изменении (§19) ----------
+
+@app.get("/api/change-requests")
+def get_change_requests(status: str | None = None,
+                        limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
+    return changes.list_requests(status=status, limit=limit)
+
+
+@app.get("/api/change-requests/{crid}")
+def get_change_request(crid: str) -> dict:
+    row = changes.get_request(crid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"предложение не найдено: {crid}")
+    return row
+
+
+@app.post("/api/change-requests/{crid}/status")
+def set_change_status(crid: str, req: ChangeStatusRequest) -> dict:
+    try:
+        return changes.set_status(crid, req.status, req.by)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"предложение не найдено: {crid}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 # ---------- статика ----------
@@ -181,7 +727,8 @@ def index():
     return JSONResponse(
         status_code=503,
         content={"detail": "UI не собран: нет src/api/static/index.html",
-                 "hint": "скопируйте web/ в src/api/static/ (NEO собирает фронтенд)"},
+                 "hint": "скопируйте собранный фронтенд в src/api/static/ (зона NEO); "
+                         "API при этом полностью работает — см. /api/docs"},
     )
 
 
@@ -197,7 +744,6 @@ def static_files(path: str, request: Request):
         raise HTTPException(status_code=404, detail="not found") from None
     if target.is_file():
         return FileResponse(target)
-    # SPA-fallback: неизвестный путь -> index.html (если он есть)
     idx = config.STATIC_DIR / "index.html"
     if idx.exists():
         return FileResponse(idx)

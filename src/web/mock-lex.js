@@ -12,13 +12,14 @@
 (function (global) {
   'use strict';
 
-  /* §17: 10 шагов — policy стоит вторым, до всякого поиска. */
+  /* §17: ровно 10 шагов — policy стоит вторым, до всякого поиска.
+     Срез модальности (§9) живёт в detail шага retrieve, а не отдельным шагом:
+     в UI счётчик должен показывать [10/10], а не [11/11]. */
   var ANSWER_STEPS = [
     { key: 'accept', title: 'Запрос принят', detail: 'роль: юрист · направление: закупки · дата отсчёта: 2026-06-15', ms: 11 },
     { key: 'policy', title: 'Проверка компетенции', detail: 'в компетенции роли: да · направление: закупки · доступных документов 5', ms: 26 },
     { key: 'decompose', title: 'Разбор вопроса', detail: 'направление: закупки · 2 подвопроса: срок согласования; кто визирует', ms: 230 },
-    { key: 'inspect', title: 'Разбор источников', detail: 'текст 24 · картинки 2 · сканы 1 (1 с плохим распознаванием) · направлений 1', ms: 34 },
-    { key: 'retrieve', title: 'Поиск', detail: 'BM25 12 · вектор 10 → топ 5 · документов 5, кейсов 0', ms: 208 },
+    { key: 'retrieve', title: 'Поиск', detail: 'BM25 12 · вектор 10 → топ 5 · текст 24 · картинки 2 · сканы 1 (1 с плохим распознаванием)', ms: 208 },
     { key: 'cases', title: 'Поиск по кейсам', detail: 'найдено 4 кейса, из них по теме 1', ms: 41 },
     { key: 'permissions', title: 'Проверка прав', detail: 'доступно 5 из 12, отброшено 7', ms: 9 },
     { key: 'resolve', title: 'Действующая редакция', detail: '3 редакции, действует Р2 от 2026-06-01', ms: 14 },
@@ -31,12 +32,21 @@
     /* §13.1: короткая выжимка по умолчанию — 2-4 предложения, до 400 знаков. */
     short: 'Срок согласования заявки на закупку — пять рабочих дней с момента регистрации в СЭД.[1] '
       + 'Заявку визирует руководитель подразделения, затем согласует финансовый контролёр.[1][3]',
+    /* §21.3: тот же смысл в канцелярском тоне. Реквизиты дословно из цитаты. */
+    short_formal: 'Согласно редакции 2 правила «Согласование заявок на закупку» (вступила в силу 01.06.2026) '
+      + 'срок согласования заявки составляет пять рабочих дней с даты регистрации в СЭД.[1] '
+      + 'Заявка визируется руководителем подразделения и согласуется финансовым контролёром.[1][3]',
+    tone: 'plain',
     has_details: true,
     detail_id: 'd-q0001',
     /* Полный текст — для старого рендера и для «Подробнее» без бэкенда. */
     text: 'Срок согласования заявки на закупку — пять рабочих дней с момента регистрации заявки в СЭД.[1]\n'
       + 'Заявку визирует руководитель подразделения, затем согласует финансовый контролёр.[1][3]\n'
       + 'Изменения договора согласуются в том же порядке, что и сам договор.[2]',
+    text_formal: 'Согласно редакции 2 правила «Согласование заявок на закупку» срок согласования заявки '
+      + 'составляет пять рабочих дней с даты регистрации заявки в СЭД.[1]\n'
+      + 'Заявка визируется руководителем подразделения, после чего согласуется финансовым контролёром.[1][3]\n'
+      + 'Согласование изменений договора осуществляется в порядке, установленном для согласования договора.[2]',
     citations: [
       {
         doc_id: 'ТЗ-ЭКЗ-СР01-Р2',
@@ -90,8 +100,48 @@
     ],
     refused: false,
     assumptions: [],
+    /* §20: ответ с оговоркой — третий исход, включается сценарием caveat. */
+    caveat: null,
     /* §13.3: в ответе есть форма — в ленте карточка. */
     form_id: 'form-zayavka'
+  };
+
+  /* §20.2: ответ с оговоркой. Уровень medium — конфликт редакций + единственный источник.
+     §21.5: тон оговорки всегда formal, смягчать нельзя. */
+  var ANSWER_CAVEAT = {
+    short: 'Срок согласования заявки на закупку — пять рабочих дней с момента регистрации в СЭД.[1] '
+      + 'С 1 января 2027 года срок изменится.[1]',
+    has_details: true,
+    detail_id: 'd-q0001',
+    tone: 'plain',
+    caveat: {
+      level: 'medium',
+      reasons: [
+        { code: 'edition_conflict', text: 'Ред. 3 вступает 2027-01-01 — на дату после неё срок изменится' },
+        { code: 'single_source', text: 'Подтверждения в других документах нет' }
+      ],
+      advice: 'Сверьтесь с владельцем регламента перед принятием решения'
+    },
+    citations: ANSWER.citations,
+    refused: false,
+    assumptions: [],
+    form_id: null
+  };
+
+  /* §20.5: аналитика. answer_rate — самая честная метрика продукта. */
+  var STATS = {
+    total: 46,
+    latency_avg_ms: 3800,
+    latency_p95_ms: 9100,
+    caveats: {
+      total: 9,
+      by_level: { low: 4, medium: 4, high: 1 },
+      by_reason: [
+        { code: 'edition_conflict', count: 5 },
+        { code: 'single_source', count: 4 }
+      ],
+      answer_rate: { plain: 31, caveated: 9, refused: 6 }
+    }
   };
 
   /* §13.1: развёрнутая версия — по /api/expand, из тех же фрагментов. */
@@ -315,43 +365,53 @@
 
   function docFor(docId) { return DOCS[docId] ? clone(DOCS[docId]) : null; }  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+  /* Индексы — по новой таблице §17: 0 accept, 1 policy, 2 decompose, 3 retrieve,
+     4 cases, 5 permissions, 6 resolve, 7 conflict, 8 compose, 9 verify. */
   function stepsFor(scenario) {
     var steps = clone(ANSWER_STEPS);
     if (scenario === 'refusal-nocorpus') {
       steps[1].detail = 'в компетенции: да · направление: определить не удалось · доступных документов 5';
       steps[2].detail = 'направление: определить не удалось · 1 подвопрос';
-      steps[4].detail = 'BM25 0 · вектор 2 → топ 0 · документов 0, кейсов 0';
-      steps[5].detail = 'найдено 0 кейсов по теме';
-      steps[6].detail = 'доступно 5 из 12, отброшено 7';
-      steps[7].detail = 'не проверялась: нет найденных документов';
-      steps[8].detail = 'сравнивать нечего';
-      steps[9].detail = 'ответ не собран: нет ни одной цитаты';
-      steps[10].detail = 'утверждений 0 · покрыто 0 · отказ: не из базы знаний';
+      steps[3].detail = 'BM25 0 · вектор 2 → топ 0 · документов 0, кейсов 0';
+      steps[4].detail = 'найдено 0 кейсов по теме';
+      steps[5].detail = 'доступно 5 из 12, отброшено 7';
+      steps[6].detail = 'не проверялась: нет найденных документов';
+      steps[7].detail = 'сравнивать нечего';
+      steps[8].detail = 'ответ не собран: нет ни одной цитаты';
+      steps[9].detail = 'утверждений 0 · покрыто 0 · отказ: не из базы знаний';
     } else if (scenario === 'refusal-outofscope') {
       steps[1].detail = 'ВНЕ КОМПЕТЕНЦИИ: база не покрывает «налоги» (база покрывает: закупки, лицензирование, качество, хранение, персонал)';
       steps[2].detail = 'не выполнялся: вопрос вне базы';
-      steps[4].detail = 'не выполнялся: вопрос вне базы';
+      steps[3].detail = 'не выполнялся: вопрос вне базы';
+      steps[4].detail = 'не выполнялся';
       steps[5].detail = 'не выполнялся';
       steps[6].detail = 'не выполнялся';
       steps[7].detail = 'не выполнялся';
-      steps[8].detail = 'не выполнялся';
-      steps[9].detail = 'ответ не собирался';
-      steps[10].detail = 'проверка не нужна: ответа нет';
+      steps[8].detail = 'ответ не собирался';
+      steps[9].detail = 'проверка не нужна: ответа нет';
     } else if (scenario === 'refusal-date') {
-      steps[7].detail = '1 редакция, действует с 2026-02-01 — на дату отсчёта не действует';
+      steps[6].detail = '1 редакция, действует с 2026-02-01 — на дату отсчёта не действует';
     } else if (scenario === 'refusal-access') {
       steps[1].detail = 'в компетенции: да · направление: закупки · доступных документов 0';
-      steps[6].detail = 'доступно 0 из 12, отброшено 12 (направление закрыто для роли)';
-      steps[7].detail = 'не проверялась: нет доступных документов';
-      steps[9].detail = 'ответ не собран: нет доступных источников';
-      steps[10].detail = 'утверждений 0 · покрыто 0 · отказ: нет прав';
+      steps[5].detail = 'доступно 0 из 12, отброшено 12 (направление закрыто для роли)';
+      steps[6].detail = 'не проверялась: нет доступных документов';
+      steps[8].detail = 'ответ не собран: нет доступных источников';
+      steps[9].detail = 'утверждений 0 · покрыто 0 · отказ: нет прав';
     } else if (scenario === 'clarify') {
+      /* §10: шаг уточнения встаёт третьим (n=3) — дальше агент ждёт ответа. */
       steps[2] = { key: 'clarify', title: 'Уточнение', detail: 'нужна дата: в корпусе три редакции SR-01 · запрошено 2 параметра', ms: 190 };
     } else if (scenario === 'verify-trimmed') {
-      steps[10].detail = 'утверждений 5 · покрыто 3 · 2 отброшено (нет цитаты)';
+      steps[9].detail = 'утверждений 5 · покрыто 3 · 2 отброшено (нет цитаты)';
+    } else if (scenario === 'caveat') {
+      /* §20: оговорка видна и в шаге verify — уверенность и уровень. */
+      steps[9].detail = 'утверждений 3 · покрыто 3 · уверенность 0.68 · ОГОВОРКА (medium)';
+      steps[9].caveat_level = 'medium';
+    } else if (scenario === 'caveat-high') {
+      steps[9].detail = 'утверждений 2 · покрыто 2 · уверенность 0.54 · ОГОВОРКА (high)';
+      steps[9].caveat_level = 'high';
     } else if (scenario === 'escalate') {
-      steps[9].detail = 'ответ не собран: нет ни одной цитаты';
-      steps[10] = { key: 'escalate', title: 'Передано в службу качества', detail: 'заявка esc-0003 · 2 итерации уточнения · срок: до 2 рабочих дней', ms: 140 };
+      steps[8].detail = 'ответ не собран: нет ни одной цитаты';
+      steps[9] = { key: 'escalate', title: 'Передано в службу качества', detail: 'заявка esc-0003 · 2 итерации уточнения · срок: до 2 рабочих дней', ms: 140 };
     }
     return steps;
   }
@@ -362,6 +422,9 @@
     var q = String(question || '');
     if (/ндс|налог на добавленн|ставк[аи] ндс|бухгалтер/i.test(q)) return 'refusal-outofscope';
     if (/друг\w* компан|как обычно|в практике рынка|единственн\w* поставщик/i.test(q)) return 'escalate';
+    /* §20: демо-триггеры оговорки — конфликт редакций и единственный источник. */
+    if (/2027|после нового года|следующ\w* год|редакц\w* 3|оговорк/i.test(q)) return 'caveat';
+    if (/срочно|сегодня же|любой ценой/i.test(q)) return 'caveat-high';
     if (asOf && asOf < '2026-02-01') return 'refusal-date';
     if (roleId === 'it' && /закупк|согласован|договор/i.test(q)) return 'refusal-access';
     var hasDate = answers && answers.as_of;
@@ -373,11 +436,13 @@
   }
 
   /**
-   * stream(question, roleId, asOf, answers, handlers) — эмуляция POST /api/ask.
-   * handlers: onStep, onAnswer, onRefusal, onClarify, onDone, onError
+   * stream(question, roleId, asOf, answers, tone, handlers) — эмуляция POST /api/ask.
+   * handlers: onStep, onAnswer, onRefusal, onClarify, onEscalate, onDone, onError
    * Возвращает { abort() }.
+   *
+   * Задержки 150–250 мс на шаг: прогон ~2 с, чтобы прогресс было видно на видео (доп. №8).
    */
-  function stream(question, roleId, asOf, answers, handlers) {
+  function stream(question, roleId, asOf, answers, tone, handlers) {
     var aborted = false;
     var scenario = pickScenario(question, roleId, asOf, answers);
     var steps = stepsFor(scenario);
@@ -392,13 +457,15 @@
     }
 
     (async function run() {
-      await delay(160);
+      await delay(320);
       for (var i = 0; i < steps.length; i++) {
         if (aborted) return;
         var s = steps[i];
         if (scenario === 'clarify' && s.key !== 'accept' && s.key !== 'clarify') continue;
+        /* Продолжение диалога после уточнения: первые шаги не повторяем. */
+        if (handlers.resumeFrom && i < handlers.resumeFrom - 1) continue;
 
-        await delay(Math.max(80, Math.min(s.ms, 700)));
+        await delay(150 + ((i * 37) % 100));
         if (aborted) return;
         guard(handlers.onStep)({
           n: i + 1,
@@ -406,11 +473,12 @@
           key: s.key,
           title: s.title,
           detail: s.detail,
-          ms: s.ms
+          ms: s.ms,
+          caveat_level: s.caveat_level || null
         });
       }
       if (aborted) return;
-      await delay(200);
+      await delay(260);
       if (aborted) return;
 
       if (scenario === 'clarify') {
@@ -429,7 +497,7 @@
       else if (scenario === 'refusal-date') guard(handlers.onRefusal)(clone(REFUSAL_DATE));
       else if (scenario === 'refusal-access') guard(handlers.onRefusal)(clone(REFUSAL_ACCESS));
       else if (scenario === 'escalate') {
-        /* §18: агент сам создаёт тикет — сотрудник видит только номер. */
+        /* §18 + §22: агент сам создаёт тикет и «отправляет письмо» — в демо имитация. */
         var tk = createTicket(question, roleId, 'закупки');
         guard(handlers.onEscalate)({
           ticket: tk.id,
@@ -439,13 +507,34 @@
           next: 'Заявка передана в службу качества. Ответ появится в базе как кейс.',
           eta: 'до 2 рабочих дней',
           sla_due: tk.sla_due,
-          question: question
+          question: question,
+          email: tk.email
         });
         return; // поток закрывается на эскалации, done не приходит
       }
-      else guard(handlers.onAnswer)(clone(ANSWER));
+      else if (scenario === 'caveat' || scenario === 'caveat-high') {
+        var cav = clone(ANSWER_CAVEAT);
+        if (scenario === 'caveat-high') {
+          cav.caveat.level = 'high';
+          cav.caveat.reasons = [
+            { code: 'edition_conflict', text: 'Ред. 3 вступает 2027-01-01 — на дату после неё срок изменится' },
+            { code: 'edition_conflict', text: 'Ред. 2 и ред. 3 близки по дате вступления, приоритет неявный' }
+          ];
+          cav.caveat.advice = 'Не принимайте решение без владельца регламента';
+        }
+        cav.citations = clone(ANSWER.citations).slice(0, 2);
+        cav.short = applyTone(cav.short, tone);
+        guard(handlers.onAnswer)(cav);
+      }
+      else {
+        var answ = clone(ANSWER);
+        answ.short = applyTone(answ.short, tone, answ.short_formal);
+        answ.text = applyTone(answ.text, tone, answ.text_formal);
+        answ.tone = tone === 'formal' ? 'formal' : 'plain';
+        guard(handlers.onAnswer)(answ);
+      }
 
-      await delay(110);
+      await delay(140);
       if (aborted) return;
       guard(handlers.onDone)({
         elapsed_ms: elapsed(),
@@ -455,6 +544,13 @@
     })();
 
     return { abort: function () { aborted = true; } };
+  }
+
+  /* §21.3: два уровня тона, смысл один, реквизиты дословно. */
+  function applyTone(text, tone, formalVariant) {
+    if (tone !== 'formal') return text;
+    if (formalVariant) return formalVariant;
+    return text;
   }
 
   /* §8: база кейсов для экрана «Кейсы». */
@@ -527,6 +623,18 @@
     { id: 'director', title: 'Руководитель', departments: ['*'], business_lines: ['*'], systems: ['*'] }
   ];
 
+  /* §22: письмо в службу качества. Адреса — example.invalid по RFC 2606,
+     режим simulated обязателен: реальной отправки нет. */
+  function makeEmail(roleId, question, sentAt) {
+    return {
+      to: 'quality@example.invalid',
+      from: (roleId || 'employee') + '@example.invalid',
+      subject: '[LEX] Вопрос без ответа в базе: ' + String(question || '').slice(0, 70),
+      sent_at: sentAt || '2026-11-26T11:20:00Z',
+      delivery: 'simulated'
+    };
+  }
+
   /* §18.2: тикеты. Создаёт агент (created_by: "agent"), номер человекочитаемый. */
   var TICKETS = [
     {
@@ -546,7 +654,8 @@
       priority: 'normal',
       assignee: null,
       status: 'open',
-      sla_due: '2026-11-28T11:20:00Z'
+      sla_due: '2026-11-28T11:20:00Z',
+      email: makeEmail('lawyer', 'Как согласовать закупку, если поставщик единственный?', '2026-11-26T11:20:00Z')
     },
     {
       id: 'LEX-2026-0041',
@@ -565,6 +674,7 @@
       assignee: 'И. Петрова',
       status: 'answered',
       sla_due: '2026-11-28T09:05:00Z',
+      email: makeEmail('quality', 'Можно ли принять партию с отклонением по влажности 2%?', '2026-11-26T09:05:00Z'),
       quality_answer: 'Для КУ-120 допуск по влажности — не более 1,5%. Партию принимать нельзя, оформить возврат.',
       answered_at: '2026-11-26T10:30:00Z'
     },
@@ -582,7 +692,8 @@
       priority: 'high',
       assignee: 'С. Ковалёв',
       status: 'assigned',
-      sla_due: '2026-11-26T16:10:00Z'
+      sla_due: '2026-11-26T16:10:00Z',
+      email: makeEmail('lawyer', 'Кто отвечает за хранение документов свыше трёх лет?', '2026-11-26T08:10:00Z')
     },
     {
       id: 'LEX-2026-0038',
@@ -599,6 +710,7 @@
       assignee: 'И. Петрова',
       status: 'closed',
       sla_due: '2026-11-27T16:40:00Z',
+      email: makeEmail('it', 'Кому сообщать об утечке учётных данных?', '2026-11-25T16:40:00Z'),
       close_reason: 'вопрос вне охвата, передан в ИБ напрямую'
     }
   ];
@@ -684,7 +796,8 @@
       priority: 'normal',
       assignee: null,
       status: 'open',
-      sla_due: '2026-11-28T12:00:00Z'
+      sla_due: '2026-11-28T12:00:00Z',
+      email: makeEmail(roleId, question, '2026-11-26T12:00:00Z')
     };
     TICKETS.unshift(t);
     DRAFTS[id] = {
@@ -784,6 +897,7 @@
     form: function (formId) { return formId === FORM.form_id ? clone(FORM) : null; },
     fillForm: fillForm,
     similar: function () { return clone(SIMILAR); },
+    stats: function () { return clone(STATS); },
     doc: function (docId) { return docFor(docId); },
     tickets: tickets,
     ticket: ticketById,
@@ -793,6 +907,7 @@
     assignTicket: assignTicket,
     answerTicket: answerTicket,
     closeTicket: closeTicket,
-    scenarios: ['answer', 'clarify', 'refusal-nocorpus', 'refusal-date', 'refusal-access', 'verify-trimmed', 'escalate']
+    scenarios: ['answer', 'caveat', 'caveat-high', 'clarify', 'refusal-nocorpus',
+      'refusal-outofscope', 'refusal-date', 'refusal-access', 'verify-trimmed', 'escalate']
   };
 })(window);

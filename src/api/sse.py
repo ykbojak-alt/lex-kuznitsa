@@ -1,96 +1,137 @@
-"""Формат SSE по §3 + §8/§9 контракта.
+"""Формат SSE по §3 + §8/§9/§10/§17/§18 контракта.
 
 Один кадр = `event: <имя>\\ndata: <json>\\n\\n`. Сериализуем компактно и без
 ASCII-эскейпа: кириллица в detail должна доехать до UI как есть.
 
-Порядок шагов (v1.1): базовые 9 без `inspect` — это контракт §8, total=9.
-Шаг `inspect` (§9) вставляется перед `retrieve`, когда в корпусе есть
-нетекстовые источники (image/scan/mixed); тогда total становится 10.
-Так оба раздела контракта соблюдены, а UI получает `total` из каждого кадра.
+Порядок шагов берётся из ядра (`lex.models.STEP_ORDER`) — это единственный
+источник правды, потому что шаги эмитит именно ядро. Сейчас ядро отдаёт 11
+шагов: §17 добавила `policy` (10 шагов), §9 добавила `inspect` (11-й). Если
+ядро недоступно, используется тот же список, продублированный здесь.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
-BASE_STEPS: list[tuple[str, str, str]] = [
-    ("accept", "Запрос принят", "slate"),
-    ("decompose", "Разбор вопроса", "violet"),
-    ("retrieve", "Поиск", "cyan"),
-    ("cases", "Поиск по кейсам", "teal"),
-    ("permissions", "Проверка прав", "amber"),
-    ("resolve", "Действующая редакция", "blue"),
-    ("conflict", "Сопоставление", "rose"),
-    ("compose", "Сборка ответа", "emerald"),
-    ("verify", "Самопроверка", "green"),
-]
+try:  # порядок и цвета — из ядра, если оно есть
+    from lex.models import STEP_COLORS as _CORE_COLORS, STEP_ORDER as _CORE_ORDER
 
-INSPECT_STEP = ("inspect", "Разбор источников", "indigo")
+    _ORDER: tuple[str, ...] = tuple(_CORE_ORDER)
+    _COLOR: dict[str, str] = dict(_CORE_COLORS)
+except Exception:  # ядро ещё не подключено — тот же список локально
+    _ORDER = (
+        "accept", "policy", "decompose", "inspect", "retrieve", "cases",
+        "permissions", "resolve", "conflict", "compose", "verify",
+    )
+    _COLOR = {
+        "accept": "slate", "policy": "pink", "decompose": "violet",
+        "inspect": "indigo", "retrieve": "cyan", "cases": "teal",
+        "permissions": "amber", "resolve": "blue", "conflict": "rose",
+        "compose": "emerald", "verify": "green",
+    }
 
-# Совместимость: старые импорты ожидают STEP_ORDER/step_keys/total.
-STEP_ORDER = BASE_STEPS
-_COLOR = {k: c for k, _, c in BASE_STEPS + [INSPECT_STEP]}
-_TITLE = {k: t for k, t, _ in BASE_STEPS + [INSPECT_STEP]}
+_TITLE: dict[str, str] = {
+    "accept": "Запрос принят",
+    "policy": "Проверка компетенции",
+    "decompose": "Разбор вопроса",
+    "inspect": "Разбор источников",
+    "retrieve": "Поиск",
+    "cases": "Поиск по кейсам",
+    "permissions": "Проверка прав",
+    "resolve": "Действующая редакция",
+    "conflict": "Сопоставление",
+    "compose": "Сборка ответа",
+    "verify": "Самопроверка",
+    "clarify": "Уточнение",
+    "escalate": "Передано в службу качества",
+}
+
+# §10: шаг уточнения идёт вместо decompose, цвет sky.
+_CLARIFY = "clarify"
 
 
-def plan(include_inspect: bool = False) -> list[tuple[str, str, str]]:
-    """Полный порядок шагов для конкретного запроса."""
-    if not include_inspect:
-        return list(BASE_STEPS)
-    out = list(BASE_STEPS)
-    out.insert(2, INSPECT_STEP)  # перед retrieve
-    return out
+def step_keys() -> list[str]:
+    return list(_ORDER)
 
 
-def step_keys(include_inspect: bool = False) -> list[str]:
-    return [k for k, _, _ in plan(include_inspect)]
-
-
-def total(include_inspect: bool = False) -> int:
-    return len(plan(include_inspect))
+def total() -> int:
+    return len(_ORDER)
 
 
 def frame(event: str, data: Any) -> str:
+    import json
+
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def step(n: int, key: str, detail: str, ms: int, include_inspect: bool = False) -> str:
+def step(n: int, key: str, detail: str, ms: int) -> str:
     return frame("step", {
         "n": n,
-        "total": total(include_inspect),
+        "total": total(),
         "key": key,
         "title": _TITLE.get(key, key),
         "detail": detail,
         "ms": ms,
-        "color": _COLOR.get(key, "slate"),
+        "color": "sky" if key == _CLARIFY else _COLOR.get(key, "slate"),
     })
 
 
-def answer(text: str, citations: list[dict], refused: bool = False,
-           assumptions: list[dict] | None = None) -> str:
-    payload: dict[str, Any] = {"text": text, "citations": citations, "refused": refused}
-    if assumptions:
-        payload["assumptions"] = assumptions
+def answer(data: dict) -> str:
+    """§13.1: короткая выжимка + detail_id; полный текст тоже отдаём."""
+    payload = {
+        "text": data.get("text", ""),
+        "short": data.get("short") or data.get("text", ""),
+        "has_details": bool(data.get("has_details")),
+        "detail_id": data.get("detail_id"),
+        "citations": data.get("citations") or [],
+        "refused": bool(data.get("refused")),
+    }
+    for key in ("practice_only", "notes", "assumptions", "session_id",
+                "grounding", "forms"):
+        value = data.get(key)
+        if value:
+            payload[key] = value
     return frame("answer", payload)
 
 
-def refusal(reason: str, sources: list[str], kind: str) -> str:
-    return frame("refusal", {"reason": reason, "sources": sources, "kind": kind})
+def refusal(data: dict) -> str:
+    payload = {
+        "reason": data.get("reason", ""),
+        "sources": data.get("sources") or [],
+        "kind": data.get("kind", "not_in_corpus"),
+    }
+    for key in ("detail", "searched", "hint"):
+        value = data.get(key)
+        if value:
+            payload[key] = value
+    return frame("refusal", payload)
 
 
-def clarify(session_id: str, questions: list[dict], partial: dict | None = None,
-            can_skip: bool = True) -> str:
-    """§10 v1.2: вместо answer/refusal, поток закрывается без done."""
+def clarify(data: dict) -> str:
+    """§10: вместо answer/refusal, поток закрывается без done."""
     return frame("clarify", {
-        "session_id": session_id,
-        "questions": questions,
-        "partial": partial or {},
-        "can_skip": can_skip,
+        "session_id": data.get("session_id", ""),
+        "questions": data.get("questions") or [],
+        "partial": data.get("partial") or {},
+        "can_skip": bool(data.get("can_skip", True)),
     })
 
 
-def done(elapsed_ms: int, inference_path: str, journal_id: str) -> str:
+def escalate(data: dict) -> str:
+    """§15.3/§18.4: заявка создана — вместо answer/refusal."""
+    return frame("escalate", {
+        "ticket": data.get("ticket", ""),
+        "iterations": int(data.get("iterations", 0) or 0),
+        "reason": data.get("reason", ""),
+        "searched": data.get("searched") or {},
+        "next": data.get("next", ""),
+        "eta": data.get("eta", ""),
+        "status": data.get("status", "open"),
+        "case_id": data.get("case_id"),
+    })
+
+
+def done(elapsed_ms: int, inference_path: str, journal_id: str | None) -> str:
     return frame("done", {
         "elapsed_ms": elapsed_ms,
         "inference_path": inference_path,

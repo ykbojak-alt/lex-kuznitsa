@@ -31,7 +31,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Iterable
 
-from . import detail, editions, llm, rerank
+from . import caveat as caveat_mod
+from . import detail, editions, llm, policy, rerank
 from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
@@ -39,6 +40,7 @@ from .forms import get_form
 from .grounding import GroundingReport, check_grounding
 from .index import EmbeddingError, SearchIndex, embed_texts, get_index
 from .media import inspect_corpus, render_page
+from .tickets import get_ticket_store
 from .models import (
     STEP_COLORS,
     STEP_ORDER,
@@ -125,6 +127,20 @@ class Signal:
 
 
 @dataclass
+class _StageOutcome:
+    """Шаг, который всегда эмитится, но может ещё и завершить каскад.
+
+    Обычные стадии возвращают либо StepEvent, либо Signal — «или», потому что
+    шаг виден пользователю только если он прошёл. Policy, напротив, должна
+    показать себя ВСЕГДА: в том числе когда её итог — отказ. Иначе в ленте
+    пропадает причина отказа.
+    """
+
+    event: StepEvent
+    signal: Signal | None = None
+
+
+@dataclass
 class RunOptions:
     question: str
     role_id: str = "lawyer"
@@ -136,10 +152,28 @@ class RunOptions:
     business_line: str | None = None
     no_llm: bool = False
     top_k: int = TOP_K
+    # §21: тон формулировки. Смысл от него не зависит — реквизиты нормы
+    # остаются дословными при любом тоне.
+    tone: str = "plain"
+    tickets_path: Path | None = None
+    changes_path: Path | None = None
 
 
 def _now_ms(t0: float) -> int:
     return int((time.monotonic() - t0) * 1000)
+
+
+def _mean_similarity(report: GroundingReport) -> float | None:
+    """Средняя близость покрытых утверждений к цитатам (§20.1 п.1).
+
+    None означает «не измерялась» (нет эмбеддера или утверждений), и это не
+    то же самое, что низкая уверенность: молчание нельзя выдавать за тревогу.
+    """
+    vals = [c.best_similarity for c in report.claims
+            if c.covered and c.best_similarity is not None]
+    if not vals:
+        return None
+    return round(sum(vals) / len(vals), 4)
 
 
 def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None) -> StepEvent:
@@ -213,6 +247,19 @@ class Orchestrator:
             yield Signal("step", self._clarify_step(2, state))
             yield clarify
             return                      # §10: после clarify поток закрывается
+        # §17: policy — первый содержательный шаг, ДО всякого поиска. Если
+        # вопрос не наш или роли не положено, дальше не идём вовсе: «не ищем»,
+        # а не «нашли, но не покажем».
+        stage = self._stage_policy(2, state)
+        yield Signal("step", stage.event)
+        if stage.signal is not None:
+            # §17.6: `out_of_scope` НЕ эскалируется — службе качества нечего
+            # разбирать в вопросе про НДС. Эскалация — только для
+            # `not_in_corpus` (тема наша, ответа нет). Отказ отдаём как есть.
+            yield stage.signal
+            if stage.signal.kind == "refusal":
+                yield Signal("done", self._done())
+            return
         async for sig in self._run_stages(state):
             yield sig
         if state.get("escalate_pending"):
@@ -257,7 +304,7 @@ class Orchestrator:
             ("compose", self._stage_compose),
             ("verify", self._stage_verify),
         ]
-        for n, (key, fn) in enumerate(stages, start=2):
+        for n, (key, fn) in enumerate(stages, start=3):
             t_stage = time.monotonic()
             try:
                 outcome = fn(n, state)
@@ -298,7 +345,7 @@ class Orchestrator:
         kind = getattr(payload, "kind", "")
         return kind in ("not_in_corpus", "no_access")
 
-    def _search_summary(self, state: dict) -> dict:
+    def _search_summary(self, state: dict, performed: bool = True) -> dict:
         """Что именно искали — это обязательная часть заявки (§15.2)."""
         hits = state.get("doc_hits") or []
         allowed = state.get("allowed") or []
@@ -307,6 +354,7 @@ class Orchestrator:
             "cases": len(self.cases.cases),
             "accessible": len(allowed),
             "top": [getattr(h.chunk, "doc_id", "") for h in hits][:5],
+            "performed": performed,
         }
 
     def _session_id(self) -> str:
@@ -395,9 +443,58 @@ class Orchestrator:
         # контракта), поэтому model_construct: шаг не должен потеряться из-за
         # литерала, который ещё не расширен.
         return StepEvent.model_construct(
-            n=n, total=len(STEP_ORDER), key="clarify", title="Уточнение",
+            n=n, total=max(len(STEP_ORDER), n), key="clarify", title="Уточнение",
             detail=detail, ms=_now_ms(self._t0), color="sky",
         )
+
+    def _stage_policy(self, n: int, state: dict):
+        """§17: компетенция и права роли — ДО поиска.
+
+        Три проверки policy.py: тема наша -> роль допущена -> направление
+        определимо. Отказ здесь означает «не искали», поэтому в refusal нет
+        ``searched``: показывать «искали в 27 документах» было бы враньём.
+        """
+        verdict = policy.evaluate(
+            self.corpus,
+            self.opts.question,
+            self.opts.role_id,
+            business_line=self.opts.business_line,
+            role_lines=policy.role_lines_from_id(self.opts.role_id),
+        )
+        state["policy"] = verdict
+        if verdict.business_line:
+            state["line"] = verdict.business_line
+
+        event = _step(n, "policy", verdict.step_detail(), self._t0)
+        if verdict.ok:
+            return _StageOutcome(event)
+
+        if verdict.kind == "need_clarify":
+            # §10: направление не определено — спрашиваем, а не угадываем.
+            state["clarify_questions"] = [{
+                "key": "business_line",
+                "text": verdict.detail or "Уточните направление вопроса",
+                "reason": "без направления неясно, какие документы смотреть",
+                "kind": "choice",
+                "options": verdict.lines_available,
+            }]
+            questions = [ClarifyQuestion(**q) for q in state["clarify_questions"]]
+            return _StageOutcome(event, Signal("clarify", ClarifyData(
+                session_id=self._session_id(),
+                questions=questions,
+                partial={"business_lines": verdict.lines_available},
+                can_skip=False,
+            )))
+
+        kind = "no_access" if verdict.kind == "no_access" else "out_of_scope"
+        state["final"] = ("refusal", RefusalData(
+            reason=verdict.reason,
+            sources=[],
+            kind=kind,
+            searched={},            # §17: не искали — нечего показывать
+            hint=verdict.detail,
+        ))
+        return _StageOutcome(event, Signal("refusal", state["final"][1]))
 
     def _stage_decompose(self, n: int, state: dict) -> StepEvent:
         line = self._business_line()
@@ -511,12 +608,13 @@ class Orchestrator:
         self._frames = frames
         state["frames"] = frames
         if not frames:
+            ticket_id = self._open_ticket(state, "not_in_corpus")
             state["final"] = ("refusal", RefusalData(
                 reason="В базе знаний нет документа, регулирующего этот вопрос",
                 sources=[],
                 kind="not_in_corpus",
                 searched=self._searched(state),
-                hint="Уточните направление или обратитесь к владельцу регламента",
+                hint=self._refusal_hint(ticket_id),
             ))
             return _step(n, "compose", "контекста нет — отказ", self._t0)
 
@@ -538,12 +636,14 @@ class Orchestrator:
         state["grounding"] = report
 
         if report.nothing_covered:
+            # §18.1: тема наша, ответа нет — агент сам создаёт тикет.
+            ticket_id = self._open_ticket(state, "not_in_corpus")
             state["final"] = ("refusal", RefusalData(
                 reason="Модель не опиралась на базу знаний: ни одно утверждение не подтверждено цитатой",
                 sources=[f.doc_id for f in frames],
                 kind="not_in_corpus",
                 searched=self._searched(state),
-                hint="Переформулируйте вопрос или уточните направление",
+                hint=self._refusal_hint(ticket_id),
             ))
             return _step(n, "verify", report.detail(), self._t0, color="amber")
 
@@ -575,6 +675,9 @@ class Orchestrator:
         detail_id = self._remember_detail(frames, full_text, citations, state)
         form_notes = self._form_notes(state)
 
+        # §20: оговорка — не «на всякий случай», а по измеримым триггерам.
+        caveat = self._build_caveat(state, report, citations, practice_only)
+
         state["final"] = (
             "answer",
             AnswerData(
@@ -589,12 +692,91 @@ class Orchestrator:
                 + ([] if not truncated else [f"{truncated} утверждений отброшено (нет цитаты)"]),
                 forms=state.get("matched_forms") or [],
                 session_id=self.opts.session_id,
+                tone=self.opts.tone if self.opts.tone in ("plain", "formal") else "plain",
+                caveat=caveat,
                 grounding={"total": report.total, "covered": report.covered,
-                           "external": report.external, "threshold": report.threshold},
+                           "external": report.external, "threshold": report.threshold,
+                           "confidence": _mean_similarity(report)},
             ),
         )
-        return _step(n, "verify", report.detail(), self._t0,
-                     color="amber" if truncated else None)
+        # §20.4: в шаге verify — уверенность и уровень оговорки, чтобы было
+        # видно, почему ответ пришёл с предупреждением.
+        det = report.detail()
+        conf = _mean_similarity(report)
+        if conf is not None:
+            det += f" · уверенность {conf:.2f}"
+        if caveat is not None:
+            det += f" · ОГОВОРКА ({caveat.level})"
+        return _step(n, "verify", det, self._t0,
+                     color="orange" if (caveat and caveat.level == "high")
+                     else ("amber" if (truncated or caveat) else None))
+
+    def _build_caveat(self, state: dict, report, citations: list, practice_only: bool):
+        """§20.1: собрать причины оговорки из фактов прогона."""
+        conf = _mean_similarity(report)
+        sources = len({c.doc_id for c in citations if c.source_kind != "case"})
+        min_ocr = None
+        for c in citations:
+            if c.ocr_confidence is not None:
+                min_ocr = c.ocr_confidence if min_ocr is None else min(min_ocr, c.ocr_confidence)
+
+        current, nxt = self._editions_around(state)
+        return caveat_mod.build_caveat(caveat_mod.CaveatInput(
+            mean_similarity=conf,
+            sources=sources,
+            dropped=report.external,
+            total_claims=report.total,
+            practice_only=practice_only,
+            min_ocr=min_ocr,
+            current_edition=current,
+            next_edition=nxt,
+            as_of=self.opts.as_of,
+        ))
+
+    def _editions_around(self, state: dict) -> tuple[dict | None, dict | None]:
+        """Действующая редакция и следующая по дате — для §20.1 п.2."""
+        current: dict | None = None
+        nxt: dict | None = None
+        as_of = self.opts.as_of
+        today = as_of.isoformat() if as_of else "9999-12-31"
+        for res in (state.get("resolutions") or []):
+            rule = getattr(res, "rule", None)
+            if rule is None:
+                continue
+            ordered = sorted(rule.revisions, key=lambda r: (r.effective, r.revision))
+            for rev in ordered:
+                if rev.effective <= today:
+                    current = {"revision": rev.revision, "effective": rev.effective}
+                elif nxt is None:
+                    nxt = {"revision": rev.revision, "effective": rev.effective}
+        return current, nxt
+
+    def _open_ticket(self, state: dict, kind: str) -> str:
+        """§18: тикет создаёт агент, без участия человека.
+
+        Не на каждый отказ: ``out_of_scope`` сюда не приходит вовсе (§18.1), а
+        повторный вопрос в той же сессии возвращает уже открытый номер.
+        """
+        try:
+            store = get_ticket_store(
+                self.opts.tickets_path or (ROOT / "var" / "tickets.jsonl")
+            )
+            ticket = store.open_from_agent(
+                question=self.opts.question,
+                kind=kind,
+                why_unresolved=self._why_unresolved(state, kind),
+                session_id=self._session_id(),
+                role_id=self.opts.role_id,
+                business_line=state.get("line") or "",
+                clarifications=(state.get("dialogue") or {}).get("answers") or [],
+                searched=self._searched(state),
+            )
+            state["ticket_id"] = ticket.id
+            return ticket.id
+        except Exception:
+            # Тикет — вспомогательная вещь: если хранилище недоступно, отказ
+            # всё равно должен дойти до сотрудника.
+            return ""
 
     # ------------------------------------------------------------- помощники
 
@@ -769,7 +951,8 @@ class Orchestrator:
             "ответь ровно: ОТКАЗ: <причина>."
         )
         return llm.chat([
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + CASE_HINT},
+            {"role": "system",
+             "content": SYSTEM_PROMPT + "\n\n" + CASE_HINT + "\n\n" + llm.tone_rules(self.opts.tone)},
             {"role": "user", "content": user},
         ])
 
@@ -813,6 +996,33 @@ class Orchestrator:
                 low_confidence=low,
             ))
         return out
+
+    def _refusal_hint(self, ticket_id: str) -> str:
+        """§18.4: сотрудник видит номер тикета — его можно назвать вслух."""
+        if ticket_id:
+            return (f"Вопрос передан в службу качества · {ticket_id}. "
+                    f"Ответ появится в базе как кейс.")
+        return "Уточните направление или обратитесь к владельцу регламента"
+
+    def _why_unresolved(self, state: dict, kind: str) -> str:
+        """§18.2: «почему не решилось» — конкретно, а не «не найдено».
+
+        Текст для человека: что проверено и чего не хватило. Служба качества
+        должна с первого чтения понять, куда смотреть.
+        """
+        verdict = state.get("policy")
+        if verdict is not None and getattr(verdict, "reason", ""):
+            return str(verdict.reason)
+        line = state.get("line") or ""
+        frames = len(state.get("allowed") or [])
+        hits = len(state.get("doc_hits") or [])
+        if kind == "no_access":
+            return f"найдено {hits} документов по вопросу, ни один не доступен роли {self.opts.role_id}"
+        if frames == 0:
+            where = f" в направлении «{line}»" if line else ""
+            return f"в корпусе нет документа{where}, покрывающего вопрос"
+        return (f"найдено {frames} фрагментов, но ни одно утверждение не подтверждается "
+                f"цитатой из базы")
 
     def _searched(self, state: dict) -> dict:
         """§12.3: отказ говорит, что искали."""
@@ -1005,6 +1215,14 @@ def _print_signal(sig: Signal, as_json: bool) -> None:
             print(f"  · {tag} — {c['quote'][:120]}")
         for note in payload.get("notes", []):
             print(f"  ! {note}")
+        cav = payload.get("caveat")
+        if cav:
+            # §20.4: блок оговорки — спокойный, не красный. Это не ошибка.
+            print(f"\n  ⚠ Не полная уверенность ({cav['level']})")
+            for reason in cav.get("reasons", []):
+                print(f"    · {reason['text']}")
+            if cav.get("advice"):
+                print(f"    {cav['advice']}")
     elif sig.kind == "refusal":
         print(f"\nОТКАЗ [{payload['kind']}]: {payload['reason']}")
         if payload.get("sources"):

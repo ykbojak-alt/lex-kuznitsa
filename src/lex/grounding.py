@@ -14,6 +14,16 @@
 **Честное ограничение (§12.7):** близость на эмбеддингах — эвристика, а не
 доказательство. Она ловит большинство случаев «придумал», но не все, и не даёт
 права обещать «100% нет галлюцинаций». Это записано и в docs/LIMITS.md.
+
+Контракт §21 добавляет к проверке близости ещё две программные:
+
+* **якоря** — числа, даты, суммы, коды и номера пунктов из утверждения обязаны
+  присутствовать в цитируемом фрагменте. «Пяти рабочих дней» -> «около недели»
+  проходит проверку близости (эмбеддинг видит ту же тему), но проваливает
+  проверку якорей — и правильно;
+* **усилители** — «обычно», «как правило», «в большинстве случаев» меняют
+  модальность нормы: «обязан» превращается в «принято». Это самая частая
+  утечка при упрощении языка, поэтому она запрещена, если слова нет в цитате.
 """
 
 from __future__ import annotations
@@ -39,6 +49,135 @@ _REF_RE = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENT_RE = re.compile(r"(?<=[.!?…])\s+(?=[«\"(A-ZА-ЯЁ0-9])|\n+")
 _HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s|\*\*[^*]+\*\*\s*$)")
 
+# ---------------------------------------------------------------- §21.4 якоря
+
+# Число с необязательным разделителем тысяч и дробной частью. «150 000,50».
+_NUM_RE = re.compile(r"\d[\d\s ]*(?:[.,]\d+)?")
+# Единица сразу после числа — она часть реквизита: «пять *рабочих дней*» и
+# «пять *календарных дней*» — разные нормы, хотя число одно.
+_UNIT_RE = re.compile(
+    r"\s*(рабоч\w*\s+дн\w*|календарн\w*\s+дн\w*|дн\w*|час\w*|мин\w*|"
+    r"руб\w*|коп\w*|процент\w*|%|тыс\w*|млн\w*|год\w*|лет|месяц\w*|недел\w*|"
+    r"шт\w*|ед\w*|раз\w*)",
+    re.IGNORECASE,
+)
+# Коды и номера пунктов: «44-ФЗ», «п. 4 ч.1 ст.93», «ТЗ-ЭКЗ-СР01-Р2», ГОСТ.
+_CODE_RE = re.compile(
+    r"(?:(?:п|ч|ст|пп|подп)\.\s*\d+(?:\.\d+)*"
+    r"|\d+(?:\.\d+)*\s*(?:ФЗ|ФЗ РФ|ГОСТ(?: Р)?|ТУ)"
+    r"|[А-ЯЁA-Z]{2,}(?:-[А-ЯЁA-Z0-9]+)+"
+    r"|№\s*[\w/-]+)",
+)
+_DATE_RE = re.compile(
+    r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\s+\d{4}",
+    re.IGNORECASE,
+)
+
+# Усилители, меняющие модальность нормы (§21.4 п.3). Список — данные, не логика:
+# расширять его значит менять контракт, поэтому он здесь целиком и по-русски.
+AMPLIFIERS = (
+    "обычно", "как правило", "в большинстве случаев", "как показывает практика",
+    "зачастую", "нередко", "порой", "в основном", "по общему правилу",
+    "чаще всего", "как принято", "во многих случаях", "не обязательно",
+    "в целом", "примерно", "около", "приблизительно", "порядка",
+)
+_AMPLIFIER_RES = tuple(
+    (phrase, re.compile(r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b", re.IGNORECASE))
+    for phrase in AMPLIFIERS
+)
+
+
+def _norm_num(raw: str) -> str:
+    """«150 000,50» -> «150000.5»: сравнение чисел без форматирования."""
+    s = raw.replace(" ", "").replace(" ", "").replace(",", ".")
+    try:
+        return f"{float(s):g}"
+    except ValueError:
+        return s
+
+
+# Числительные словами — половина корпуса пишет «пяти рабочих дней», и без
+# этой карты проверка якорей пропускала бы ровно те предложения, которые
+# переписывают норму словами. Ключ — основа после отбрасывания окончания.
+_NUM_WORDS: dict[str, int] = {
+    "один": 1, "одн": 1, "два": 2, "дв": 2, "три": 3, "тр": 3, "четыр": 4,
+    "пят": 5, "шест": 6, "сем": 7, "восем": 8, "девят": 9, "десят": 10,
+    "одиннадцат": 11, "двенадцат": 12, "тринадцат": 13, "четырнадцат": 14,
+    "пятнадцат": 15, "шестнадцат": 16, "семнадцат": 17, "восемнадцат": 18,
+    "девятнадцат": 19, "двадцат": 20, "тридцат": 30, "сорок": 40,
+    "пятьдесят": 50, "пятдесят": 50, "шестьдесят": 60, "семьдесят": 70,
+    "восемьдесят": 80, "девяносто": 90, "сто": 100, "двести": 200,
+    "триста": 300, "четыреста": 400, "пятьсот": 500, "тысяч": 1000,
+}
+_NUM_WORD_RE = re.compile(
+    r"\b(" + "|".join(sorted(_NUM_WORDS, key=len, reverse=True)) + r")\w*\b",
+    re.IGNORECASE,
+)
+_REF_STRIP_RE = re.compile(r"\[\d+(?:\s*[,;]\s*\d+)*\]")
+
+
+def _words_to_digits(text: str) -> str:
+    """«пяти рабочих дней» -> «5 рабочих дней» (для извлечения якорей)."""
+    return _NUM_WORD_RE.sub(lambda m: str(_NUM_WORDS[m.group(1).lower()]), text)
+
+
+def extract_anchors(text: str) -> set[str]:
+    """Реквизиты утверждения: числа с единицами, даты, коды (§21.2).
+
+    Формат якоря выбран так, чтобы «пяти рабочих дней» и «5 рабочих дней»
+    считались одним реквизитом, а «три дня» и «три рабочих дня» — разными:
+    единица входит в якорь, потому что норма различает именно её.
+    """
+    out: set[str] = set()
+    # Номер ссылки [1] — не реквизит нормы: без вырезания любое утверждение
+    # «проваливало» сверку на самом себе.
+    body = _REF_STRIP_RE.sub(" ", text or "")
+
+    for code in _CODE_RE.findall(body):
+        out.add("code:" + re.sub(r"\s+", " ", code.strip().lower()))
+
+    for date in _DATE_RE.findall(body):
+        out.add("date:" + date.strip().lower())
+
+    # Даты уже сняты — иначе «01.06.2026» дало бы ещё и числа 01/06/2026.
+    numeric = _DATE_RE.sub(" ", body)
+    numeric = _words_to_digits(numeric)
+
+    for m in _NUM_RE.finditer(numeric):
+        num = _norm_num(m.group(0))
+        tail = numeric[m.end(): m.end() + 40]
+        unit_m = _UNIT_RE.match(tail)
+        unit = unit_m.group(1).lower() if unit_m else ""
+        # Единица нормализуется до основы: «рабочих дней» -> «раб.дн».
+        if "раб" in unit:
+            unit = "раб.дн"
+        elif "календар" in unit:
+            unit = "кал.дн"
+        elif unit.startswith("дн"):
+            unit = "дн"
+        elif unit.startswith("час"):
+            unit = "час"
+        elif unit.startswith("руб") or unit.startswith("коп"):
+            unit = "руб"
+        elif unit.startswith("процент") or unit == "%":
+            unit = "%"
+        elif unit.startswith("год") or unit == "лет":
+            unit = "год"
+        elif unit.startswith("месяц"):
+            unit = "мес"
+        elif unit.startswith("недел"):
+            unit = "нед"
+        out.add(f"num:{num}:{unit}")
+    return out
+
+
+def find_amplifiers(text: str) -> list[str]:
+    """Усилители в утверждении — те, которых не было в цитате (§21.4 п.3)."""
+    low = text or ""
+    return [phrase for phrase, rx in _AMPLIFIER_RES if rx.search(low)]
+
 
 @dataclass
 class Claim:
@@ -47,6 +186,9 @@ class Claim:
     best_similarity: float | None = None
     covered: bool = False
     reason: str = ""
+    # §21.4: чего не хватило — чтобы в verify было видно причину, а не «нет».
+    missing_anchors: list[str] = field(default_factory=list)
+    added_amplifiers: list[str] = field(default_factory=list)
 
     @property
     def has_ref(self) -> bool:
@@ -197,5 +339,43 @@ def check_grounding(
             c.covered = True
             c.reason = "ссылка есть, близость не проверялась"
 
+    # §21.4: программный контроль смысла. Порядок важен — сначала якоря, потом
+    # усилители: «около пяти дней [1]» проваливает оба, и в причине должно
+    # остаться то, что весомее. Искажённый реквизит опаснее смягчения.
+    for c in claims:
+        if not (c.covered and c.refs):
+            continue
+        cited = " ".join(fragments[r - 1] for r in c.refs if 1 <= r <= len(fragments))
+        anchors = extract_anchors(c.text)
+        if anchors:
+            present = extract_anchors(cited)
+            missing = sorted(anchors - present)
+            if missing:
+                c.missing_anchors = [_anchor_label(a) for a in missing]
+                c.covered = False
+                c.reason = "якоря нет в цитате: " + ", ".join(c.missing_anchors[:3])
+                continue
+        amplified = find_amplifiers(c.text)
+        if amplified:
+            in_source = find_amplifiers(cited)
+            added = [a for a in amplified if a not in in_source]
+            if added:
+                c.added_amplifiers = added
+                c.covered = False
+                c.reason = "усилитель, которого нет в цитате: " + ", ".join(added[:3])
+
     report.claims = claims
     return report
+
+
+def _anchor_label(anchor: str) -> str:
+    """Читаемая подпись якоря для detail — «число 5 раб.дн», не «num:5:раб.дн»."""
+    kind, _, rest = anchor.partition(":")
+    if kind == "num":
+        num, _, unit = rest.partition(":")
+        return f"{num} {unit}".strip()
+    if kind == "code":
+        return rest
+    if kind == "date":
+        return rest
+    return rest

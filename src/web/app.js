@@ -20,6 +20,7 @@
     live: false,
     roleId: '',
     lineId: '',
+    tone: 'plain',
     roles: [],
     lines: [],
     sessionId: '',
@@ -28,7 +29,9 @@
     streaming: null,
     turn: null,
     lastQuestion: '',
-    lastAsOf: ''
+    lastAsOf: '',
+    lastTicket: null,
+    paused: false
   };
 
   /* ------------------------------------------------------------------ утилиты */
@@ -74,6 +77,18 @@
 
   var consoleView = new global.ConsoleView($('consoleBody'), $('consoleMeta'), $('consoleStatus'));
 
+  var progressView = new global.ProgressView({
+    wrap: $('progress'),
+    track: $('progressBar'),
+    fill: $('progressFill'),
+    count: $('progressCount'),
+    now: $('progressNow'),
+    detail: $('progressDetail'),
+    dots: $('progressDots'),
+    ibBar: $('ibProgress'),
+    ibFill: $('ibProgressFill')
+  });
+
   $('consoleClear').addEventListener('click', function () {
     consoleView.clear();
     consoleView.setStatus('ожидание запроса', '');
@@ -117,6 +132,7 @@
     $('badgeRole').textContent = state.roleId ? roleTitle(state.roleId) : 'не выбрана';
     $('badgeRole').className = 'tab__badge' + (state.roleId ? ' tab__badge--set' : '');
     $('badgeLine').textContent = state.lineId || 'авто';
+    $('badgeTone').textContent = state.tone === 'formal' ? 'формальный' : 'простой';
     $('badgeMode').textContent = state.mock ? 'мок' : 'живой';
     renderSettings();
   }
@@ -155,6 +171,22 @@
         b.setAttribute('role', 'radio');
         b.setAttribute('aria-checked', String(state.lineId === L.id));
         b.addEventListener('click', makeLinePicker(L.id));
+        row.appendChild(b);
+      }
+      return;
+    }
+
+    if (activeTab === 'tone') {
+      hint.innerHTML = 'Тон меняет формулировку, но не смысл (§21): реквизиты — числа, сроки, суммы, коды — берутся из цитаты дословно. В оговорке и отказе тон всегда формальный.';
+      var tones = [{ id: 'plain', t: 'простой (по умолчанию)' }, { id: 'formal', t: 'формальный' }];
+      for (i = 0; i < tones.length; i++) {
+        b = el('button', 'chip', tones[i].t);
+        b.type = 'button';
+        b.setAttribute('role', 'radio');
+        b.setAttribute('aria-checked', String(state.tone === tones[i].id));
+        b.addEventListener('click', (function (toneId) {
+          return function () { state.tone = toneId; renderTabs(); };
+        })(tones[i].id));
         row.appendChild(b);
       }
       return;
@@ -451,7 +483,7 @@
 
     host.appendChild(el('h2', 'section-title', 'Заявка ' + t.id));
 
-    var status = el('p', 'tikcket-detail__status');
+    var status = el('p', 'ticket-detail__status');
     status.appendChild(el('span', 'tstatus tstatus--' + (TICKET_STATUS_TONE[t.status] || 'muted'),
       TICKET_STATUS_LABEL[t.status] || t.status));
     status.appendChild(el('span', 'tickets__iters', t.created_by === 'agent'
@@ -729,6 +761,33 @@
     var head = el('tr');
     ['Показатель', 'Значение'].forEach(function (h) { head.appendChild(el('th', null, h)); });
     table.appendChild(head);
+
+    /* §20.5: answer_rate — самый честный показатель продукта, поэтому отдельно и крупно. */
+    var stats = state.mock ? global.MockLex.stats() : (state.stats || null);
+    if (stats && stats.caveats && stats.caveats.answer_rate) {
+      var ar = stats.caveats.answer_rate;
+      host.appendChild(el('h2', 'section-title', 'На сколько вопросов LEX отвечает'));
+      host.appendChild(el('p', 'section-sub',
+        'Полный ответ и ответ с оговоркой — это ответ. Отказ — единственный случай, когда сотрудник уходит искать сам.'));
+      var rate = el('div', 'rate');
+      var cells = [
+        { n: ar.plain, lbl: 'отвечено полностью', cls: 'answered' },
+        { n: ar.caveated, lbl: 'с оговоркой', cls: 'caveated' },
+        { n: ar.refused, lbl: 'отказ', cls: 'refused' }
+      ];
+      for (var rc = 0; rc < cells.length; rc++) {
+        var cell = el('div', 'rate__cell rate--' + cells[rc].cls);
+        cell.appendChild(el('span', 'rate__num', String(cells[rc].n)));
+        cell.appendChild(el('span', 'rate__lbl', cells[rc].lbl));
+        rate.appendChild(cell);
+      }
+      host.appendChild(rate);
+      host.appendChild(el('p', 'section-sub',
+        'Оговорок: ' + stats.caveats.total + ' · по уровню: low ' + stats.caveats.by_level.low
+        + ', medium ' + stats.caveats.by_level.medium + ', high ' + stats.caveats.by_level.high
+        + ' · причины: ' + stats.caveats.by_reason.map(function (r) { return r.code + ' ' + r.count; }).join(', ')));
+    }
+
     var rows = state.mock
       ? [['Всего запросов', '42'], ['Отказов', '7 (16.7%)'], ['Средняя латентность', '3.8 с'],
          ['p95 латентность', '9.1 с'], ['Чаще всего нет документа', 'лицензирование — 5']]
@@ -820,6 +879,14 @@
     feed.scrollTop = feed.scrollHeight;
   }
 
+  /* §10: ответ сотрудника на уточнение — в ленту, чтобы диалог читался. */
+  function addClarifyAnswer(turnEl, text) {
+    if (!turnEl) return;
+    var line = el('p', 'asked__clarify', 'Уточнение · ' + text);
+    turnEl.appendChild(line);
+    scrollFeed();
+  }
+
   /* ------------------------------------------------------------------ «думает» */
 
   function showThinking(host) {
@@ -862,6 +929,29 @@
         target.appendChild(doc.createTextNode(parts[i]));
       }
     }
+  }
+
+  /* §20.4: оговорка под ответом. Спокойная, никогда не красная; ответ остаётся видимым. */
+  function renderCaveat(host, cav) {
+    var level = cav.level || 'low';
+    var box = el('div', 'caveat caveat--' + level);
+    box.setAttribute('role', 'note');
+    var head = el('div', 'caveat__head');
+    var icon = el('span', 'caveat__icon', '⚠');
+    icon.setAttribute('aria-hidden', 'true');
+    head.appendChild(icon);
+    head.appendChild(el('span', null, level === 'high' ? 'Не полная уверенность' : 'Не полная уверенность'));
+    if (level === 'low') head.appendChild(el('span', 'caveat__lvl', 'информационно'));
+    else if (level === 'high') head.appendChild(el('span', 'caveat__lvl', 'лучше решать с человеком'));
+    box.appendChild(head);
+
+    if (cav.reasons && cav.reasons.length) {
+      var ul = el('ul', 'caveat__reasons');
+      for (var i = 0; i < cav.reasons.length; i++) ul.appendChild(el('li', null, cav.reasons[i].text));
+      box.appendChild(ul);
+    }
+    if (cav.advice) box.appendChild(el('p', 'caveat__advice', cav.advice));
+    host.appendChild(box);
   }
 
   function renderAnswer(host, data) {
@@ -938,6 +1028,14 @@
     }
 
     host.appendChild(renderCitationList(data));
+
+    /* §20.4: сначала ответ, потом оговорка — с задержкой 150 мс (доп. №9). */
+    if (data.caveat) {
+      var cavHost = el('div', 'caveat-host');
+      host.appendChild(cavHost);
+      var cav = data.caveat;
+      global.setTimeout(function () { renderCaveat(cavHost, cav); }, 150);
+    }
 
     /* §13.3: карточка формы, если ответ её несёт. */
     if (data.form_id) host.appendChild(renderFormCard(data.form_id));
@@ -1396,28 +1494,70 @@
     scrollFeed();
   }
 
-  /* §18.4: карточка тикета в чате — меняет состояние. */
+  /* §22.2: карточка отправленного письма. Имитация честная: пометка про демо
+     видна всегда и не мелким шрифтом — это защита от обвинения в обмане. */
+  function ticketEmail(t) {
+    if (t && t.email) return t.email;
+    var subject = '[LEX] Вопрос без ответа в базе: ' + String((t && t.question) || '').slice(0, 60);
+    return {
+      to: 'quality@example.invalid',
+      from: (t && t.asker && t.asker.role_id ? t.asker.role_id : 'employee') + '@example.invalid',
+      subject: subject,
+      sent_at: (t && t.created_at) || '2026-11-26T11:20:00Z',
+      delivery: 'simulated'
+    };
+  }
+
   function renderTicketCard(host, data, ctx) {
-    var box = el('div', 'ticketcard');
     var status = data.status || 'open';
-    var head = el('div', 'ticketcard__head');
+    var em = ticketEmail(data);
+
+    var box = el('div', 'lettercard');
+    box.setAttribute('role', 'article');
+
+    var head = el('div', 'lettercard__head');
+    var env = el('span', 'lettercard__env', '✉');
+    env.setAttribute('aria-hidden', 'true');
+    head.appendChild(env);
+    head.appendChild(el('span', 'lettercard__title', 'Письмо отправлено в службу качества'));
     head.appendChild(el('span', 'ticketcard__badge ticketcard__badge--' + (TICKET_STATUS_TONE[status] || 'muted'),
       TICKET_STATUS_LABEL[status] || status));
-    head.appendChild(el('span', 'ticketcard__id', data.ticket || ''));
-    head.appendChild(el('span', 'ticketcard__by', 'создан агентом автоматически'));
     box.appendChild(head);
 
-    if (status === 'open' || status === 'assigned') {
-      box.appendChild(el('p', 'ticketcard__line', 'Вопрос передан в службу качества.'));
-      if (data.searched) {
-        var bits = [];
-        if (data.searched.documents != null) bits.push(data.searched.documents + ' документов');
-        if (data.searched.cases != null) bits.push(data.searched.cases + ' кейсов');
-        box.appendChild(el('p', 'ticketcard__line', 'Что проверили: ' + bits.join(', ')
-          + (data.eta ? ' · срок: ' + data.eta : '')));
+    var meta = el('dl', 'lettercard__meta');
+    var rows = [
+      ['Кому', em.to],
+      ['Тема', em.subject],
+      ['Номер', (data.ticket || '') + (data.sla_due ? ' · ответ до ' + fmtDate(String(data.sla_due).slice(0, 10)) : '')]
+    ];
+    for (var r = 0; r < rows.length; r++) {
+      meta.appendChild(el('dt', null, rows[r][0]));
+      var dd = el('dd', null, rows[r][1]);
+      if (rows[r][0] === 'Номер' && data.ticket) {
+        var copy = el('button', 'linkish lettercard__copy', 'скопировать');
+        copy.type = 'button';
+        copy.setAttribute('aria-label', 'Скопировать номер заявки ' + data.ticket);
+        copy.addEventListener('click', (function (id, btn) {
+          return function () {
+            try {
+              if (global.navigator && global.navigator.clipboard) global.navigator.clipboard.writeText(id);
+            } catch (e) { /* буфер недоступен — не критично */ }
+            btn.textContent = 'скопировано';
+            global.setTimeout(function () { btn.textContent = 'скопировать'; }, 1400);
+          };
+        })(data.ticket, copy));
+        dd.appendChild(copy);
       }
-      if (data.assignee) box.appendChild(el('p', 'ticketcard__line', 'Взял в работу: ' + data.assignee));
+      meta.appendChild(dd);
+    }
+    box.appendChild(meta);
+
+    box.appendChild(el('p', 'lettercard__demo',
+      'демонстрационный режим — реальная отправка не выполнялась'));
+
+    if (status === 'open' || status === 'assigned') {
       if (data.reason) box.appendChild(el('p', 'ticketcard__reason', 'Почему: ' + data.reason));
+      if (data.assignee) box.appendChild(el('p', 'ticketcard__line', 'Взял в работу: ' + data.assignee));
     } else if (status === 'closed' || status === 'answered') {
       box.appendChild(el('p', 'ticketcard__line', 'Ваш вопрос решён'
         + (data.case_id ? ' · добавлено в базу как кейс ' + data.case_id : '')));
@@ -1551,9 +1691,15 @@
 
     if (ev.type === 'step') {
       consoleView.push({ kind: 'step', key: d.key, title: d.title, detail: d.detail, n: d.n, total: d.total, ms: d.ms });
+      progressView.step(d.n, d.total, d.key, d.title, d.detail);
       if (d.key === 'verify') {
         var trimmed = /отброшено/.test(String(d.detail || ''));
-        consoleView.setStatus(trimmed ? 'ответ усечён: часть утверждений без цитаты' : 'проверка пройдена: каждое утверждение с цитатой', trimmed ? 'warn' : 'ok');
+        var cavLevel = d.caveat_level || (/ОГОВОРКА/.test(String(d.detail || '')) ? 'medium' : null);
+        if (cavLevel) {
+          consoleView.setStatus('самопроверка пройдена · ответ с оговоркой (' + cavLevel + ')', 'warn');
+        } else {
+          consoleView.setStatus(trimmed ? 'ответ усечён: часть утверждений без цитаты' : 'проверка пройдена: каждое утверждение с цитатой', trimmed ? 'warn' : 'ok');
+        }
       } else {
         consoleView.setStatus('шаг ' + (d.n || '?') + ' из ' + (d.total || '?') + ': ' + (d.title || d.key), 'live');
       }
@@ -1565,10 +1711,15 @@
       state.clarifyRound += 1;
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       consoleView.setStatus('нужно уточнение: агент спросил ' + (d.questions || []).length + ' параметр(а)', 'live');
+      /* §10 + доп. №8: полоса встаёт на месте, после ответа продолжится оттуда же. */
+      progressView.pause('вопрос уже в ленте — ответьте, и агент продолжит с этого шага');
+      state.paused = true;
       renderClarify(ctx.host, d, {
         round: state.clarifyRound,
         onClarifyAnswer: function (answers, skipped, round) {
-          submitAsk(state.lastQuestion, state.lastAsOf, answers, skipped);
+          progressView.resume();
+          state.paused = false;
+          submitAsk(state.lastQuestion, state.lastAsOf, answers, skipped, true);
         }
       });
       return;
@@ -1578,7 +1729,15 @@
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       d._turnId = ctx.turnId;
       renderAnswer(ctx.host, d);
-      consoleView.setStatus('ответ готов', 'ok');
+      if (d.caveat) {
+        consoleView.setStatus('ответ с оговоркой (' + (d.caveat.level || 'low') + ')', 'warn');
+        ctx.caveated = true;
+        progressView.finish('caveat', 'Готово, с оговоркой');
+      } else {
+        consoleView.setStatus('ответ готов', 'ok');
+        ctx.outcome = 'ok';
+        progressView.finish('ok', 'Готово');
+      }
       return;
     }
 
@@ -1586,22 +1745,28 @@
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       renderRefusal(ctx.host, d);
       consoleView.setStatus(d.kind === 'out_of_scope' ? 'вопрос вне компетенции базы' : 'отказ: ' + (REFUSAL_KIND_LABEL[d.kind] || d.kind || 'нет ответа'), 'idle');
+      if (d.kind === 'out_of_scope') progressView.finish('scope', 'Вопрос вне базы знаний');
+      else progressView.finish('refusal', 'Ответа в базе нет');
       return;
     }
 
     if (ev.type === 'escalate') {
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       renderTicketCard(ctx.host, {
-        ticket: d.ticket, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason
+        ticket: d.ticket, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason,
+        sla_due: d.sla_due, question: d.question, email: d.email
       }, {});
       state.lastTicket = d.ticket;
       consoleView.setStatus('тикет создан: ' + d.ticket + ' · ждёт службу качества', 'warn');
+      progressView.finish('refusal', 'Передано в службу качества');
       return;
     }
 
     if (ev.type === 'done') {
       consoleView.push({ kind: 'done', key: 'done', title: 'Готово', detail: 'путь: ' + (d.inference_path || '—') + ' · журнал: ' + (d.journal_id || '—'), ms: d.elapsed_ms });
       consoleView.setStatus('готово за ' + ((d.elapsed_ms || 0) / 1000).toFixed(1) + ' с', 'ok');
+      if (ctx.caveated) progressView.relabel('Готово, с оговоркой · ' + ((d.elapsed_ms || 0) / 1000).toFixed(1) + ' с');
+      else if (ctx.outcome === 'ok') progressView.relabel('Готово · ' + ((d.elapsed_ms || 0) / 1000).toFixed(1) + ' с');
       return;
     }
 
@@ -1616,25 +1781,42 @@
 
   /* ------------------------------------------------------------------ отправка */
 
-  function submitAsk(question, asOf, answers, skipped) {
+  function submitAsk(question, asOf, answers, skipped, resume) {
     var ctxId = String(Date.now()) + '-' + String(Math.random()).slice(2, 7);
-    var turn = addQuestion(question, skipped ? '' : asOf);
-    turn.host.dataset.turnId = ctxId;
-    var thinkingBox = showThinking(turn.host);
+    if (!resume) {
+      var turn = addQuestion(question, skipped ? '' : asOf);
+      turn.host.dataset.turnId = ctxId;
+      state.turn = turn;
+      consoleView.clear();
+      progressView.start(10);
+    } else {
+      /* §10: продолжение диалога — тот же ход ленты, полоса не начинается заново. */
+      ctxId = state.turn ? state.turn.host.dataset.turnId : ctxId;
+      if (answers) {
+        var said = [];
+        for (var k in answers) if (Object.prototype.hasOwnProperty.call(answers, k)) {
+          said.push(k + ': ' + (answers[k] || 'пропущено'));
+        }
+        if (said.length) addClarifyAnswer(state.turn.el, said.join(' · '));
+      }
+    }
+    var host = state.turn.host;
+
+    var thinkingBox = showThinking(host);
 
     var ctx = {
-      host: turn.host,
+      host: host,
       turnId: ctxId,
       thinkingBox: thinkingBox
     };
 
-    consoleView.clear();
-    consoleView.setStatus('запрос отправлен', 'live');
+    consoleView.setStatus(resume ? 'продолжаю диалог: ' + question : 'запрос отправлен', 'live');
     $('send').disabled = true;
 
     var payload = {
       question: question,
-      role_id: state.roleId
+      role_id: state.roleId,
+      tone: state.tone
     };
     if (asOf) payload.as_of = asOf;
     if (state.lineId) payload.business_line = state.lineId;
@@ -1647,13 +1829,16 @@
     }
 
     if (state.mock) {
-      state.streaming = global.MockLex.stream(question, state.roleId, asOf, answers, {
+      var streamHandlers = {
         onStep: function (d) { applyEvent({ type: 'step', data: d }, ctx); },
         onClarify: function (d) { applyEvent({ type: 'clarify', data: d }, ctx); finish(); },
         onAnswer: function (d) { applyEvent({ type: 'answer', data: d }, ctx); },
         onRefusal: function (d) { applyEvent({ type: 'refusal', data: d }, ctx); },
+        onEscalate: function (d) { applyEvent({ type: 'escalate', data: d }, ctx); finish(); },
         onDone: function (d) { applyEvent({ type: 'done', data: d }, ctx); finish(); }
-      });
+      };
+      if (resume) streamHandlers.resumeFrom = progressView.done;
+      state.streaming = global.MockLex.stream(question, state.roleId, asOf, answers, state.tone, streamHandlers);
       return;
     }
 

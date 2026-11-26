@@ -251,6 +251,7 @@ class Doc:
     words: int = 0
     sections: list[str] = field(default_factory=list)
     rule_key: str = ""
+    business_line: str = "общее"
 
 
 def _slug(text: str) -> str:
