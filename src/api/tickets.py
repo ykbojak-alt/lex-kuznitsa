@@ -9,8 +9,9 @@
   на эскалацию, из которой вырос, но живёт своей жизнью.
 
 Логики разбора здесь нет — только хранение, переходы статусов и сборка
-черновика из того, что уже есть в корпусе. В базу кейс попадает лишь после
-подтверждения человеком (§16.1).
+черновика из того, что уже есть в корпусе. Ответ службы качества сразу
+становится кейсом (§16.3): база пополняется без ручного подтверждения,
+а confirm закрывает заявку, не создавая второй кейс.
 """
 from __future__ import annotations
 
@@ -170,6 +171,9 @@ def answer_escalation(eid: str, answer: str, resolved_by: str = "quality") -> di
         row["resolved_by"] = resolved_by
         row["answered_at"] = _now()
         row["status"] = "answered"
+        # §16.3: ответ службы качества сразу становится кейсом — дообучение
+        # не ждёт ручного подтверждения.
+        _attach_case(row, "esc")
         _write_all("esc", rows)
     return row
 
@@ -257,8 +261,24 @@ def _role_lines(role_id: str) -> list[str]:
     return ["*"]
 
 
+def _find_ticket(tid: str) -> tuple[str, list[dict], dict | None]:
+    """Найти заявку: и в очереди тикетов, и в списке эскалаций.
+
+    Ядро пишет эскалацию в escalations.jsonl (esc-NNNN), очередь службы
+    качества — в tickets.jsonl (LEX-YYYY-NNNN). Ответ службы качества
+    принимается по любому из этих номеров.
+    """
+    for kind in ("tk", "esc"):
+        rows = _read(kind)
+        row = next((r for r in rows if r.get("id") == tid), None)
+        if row is not None:
+            return kind, rows, row
+    return "tk", [], None
+
+
 def get_ticket(tid: str) -> dict | None:
-    return next((r for r in _read("tk") if r.get("id") == tid), None)
+    _, _, row = _find_ticket(tid)
+    return row
 
 
 def assign_ticket(tid: str, assignee: str, force: bool = False) -> dict:
@@ -287,41 +307,46 @@ def answer_ticket(tid: str, answer: str, resolved_by: str = "quality") -> dict:
     if not str(answer or "").strip():
         raise ValueError("answer обязателен")
     with _lock:
-        rows = _read("tk")
-        row = next((r for r in rows if r.get("id") == tid), None)
+        kind, rows, row = _find_ticket(tid)
         if row is None:
             raise KeyError(tid)
         row["answer"] = str(answer).strip()
         row["resolved_by"] = resolved_by
         row["answered_at"] = _now()
         row["status"] = "answered"
-        _write_all("tk", rows)
+        # §16.3: ответ службы качества сразу становится кейсом — дообучение
+        # не ждёт ручного подтверждения; повторный ответ кейс не плодит.
+        _attach_case(row, kind)
+        _write_all(kind, rows)
     return row
 
 
 def close_ticket(tid: str, reason: str = "") -> dict:
     with _lock:
-        rows = _read("tk")
-        row = next((r for r in rows if r.get("id") == tid), None)
+        kind, rows, row = _find_ticket(tid)
         if row is None:
             raise KeyError(tid)
         row["status"] = "closed"
         row["closed_at"] = _now()
         if reason:
             row["close_reason"] = str(reason)
-        _write_all("tk", rows)
+        _write_all(kind, rows)
     return row
 
 
 def _patch_ticket(tid: str, **fields: Any) -> dict:
     with _lock:
-        rows = _read("tk")
-        row = next((r for r in rows if r.get("id") == tid), None)
+        kind, rows, row = _find_ticket(tid)
         if row is None:
             raise KeyError(tid)
         row.update(fields)
-        _write_all("tk", rows)
+        _write_all(kind, rows)
     return row
+
+
+def link_escalation(tid: str, eid: str) -> dict:
+    """Привязать заявку (эскалацию esc-NNNN) к тикету очереди СК."""
+    return _patch_ticket(tid, escalation_id=str(eid))
 
 
 # --------------------------------------------------- черновик кейса (§16.2)
@@ -413,11 +438,7 @@ def ticket_draft(tid: str) -> dict | None:
     }
     suggestions = _suggestions(draft)
     # rule_key, упомянутый в ответе и существующий в корпусе, подставляем сразу.
-    known = _rule_keys()
-    for key in sorted(known):
-        if key.lower() in answer.lower():
-            draft["rule_key"] = key
-            break
+    draft["rule_key"] = _rule_key_from_text(answer) or None
     return {
         "ticket": tid,
         "status": row.get("status"),
@@ -431,7 +452,7 @@ def ticket_draft(tid: str) -> dict | None:
 
 def _tags_from(row: dict) -> list[str]:
     tags: list[str] = []
-    line = (row.get("asker") or {}).get("business_line")
+    line = (row.get("asker") or {}).get("business_line") or row.get("business_line")
     if line:
         tags.append(line)
     text = f"{row.get('question', '')} {row.get('answer', '')}".lower()
@@ -443,8 +464,76 @@ def _tags_from(row: dict) -> list[str]:
     return tags
 
 
+# ------------------------------------------- авто-кейс из ответа СК (§16.3)
+
+def _rule_key_from_text(text: str) -> str:
+    """Правило, упомянутое в тексте и существующее в корпусе."""
+    low = str(text or "").lower()
+    for key in sorted(_rule_keys()):
+        if key.lower() in low:
+            return key
+    return ""
+
+
+def _auto_case_payload(row: dict, kind: str) -> dict:
+    """Кейс из ответа службы качества.
+
+    question — из заявки, answer_in_practice — из ответа. Остальное — то, что
+    заявка уже знает; неизвестное не выдумываем: пустые linked_docs и
+    rule_key означают «регламент это не покрывает» (§8).
+    """
+    answer = str(row.get("answer") or "").strip()
+    resolved_by = str(row.get("resolved_by") or "quality")
+    escalation_id = str(row.get("escalation_id") or "")
+    if kind == "esc":
+        # сама заявка и есть эскалация: её номер и есть escalation_id
+        escalation_id = escalation_id or str(row.get("id") or "")
+    return {
+        "question": str(row.get("question") or "").strip(),
+        "answer_in_practice": answer,
+        "outcome": "resolved",
+        "author_role": resolved_by,
+        "author_name": "служба качества" if resolved_by == "quality" else resolved_by,
+        "linked_docs": [],
+        "tags": _tags_from(row),
+        "rule_key": _rule_key_from_text(answer),
+        "content_type": "text",
+        "source": "escalation" if escalation_id else "ticket",
+        "escalation_id": escalation_id,
+    }
+
+
+def _attach_case(row: dict, kind: str) -> str:
+    """Привязать кейс к заявке. Один кейс на заявку (идемпотентно).
+
+    Ошибка создания кейса не должна отменять ответ службы качества: ответ
+    остаётся в заявке, причина — в поле case_error.
+    """
+    existing = str(row.get("case_id") or "")
+    if existing:
+        return existing
+    payload = _auto_case_payload(row, kind)
+    if not payload["question"] or not payload["answer_in_practice"]:
+        row["case_error"] = "нечего записать: в заявке нет вопроса или ответа"
+        return ""
+    try:
+        added = core.add_case(payload)
+    except Exception as exc:
+        row["case_error"] = str(exc)
+        return ""
+    case_id = str(added.get("id") or "")
+    if case_id:
+        row["case_id"] = case_id
+        row["case_origin"] = "auto"
+    return case_id
+
+
 def confirm_ticket(tid: str, payload: dict) -> dict:
-    """§16.3: подтверждение человеком. Только здесь кейс попадает в базу."""
+    """§16.3: подтверждение человеком.
+
+    Закрывает заявку. Кейс к этому моменту обычно уже создан автоматически
+    из ответа службы качества — тогда он переиспользуется, а не дублируется.
+    """
     editor_role = str(payload.get("editor_role") or "").strip()
     if not editor_role:
         raise ValueError("editor_role обязателен: должно быть видно, кто подтвердил")
@@ -477,7 +566,13 @@ def confirm_ticket(tid: str, payload: dict) -> dict:
     case["escalation_id"] = row.get("escalation_id") or ""
     case["ticket"] = tid
 
-    added = core.add_case(case)
+    # Один кейс — одна заявка: если кейс уже создан автоматически при
+    # ответе службы качества, второй не создаём.
+    existing_case = str(row.get("case_id") or "")
+    if existing_case:
+        added = {"id": existing_case, "in_index": True}
+    else:
+        added = core.add_case(case)
     _patch_ticket(tid, status="closed", closed_at=_now(), case_id=added["id"])
 
     change = None
@@ -490,6 +585,7 @@ def confirm_ticket(tid: str, payload: dict) -> dict:
         "ok": True,
         "case_id": added["id"],
         "in_index": bool(added.get("in_index")),
+        "case_reused": bool(existing_case),
         "ticket_status": "closed",
         "change_request": change,
         "affected": f"кейсов в базе: {core.cases_count()} · вопрос теперь покрыт",

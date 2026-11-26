@@ -126,7 +126,8 @@ def open_letter(tid: str) -> dict | None:
 def reply(tid: str, body: str, resolved_by: str = "quality") -> dict:
     """§22.3: ответ на письмо = ответ по тикету + готовый черновик кейса.
 
-    Кейс в базу не попадает: его подтверждает человек (§16.3).
+    Ответ службы качества сразу становится кейсом (§16.3); черновик здесь —
+    для проверки человеком, а не для ручной записи в базу.
     """
     if not str(body or "").strip():
         raise ValueError("body обязателен")
@@ -141,7 +142,7 @@ def reply(tid: str, body: str, resolved_by: str = "quality") -> dict:
         "delivery": "simulated",
         "draft": draft.get("draft"),
         "suggestions": draft.get("suggestions"),
-        "next": "черновик кейса готов; в базу попадёт после confirm",
+        "next": "черновик кейса готов; кейс уже в базе (дообучение)",
     }
 
 

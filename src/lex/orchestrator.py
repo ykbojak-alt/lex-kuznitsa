@@ -178,6 +178,22 @@ def _now_ms(t0: float) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 
+def _case_covers_question(case_question: str, question: str) -> bool:
+    """Кейс закрывает вопрос, если это тот же самый предмет.
+
+    Кейс рождается из заявки, а заявка — из вопроса сотрудника, поэтому у
+    кейса и вопроса одни и те же предметные слова. Случайное пересечение
+    («срок», «хранение») кейс не подтверждает.
+    """
+    from .index import tokenize
+
+    cq = set(tokenize(case_question))
+    if not cq:
+        return False
+    q = set(tokenize(question))
+    return len(cq & q) / len(cq) >= 0.6
+
+
 def _mean_similarity(report: GroundingReport) -> float | None:
     """Средняя близость покрытых утверждений к цитатам (§20.1 п.1).
 
@@ -625,6 +641,18 @@ class Orchestrator:
         if missing and not names_doc and (
                 subj < SUBJECT_MIN_COVERAGE or cos1 < SUBJECT_MIN_COSINE):
             detail += f" · предмет вопроса не найден ({subj:.0%})"
+            # §8: вопрос может закрывать кейс из практики, даже когда регламент
+            # его не покрывает. Кейс смотрим ДО остановки каскада: иначе
+            # дообучение через службу качества не работает — тот же вопрос
+            # снова уходит в эскалацию, а кейс в ответ так и не попадёт.
+            hit = next((c for c in self._search_cases()
+                        if _case_covers_question(c.question, self.opts.question)), None)
+            if hit is not None:
+                detail += " · тема закрыта кейсом из практики"
+                # Регламент вопрос не покрывает, поэтому отвечаем по практике:
+                # документы из выдачи убираем, чтобы в ответ не попало не то.
+                state["doc_hits"] = []
+                return _step(n, "retrieve", detail, self._t0, color="amber")
             # Раньше здесь ставился только escalate_pending, и каскад шёл
             # дальше: compose собирал ответ по нерелевантным фрагментам,
             # verify его отбрасывал, и человек получал уточнение вместо

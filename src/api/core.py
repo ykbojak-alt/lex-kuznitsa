@@ -454,6 +454,48 @@ def _detail_id(entry: dict) -> str:
     return "q-" + str(entry.get("id") or uuid.uuid4().hex[:6]).removeprefix("q-")
 
 
+def _open_quality_ticket(data: dict, question: str, role_id: str,
+                         business_line: str | None, session_id: str | None) -> dict:
+    """Тикет в очередь службы качества из заявки (эскалации).
+
+    Ядро в эскалации пишет заявку в escalations.jsonl (esc-NNNN), а очередь
+    СК — это tickets.jsonl (LEX-YYYY-NNNN). Без тикета заявка не видна в
+    почтовом ящике СК (/api/inbox читает только тикеты) и на неё нечем
+    ответить.
+    """
+    from . import tickets as tickets_mod
+
+    eid = str(data.get("ticket") or "")
+    kind = str(data.get("kind") or "not_in_corpus")
+    if kind not in ("not_in_corpus", "conflict_unresolved", "ocr_degraded"):
+        kind = "not_in_corpus"
+    rows = tickets_mod.list_tickets(limit=1000)
+    for row in rows:
+        if eid and str(row.get("escalation_id") or "") == eid:
+            return row
+    for row in rows:
+        if row.get("status") != "closed" and \
+                str(row.get("question") or "").strip() == question.strip():
+            # Тикет уже открыт (агент открыл его при отказе) — привязываем заявку.
+            if eid:
+                try:
+                    return tickets_mod.link_escalation(str(row.get("id") or ""), eid)
+                except KeyError:
+                    return row
+            return row
+    try:
+        return tickets_mod.create_ticket({
+            "question": question,
+            "kind": kind,
+            "session_id": session_id or "",
+            "role_id": role_id,
+            "business_line": business_line or "",
+            "escalation_id": eid,
+        })
+    except Exception:
+        return {}
+
+
 async def stream_answer(question: str, role_id: str, as_of: str | None,
                         session_id: str | None = None,
                         answers: dict | None = None,
@@ -537,6 +579,15 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
 
                 payload = dict(data)
                 payload.setdefault("channel", "email")
+                # §18: заявка должна лежать в очереди службы качества —
+                # тикетом (LEX-YYYY-NNNN). Иначе СК её не видит: /api/inbox
+                # читает только тикеты, а ядро пишет эскалацию в
+                # escalations.jsonl.
+                queue_ticket = _open_quality_ticket(
+                    payload, question, role_id, business_line, session_id)
+                if queue_ticket.get("id"):
+                    payload["ticket_id"] = str(queue_ticket["id"])
+                    entry["ticket_id"] = payload["ticket_id"]
                 payload["email"] = mail.email_block({
                     "question": question,
                     "created_at": entry["ts"],
@@ -690,6 +741,10 @@ def add_case(payload: dict) -> dict:
         tags=[str(x) for x in (payload.get("tags") or [])],
         rule_key=str(payload.get("rule_key") or ""),
         content_type=str(payload.get("content_type") or "text"),
+        # связь кейса с заявкой: source и escalation_id прокидываются дальше
+        source=str(payload.get("source") or ""),
+        escalation_id=str(payload.get("escalation_id") or ""),
+        confirmed_by=str(payload.get("confirmed_by") or ""),
     )
     return {"id": case.id, "ok": True, "in_index": True}
 
