@@ -149,13 +149,32 @@ def escalate(data: dict) -> str:
     return frame("escalate", payload)
 
 
-def done(elapsed_ms: int, inference_path: str, journal_id: str | None) -> str:
-    return frame("done", {
+def done(elapsed_ms: int, inference_path: str, journal_id: str | None,
+         tokens: dict | None = None) -> str:
+    """Финальный кадр. ``tokens`` — расход за весь запрос (prompt/completion).
+
+    Счётчик берётся из ``usage`` ответов провайдера, а не оценивается нами:
+    своего токенизатора у слота нет. Поле вводится аддитивно — старые клиенты
+    его игнорируют.
+    """
+    payload = {
         "elapsed_ms": elapsed_ms,
         "inference_path": inference_path,
         "journal_id": journal_id,
-    })
+    }
+    if tokens:
+        payload["tokens"] = {
+            "prompt": int(tokens.get("prompt") or 0),
+            "completion": int(tokens.get("completion") or 0),
+            "total": int(tokens.get("total") or 0),
+            "calls": int(tokens.get("calls") or 0),
+        }
+    return frame("done", payload)
 
 
 def error(message: str, stage: str) -> str:
-    return frame("error", {"message": message, "stage": stage})
+    # Пустое сообщение — не «нет ошибки», а «ошибка без текста»: жюри видит
+    # кадр без причины и читает его как «агент не понял вопрос». Причину
+    # называем всегда, даже если исключение пришло без str().
+    text = str(message or "").strip() or f"сбой на стадии {stage or 'сервер'} без текста ошибки"
+    return frame("error", {"message": text, "stage": stage})

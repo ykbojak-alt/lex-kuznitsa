@@ -32,7 +32,8 @@ ENABLED = os.environ.get("LEX_LLM_DEBUG", "0").lower() in ("1", "true", "yes", "
 
 def record(*, model: str, max_tokens: int, finish_reason: str, content: str,
            reasoning: str, elapsed_ms: int, attempt: int = 0,
-           retried: bool = False, error: str = "", path: str | Path | None = None) -> None:
+           retried: bool = False, error: str = "", path: str | Path | None = None,
+           preview: str = "", stage: str = "") -> None:
     if not ENABLED:
         return
     row = {
@@ -49,6 +50,13 @@ def record(*, model: str, max_tokens: int, finish_reason: str, content: str,
     }
     if error:
         row["error"] = error[:300]
+    # §12: когда разбор ответа даёт 0 утверждений при непустом тексте, причина
+    # видна только в сыром начале. Без снимка «total=0» не диагностируется:
+    # ответ существует, но что именно вернула модель — неизвестно.
+    if preview:
+        row["preview"] = preview[:500]
+    if stage:
+        row["stage"] = stage
     target = Path(path) if path else DEBUG_PATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

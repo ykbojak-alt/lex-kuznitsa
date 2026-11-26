@@ -238,6 +238,41 @@ def role_ids() -> set[str]:
     return {r.get("id") for r in roles()}
 
 
+def role_aliases() -> dict[str, str]:
+    """Старые id -> действующие роли (v1.16: lawyer/it -> technical).
+
+    Отдельно от ``roles()`` намеренно: алиас принимается на входе, но в
+    списке ролей его быть не должно — UI показал бы мёртвый пункт, у
+    которого нет ни отдела, ни направления.
+    """
+    m = core_modules()["access"]
+    if m is not None and hasattr(m, "ROLE_ALIASES"):
+        try:
+            raw = dict(m.ROLE_ALIASES)
+            if raw:
+                return {str(k).lower(): str(v) for k, v in raw.items()}
+        except Exception:
+            pass
+    # access.py нет (урезанная сборка) — держим тот же минимум, что в ядре.
+    return {"lawyer": "technical", "it": "technical"}
+
+
+def resolve_role_id(role_id: str | None) -> str:
+    """Старый id -> действующий. Неизвестный возвращается как есть."""
+    rid = (role_id or "").strip().lower()
+    return role_aliases().get(rid, rid)
+
+
+def is_known_role(role_id: str | None) -> bool:
+    """Принимается ли роль на входе: действующий id или псевдоним старого."""
+    rid = (role_id or "").strip().lower()
+    if not rid:
+        return False
+    if rid in {str(x).lower() for x in role_ids()}:
+        return True
+    return rid in role_aliases()
+
+
 def role_departments(role_id: str) -> list[str]:
     m = core_modules()["access"]
     if m is not None and hasattr(m, "resolve_role"):
@@ -592,6 +627,13 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
     """
     started = time.perf_counter()
     journal_id = "q-" + uuid.uuid4().hex[:10]
+    # Счётчик токенов обнуляется на каждый вопрос: человеку нужен расход
+    # именно этого запроса, а не накопленный за сессию. Модуль llm берём
+    # через _try напрямую: core_modules() собирает только ядро, llm в нём нет.
+    _llm = _try("lex.llm")
+    if _llm is not None and hasattr(_llm, "_tokens_reset"):
+        with contextlib.suppress(Exception):
+            _llm._tokens_reset()
     inference_path = "nexus-link" if config.NEXUS_LINK_BASE_URL else "local"
     entry: dict[str, Any] = {
         "id": journal_id,
@@ -625,6 +667,19 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
             if kind == "step":
                 rec = _step_record(data)
                 entry["steps"].append(rec)
+                # Направление определяет шаг policy, а не клиент: параметр
+                # business_line в запросе почти всегда пуст, поэтому аналитика
+                # видела «общее» на всех вопросах. Пишем то, что реально
+                # определило ядро — из detail шага или из поля, если оно есть.
+                if data.get("key") == "policy" and not entry.get("business_line"):
+                    detected = data.get("business_line") or data.get("line") or ""
+                    if not detected:
+                        det = str(data.get("detail") or "")
+                        mline = re.search(r"направление:\s*([^·]+)", det)
+                        if mline:
+                            detected = mline.group(1).strip()
+                    if detected and detected.lower() not in ("не определено", "нет"):
+                        entry["business_line"] = detected
                 if "subject_coverage" in rec or "top_cosine" in rec:
                     # Второй путь для аналитики: /api/stats читает и steps,
                     # и блок retrieval. Держим оба в согласии, чтобы счётчик
@@ -709,21 +764,39 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
 
     elapsed = int((time.perf_counter() - started) * 1000)
     entry["elapsed_ms"] = elapsed
+    tokens: dict | None = None
+    if _llm is not None and hasattr(_llm, "tokens_total"):
+        with contextlib.suppress(Exception):
+            tokens = _llm.tokens_total()
+            if tokens:
+                entry["tokens"] = tokens
     if not failed and not closed_without_done:
-        yield sse.done(elapsed, inference_path, journal_id)
+        yield sse.done(elapsed, inference_path, journal_id, tokens)
     with contextlib.suppress(Exception):
         journal_append(entry)
 
 
 # ---------- раскрытие ответа (§13.1) ----------
 
-def expand(detail_id: str, section: str = "all") -> dict | None:
+def expand(detail_id: str, section: str = "all", *,
+           role_id: str | None = None,
+           session_id: str | None = None) -> dict | None:
+    """§13.1: развёрнутая версия ответа — только его владельцу.
+
+    ``role_id`` и ``session_id`` передаются в ядро: деталь помнит, кто её
+    создал, и чужой запрос получает ``None`` (HTTP-слой отдаёт 404 — не
+    подтверждаем существование чужой детали).
+    """
     m = core_modules()["orchestrator"]
     fn = getattr(m, "expand", None) if m is not None else None
     if fn is None:
         return None
     try:
-        return fn(detail_id, section)
+        return fn(detail_id, section, role_id=role_id, session_id=session_id)
+    except TypeError:
+        # Старая сигнатура без владельца (урезанная сборка): не отдаём
+        # деталь вовсе, чем отдаём её кому угодно. Fail-closed.
+        return None
     except Exception:
         return None
 
@@ -877,27 +950,57 @@ def add_case(payload: dict) -> dict:
 
 
 def list_cases(limit: int = 50, role_id: str | None = None,
-               tag: str | None = None, rule_key: str | None = None) -> list[dict]:
-    """Список кейсов с фильтром видимости по роли.
+               tag: str | None = None, rule_key: str | None = None) -> dict:
+    """Кейсы, которые роль вправе видеть, плюс честные числа отбора.
 
     ``role_id`` здесь не «чьи кейсы показать», а «кто смотрит»: выдача
     проходит через ``CaseStore.visible`` — то же правило, что в поиске
     оркестратора. Иначе API отдавал бы юристу кейсы другой роли, хотя в
     ответе на вопрос они ему уже не видны, — два разных ответа на один вопрос.
+
+    **Пустая роль больше не значит «покажи все»**. До этого ветка ``else``
+    звала ``store.find`` без фильтра, и ``GET /api/cases`` без параметра
+    отдавал весь журнал — включая кейсы чужих отделов. Видимость кейса от
+    параметра запроса зависеть не может: это дверь, а не настройка. HTTP-слой
+    отказывает на пустой роли ещё до сюда (400), но функция тоже fail-closed —
+    вызов из скрипта не должен становиться обходом.
+
+    Форма ответа: ``{"cases": [...], "total": M, "available": N,
+    "dropped": M-N, "by_reason": {"вне отдела": k}}`` — то же, что у
+    ``filter_documents`` (§23), чтобы UI мог показать «доступно 9 из 25».
     """
     store = case_store()
     if store is None:
-        return []
-    if role_id:
-        cases = store.visible(role_id)
-        if tag:
-            low = tag.lower()
-            cases = [c for c in cases if any(low in t.lower() for t in c.tags)]
-        if rule_key:
-            cases = [c for c in cases if c.rule_key == rule_key]
-        cases = sorted(cases, key=lambda c: c.ts, reverse=True)[:limit]
-        return [c.to_dict() for c in cases]
-    return [c.to_dict() for c in store.find(limit=limit, tag=tag, rule_key=rule_key)]
+        return {"cases": [], "total": 0, "available": 0, "dropped": 0, "by_reason": {}}
+    role = (role_id or "").strip().lower()
+    if not role or not is_known_role(role):
+        # Чужой id — не «все», а ничего: опечатка в роли не должна открывать
+        # базу. HTTP-слой отвечает 400 с перечнем ролей, сюда попадает только
+        # прямой вызов.
+        return {"cases": [], "total": len(store.cases), "available": 0,
+                "dropped": len(store.cases), "by_reason": {"неизвестная роль": len(store.cases)}}
+    role = resolve_role_id(role)
+    total = len(store.cases)
+    cases = store.visible(role)
+    if tag:
+        low = tag.lower()
+        cases = [c for c in cases if any(low in t.lower() for t in c.tags)]
+    if rule_key:
+        cases = [c for c in cases if c.rule_key == rule_key]
+    cases = sorted(cases, key=lambda c: c.ts, reverse=True)
+    # Дробление считается ДО limit: «отброшено по правам» — про видимость,
+    # а не про то, сколько поместилось на страницу.
+    dropped = total - len(cases)
+    by_reason = {"вне отдела": dropped} if dropped else {}
+    shown = cases[:limit]
+    return {
+        "cases": [c.to_dict() for c in shown],
+        "total": total,
+        "available": len(cases),
+        "shown": len(shown),
+        "dropped": dropped,
+        "by_reason": by_reason,
+    }
 
 
 def cases_count() -> int:

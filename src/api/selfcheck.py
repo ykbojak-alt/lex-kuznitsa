@@ -110,7 +110,10 @@ def main() -> int:
     lines = check("business-lines", "GET", "/api/business-lines")
 
     # --- §8 кейсы
-    check("cases list", "GET", "/api/cases")
+    # §23: роль обязательна — без неё /api/cases отдавал весь журнал.
+    check("cases list", "GET", "/api/cases?role_id=lawyer")
+    check("cases без роли -> 400", "GET", "/api/cases", expect=400,
+          note="§23: пустая роль — не «покажи все»")
     case = check("case create", "POST", "/api/cases", {
         "question": "Можно ли заключить контракт с единственным поставщиком до 600 тыс.?",
         "answer_in_practice": "Да, при соблюдении годового лимита по 44-ФЗ.",
@@ -155,9 +158,14 @@ def main() -> int:
         rows.append((SKIP, "form detail", "форм в корпусе нет"))
 
     # --- §13.1 expand (detail_id живёт в памяти ядра — без SSE его нет)
+    # §13.1: роль обязательна и здесь — иначе деталь чужого ответа читается
+    # по одному идентификатору.
     check("expand 404", "POST", "/api/expand",
-          {"detail_id": "q-нет", "section": "all"}, expect=404,
-          note="404 без живого detail_id — ожидаемо")
+          {"detail_id": "q-нет", "section": "all", "role_id": "lawyer"},
+          expect=404, note="404 без живого detail_id — ожидаемо")
+    check("expand без роли -> 400", "POST", "/api/expand",
+          {"detail_id": "q-нет", "section": "all"}, expect=400,
+          note="§13.1: деталь принадлежит роли ответа")
 
     # --- §18 тикеты + §22 почта
     ticket = check("ticket create", "POST", "/api/tickets", {
@@ -332,7 +340,7 @@ def _first_doc_id() -> str | None:
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parents[2]
-        corpus = pathlib.Path(os.environ.get("LEX_CORPUS_DIR") or (root / "sample-corpus"))
+        corpus = pathlib.Path(os.environ.get("LEX_CORPUS_DIR") or (root / "corpus-real"))
         manifest = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
         docs = [d for d in (manifest.get("documents") or []) if isinstance(d, dict)]
     except Exception:

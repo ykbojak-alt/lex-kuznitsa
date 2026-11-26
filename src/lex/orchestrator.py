@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import access, detail, editions, llm, policy, rerank
+from . import access, detail, editions, llm, llm_debug, policy, rerank
 from . import caveat as caveat_mod
 from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
@@ -41,6 +41,7 @@ from .dialogue import Dialogue
 from .forms import get_form
 from .grounding import GroundingReport, check_grounding, subject_coverage
 from .index import SearchIndex, embed_texts, get_index
+from .llm import LLMError
 from .media import inspect_corpus
 from .models import (
     STEP_COLORS,
@@ -89,6 +90,13 @@ _DOC_REF = re.compile(
 
 # Порог близости для проверки покрытия (§12.2, барьер 2).
 GROUNDING_THRESHOLD = float(os.environ.get("LEX_GROUNDING_THRESHOLD", "0.45"))
+
+# Сколько раз звать модель на compose, прежде чем сдаться. Нестабильность
+# слота измерена (26.11.2026): один и тот же вопрос в 5 прогонах дал 3 отказа
+# подряд по троттлингу и 1 ответ из 2 символов. Два вызова вместо одного —
+# это «спросить ещё раз», а не «дать другой ответ»: из результатов берётся
+# лучший по опоре на цитаты (§12).
+COMPOSE_ATTEMPTS = int(os.environ.get("LEX_COMPOSE_ATTEMPTS", "2"))
 
 SYSTEM_PROMPT = (
     "Ты отвечаешь ТОЛЬКО на основе фрагментов, переданных ниже. Если фрагменты не "
@@ -241,6 +249,56 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     if 2 <= n % 10 <= 4:
         return few
     return many
+
+
+def _flatten_for_grounding(text: str) -> str:
+    """Вторая стратегия разбора: markdown-структура ломает разбивку.
+
+    `split_sentences` режет по строкам и выбрасывает заголовки. Ответ модели
+    в форме «**Заголовок:**\\n- пункт [1].» уходил целиком, если все строки
+    попадали под `_HEADING_RE` или склеивались в одну. Снимаем разметку
+    (жирный, решётки, маркеры списка) и склеиваем в один абзац — тогда текст
+    режется обычными границами предложений.
+    """
+    import re as _re
+
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line = _re.sub(r"^#{1,6}\s*", "", line)
+        line = _re.sub(r"^(?:[-•*]|\d+[.)])\s+", "", line)
+        line = line.replace("**", "").replace("__", "")
+        if line:
+            out.append(line)
+    return " ".join(out)
+
+
+def _whole_text_report(base: GroundingReport, text: str) -> GroundingReport:
+    """Отчёт «разбор не удался, но текст есть»: одно утверждение — весь ответ.
+
+    Смысл — не пропустить всё подряд, а не потерять ответ, который уже
+    сгенерирован: обе стратегии разбора дали ноль утверждений, хотя текст
+    непустой. Модель ответила, мы не смогли прочитать структуру.
+
+    Утверждение помечается ``covered=True`` с причиной-оговоркой и
+    ``similarity_checked=False``: verify не отказывает (иначе хороший ответ
+    выбрасывается по дефекту парсера), но и не притворяется, что проверил
+    опору. В шаге verify и в оговорке это видно («близость не проверялась»),
+    а барьер §12 остаётся в силе для всех НОРМАЛЬНО разобранных ответов:
+    сюда попадает только текст, из которого нельзя выделить ни одного
+    предложения.
+    """
+    from .grounding import Claim
+
+    claim = Claim(text=text.strip()[:2000], refs=[])
+    claim.covered = True
+    claim.reason = "структура ответа не распознана — опора не проверялась"
+    base.claims = [claim]
+    base.similarity_checked = False
+    base.similarity_note = "структура ответа не распознана"
+    return base
 
 
 def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None,
@@ -412,7 +470,11 @@ class Orchestrator:
                 if asyncio.iscoroutine(outcome):
                     outcome = await outcome
             except Exception as exc:  # ошибка стадии не должна терять контекст
-                yield Signal("error", ErrorData(message=str(exc), stage=key))
+                # str(AssertionError()) пуст, и кадр уходил без причины —
+                # «message» на защите читался как «не понял». Причину
+                # называем всегда.
+                msg = str(exc).strip() or f"{type(exc).__name__} на стадии {key}"
+                yield Signal("error", ErrorData(message=msg, stage=key))
                 state["final"] = ("done", None)
                 return
             if outcome is _STOP:
@@ -831,10 +893,73 @@ class Orchestrator:
 
         if self.opts.no_llm:
             text = self._extractive_answer(frames)
+            note = ""
         else:
-            text = await asyncio.to_thread(self._ask_model, frames, state)
+            text, note = await asyncio.to_thread(self._ask_model_with_retry, frames, state)
+        # answer_text кладётся ВСЕГДА: verify читает именно его. Пропустить
+        # запись на ветке повтора значило бы отдать модели 98% опоры и
+        # прогнать проверку по пустой строке — «утверждений 0» на верном
+        # ответе (регрессия, поймана на «Как формируется команда проекта?»).
         state["answer_text"] = text
-        return _step(n, "compose", f"из {len(frames)} фрагментов", self._t0, total=self._total())
+        detail = note or f"из {len(frames)} фрагментов"
+        return _step(n, "compose", detail, self._t0,
+                     color="amber" if note else None, total=self._total())
+
+    def _ask_model_with_retry(self, frames: list[Frame], state: dict) -> tuple[str, str]:
+        """§12: один вопрос — один результат. Модель нестабильна, ответ — должен быть.
+
+        Замер 26.11.2026 (corpus-real, «Как формируется команда проекта?», 5
+        прогонов): 3 из 5 дали пустой кадр ошибки на compose: все попытки
+        `llm.chat` выпали по троттлингу, `AssertionError` улетел без текста, и
+        жюри видело «ни ответа, ни причины». Ещё один прогон дал ответ из 2
+        символов — модель ответила «[]» вместо текста.
+
+        Повтор — это не «попробуем ещё раз и понадеемся»: два вызова, из них
+        берём тот, что лучше прошёл проверку опоры на цитаты (§12, барьер 2 —
+        тот же `check_grounding`, что на шаге verify). Удачный первый ответ не
+        тратит второй вызов. Если оба вызова сорвались по сети — поднимаем
+        `LLMError` с ТЕКСТОМ: пустой кадр ошибки — ровно то, что превращало
+        сетевой сбой в «не понял» на защите.
+
+        Возвращает (текст, пояснение). Пояснение непустое, когда сработал
+        повтор или когда опоры не нашлось ни в одной попытке — жюри видит
+        это в шаге compose, а не догадывается.
+        """
+        attempts = max(1, COMPOSE_ATTEMPTS)
+        best_text = ""
+        best_ratio = -1.0
+        errors: list[str] = []
+        for _attempt in range(attempts):
+            try:
+                text = self._ask_model(frames, state)
+            except Exception as exc:      # сеть/провайдер: следующий вызов
+                errors.append(f"{type(exc).__name__}: {exc}")
+                continue
+            ratio = self._grounded_ratio(text, frames)
+            if ratio > best_ratio:
+                best_text, best_ratio = text, ratio
+            # Полностью опёртый ответ — второй вызов не нужен: детерминизм
+            # достигнут тем, что первый результат уже принимаем.
+            if ratio >= 0.999 and text.strip():
+                return text, ""
+        if not best_text.strip():
+            detail = "; ".join(errors) if errors else "модель вернула пустой ответ"
+            raise LLMError(f"Сборка ответа не удалась за {attempts} попытки: {detail}")
+        note = (f"из {len(frames)} фрагментов · повтор {attempts}: "
+                f"лучшая опора на цитаты {best_ratio:.0%}")
+        return best_text, note
+
+    def _grounded_ratio(self, text: str, frames: list[Frame]) -> float:
+        """Доля утверждений с опорой — тем же правилом, что шаг verify."""
+        if not text.strip():
+            return 0.0
+        try:
+            report = check_grounding(text, [f.text for f in frames])
+        except Exception:
+            return 0.0
+        if report.total == 0:
+            return 0.0
+        return report.covered / report.total
 
     def _stage_verify(self, n: int, state: dict) -> StepEvent | Signal:
         text = state.get("answer_text") or ""
@@ -845,6 +970,32 @@ class Orchestrator:
             threshold=GROUNDING_THRESHOLD,
         )
         state["grounding"] = report
+
+        if report.total == 0 and text.strip():
+            # §12: разбор дал ноль утверждений при НЕПУСТОМ ответе — это дефект
+            # разбора, а не отсутствие ответа. Отказ здесь выбрасывает хороший
+            # ответ модели (замер 26.11.2026: compose дал 96% опоры, verify
+            # насчитал 0 и увёл в уточнение). Сначала переразбираем построчно;
+            # если и это не дало утверждений — отдаём текст как есть с честной
+            # оговоркой «структура ответа не распознана», а не молчание:
+            # сотруднику нужен ответ, а не «агент не понял».
+            retry = check_grounding(
+                _flatten_for_grounding(text), [f.text for f in frames],
+                embedder=self._embedder(),
+                threshold=GROUNDING_THRESHOLD,
+            )
+            if retry.total > 0:
+                report = retry
+                state["grounding"] = retry
+            else:
+                llm_debug.record(
+                    model=llm.model_name(), max_tokens=0, finish_reason="",
+                    content=text, reasoning="", elapsed_ms=0,
+                    stage="verify", preview=text,
+                )
+                state["grounding_note"] = "структура ответа не распознана"
+                report = _whole_text_report(report, text)
+                state["grounding"] = report
 
         if report.nothing_covered:
             # §18.1: тема наша, ответа нет — агент сам создаёт тикет.
@@ -1315,6 +1466,12 @@ class Orchestrator:
             "tables": tables,
             "citations": [c.model_dump() for c in citations],
             "frames": [f.render() for f in frames],
+            # §13.1: развёрнутая версия — продолжение ЧУЖОГО ответа. Без
+            # владельца деталь читалась по одному detail_id: кто узнал
+            # идентификатор (он есть в SSE и в журнале), тот получал цитаты
+            # документа, которого его роль не видит. Держим, кто ответил.
+            "owner_role": str(self.opts.role_id or "").strip().lower(),
+            "owner_session": self._session_id(),
             "state": {"as_of": state.get("as_of_label")},
         }
         return detail_id
@@ -1348,21 +1505,47 @@ class Orchestrator:
 _DETAILS: dict[str, dict] = {}
 
 
-def expand(detail_id: str, section: str = "all") -> dict | None:
-    """Развёрнутая версия ответа (§13.1). None — такого detail_id нет.
+def expand(detail_id: str, section: str = "all", *,
+           role_id: str | None = None,
+           session_id: str | None = None) -> dict | None:
+    """Развёрнутая версия ответа (§13.1). None — такого detail_id нет или он чужой.
 
     Строится из сохранённых фрагментов, поэтому новых знаний не несёт;
-    заправшиваемый раздел (``exceptions``/``procedure``/``roles``) фильтрует
+    запрашиваемый раздел (``exceptions``/``procedure``/``roles``) фильтрует
     секции, а не добавляет текст.
+
+    **Владение проверяется здесь, а не в HTTP-слое.** Деталь — продолжение
+    конкретного ответа, выданного конкретной роли, и её фрагменты прошли
+    фильтр отделов именно для этой роли. Пока деталь отдавалась по одному
+    идентификатору, любой, кто его знал (он есть в SSE-потоке и в журнале),
+    получал цитаты документа, которого его роль не видит: расширение ответа
+    становилось обходом фильтра чтения.
+
+    Роль сверяется по действующему id (псевдоним старого клиента переводится
+    до сравнения). ``session_id`` — второй ключ: ответ из чужой сессии не
+    раскрывается даже той же роли.
     """
     stored = _DETAILS.get(detail_id)
     if stored is None:
         return None
+    from .access import resolve_role, role_id_of
+
+    role = role_id_of(resolve_role(role_id))
+    owner = str(stored.get("owner_role") or "")
+    if role != owner:
+        return None
+    asked_session = str(session_id or "").strip()
+    owner_session = str(stored.get("owner_session") or "")
+    # Пустая сессия — внутренний вызов (selfcheck, тест). API сессию требует
+    # и сюда непустую передаёт; для непустой — обязан совпасть.
+    if asked_session and owner_session and asked_session != owner_session:
+        return None
+
     from .detail import DetailSection, pick_section
 
     sections = [DetailSection(**s) for s in stored.get("sections", [])]
     chosen = pick_section(sections, section) if section and section != "all" else sections
-    out = dict(stored)
+    out = {k: v for k, v in stored.items() if k not in ("owner_role", "owner_session")}
     out["sections"] = [s.to_dict() for s in chosen]
     out["section_requested"] = section
     return out

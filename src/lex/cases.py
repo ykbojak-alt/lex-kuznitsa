@@ -178,14 +178,19 @@ class CaseStore:
         * кейсы с ``public=True`` — всем: автор явно сказал, что практика
           общая (например, ответ про порядок, не привязанный к отделу);
         * остальное — только автору.
+
+        Сравнение идёт по ДЕЙСТВУЮЩЕМУ id роли (v1.16: ``lawyer``/``it`` —
+        псевдонимы ``technical``). Без нормализации старая запись
+        ``author_role="lawyer"`` и старый клиент с ``role_id=lawyer`` давали
+        пустую выдачу — кейс есть, но не виден ни автору, ни его отделу.
         """
-        role = (role_id or "").strip().lower()
+        role = _canonical_role(role_id)
         if not role or role in WRITE_ROLES:
             return list(self._cases)
         return [
             c for c in self._cases
             if c.public
-            or c.author_role == role
+            or _canonical_role(c.author_role) == role
             or c.author_role == ""
             or c.author_role in WRITE_ROLES
         ]
@@ -496,6 +501,24 @@ class CaseStore:
             fh.flush()
             os.fsync(fh.fileno())
         tmp.replace(self.path)
+
+
+def _canonical_role(role_id: str | None) -> str:
+    """Действующий id роли (v1.16): ``lawyer``/``it`` -> ``technical``.
+
+    Кейсы писались под старыми id, а фильтр читает под новыми. Сравнение по
+    сырой строке разрывало связь «автор видит свой кейс» — без нормализации
+    кейс остаётся в базе, но невидим и автору, и отделу.
+    """
+    rid = (role_id or "").strip().lower()
+    if not rid:
+        return ""
+    try:
+        from .access import ROLE_ALIASES
+
+        return ROLE_ALIASES.get(rid, rid)
+    except Exception:
+        return rid
 
 
 def _tokenize(text: str) -> list[str]:

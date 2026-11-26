@@ -88,6 +88,10 @@ class CaseRequest(BaseModel):
 class ExpandRequest(BaseModel):
     detail_id: str = ""
     section: str = "all"
+    # §13.1: развёрнутая версия — продолжение ответа конкретной роли и сессии.
+    # Раньше здесь была только detail_id, и кто её знал — читал чужой ответ.
+    role_id: str = ""
+    session_id: str = ""
 
 
 class FillRequest(BaseModel):
@@ -221,15 +225,18 @@ def get_business_lines() -> list[dict]:
 async def ask(req: AskRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="question обязателен")
-    if req.role_id not in core.role_ids():
+    if not core.is_known_role(req.role_id):
         # Явная ошибка с перечнем: молчаливое «неизвестная роль» выглядит
         # поломкой стенда, особенно когда роли переименовали (v1.16:
         # lawyer/quality/it -> technical/ib/dbrct). Человек должен сразу
         # видеть, какие значения принимаются.
+        # Принимаются и старые псевдонимы (lawyer, it -> technical), но в
+        # перечне их нет: это совместимость для старых клиентов, а не роль
+        # для UI — иначе список покажет мёртвые пункты.
         raise HTTPException(
             status_code=400,
             detail=(f"неизвестная роль: {req.role_id}. "
-                    f"Доступные роли: {', '.join(core.role_ids())}"),
+                    f"Доступные роли: {', '.join(sorted(core.role_ids()))}"),
         )
     if req.as_of:
         try:
@@ -482,13 +489,23 @@ def post_ingest() -> dict:
 def post_expand(req: ExpandRequest) -> dict:
     if not req.detail_id.strip():
         raise HTTPException(status_code=400, detail="detail_id обязателен")
-    data = core.expand(req.detail_id, req.section)
+    # §13.1: без роли развёрнутая версия — обход фильтра чтения. Требуем её
+    # тем же 400 с перечнем, что и /api/ask: человек видит, что передать.
+    if not core.is_known_role(req.role_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"неизвестная роль: {req.role_id}. "
+                    f"Доступные роли: {', '.join(sorted(core.role_ids()))}"),
+        )
+    data = core.expand(req.detail_id, req.section,
+                       role_id=req.role_id, session_id=req.session_id)
     if data is None:
         raise HTTPException(
             status_code=404,
             detail=f"detail_id не найден: {req.detail_id} "
                    "(развёрнутая версия живёт в памяти ядра того процесса, "
-                   "который ответил; после перезапуска её нет)")
+                   "который ответил; после перезапуска её нет — или она "
+                   "принадлежит другому ответу)")
     out = {k: data.get(k) for k in ("short", "detailed", "sections", "tables", "citations")}
     if data.get("section_requested"):
         out["section_requested"] = data["section_requested"]
@@ -507,9 +524,24 @@ def post_case(req: CaseRequest) -> dict:
 
 @app.get("/api/cases")
 def get_cases(limit: int = Query(50, ge=1, le=1000),
-              role_id: str | None = None,
+              role_id: str = "",
               tag: str | None = None,
-              rule_key: str | None = None) -> list[dict]:
+              rule_key: str | None = None) -> dict:
+    """§8: кейсы, которые роль вправе видеть. Без роли — 400, а не «все».
+
+    Параметр раньше был необязательным, и `GET /api/cases` без него отдавал
+    весь журнал: 25 кейсов всем ролям против 9 при `?role_id=technical`.
+    Это не «удобный дефолт», а дверь мимо `CaseStore.visible` — ровно то,
+    чем §23 запретил считать разграничение чтения. Пустая роль здесь значит
+    «не сказали, кто спрашивает», и ответ на это — 400 с перечнем ролей,
+    тем же, что у /api/ask.
+    """
+    if not core.is_known_role(role_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"неизвестная роль: {role_id}. "
+                    f"Доступные роли: {', '.join(sorted(core.role_ids()))}"),
+        )
     return cases_mod.list_cases(limit=limit, role_id=role_id, tag=tag, rule_key=rule_key)
 
 

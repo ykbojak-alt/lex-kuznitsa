@@ -35,8 +35,10 @@
     ticketDetailCache: {},
     ticketDraftCache: {},
     caseCache: null,
+    caseMeta: null,
     stats: null,
     juryStats: null,
+    health: null,
     similar: [],
     paused: false
   };
@@ -62,6 +64,13 @@
   }
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  /* Число с разделителем разрядов: 4821 -> «4 821». Токены читают глазами,
+     и «4821» без пробела путается с четырёхзначным кодом. */
+  function fmtNum(n) {
+    var v = Math.round(Number(n) || 0);
+    return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  }
 
   function fmtDate(iso) {
     if (!iso) return '';
@@ -141,6 +150,21 @@
   /* §23.1: чтение — всем, запись — только эти две роли. */
   function canWrite() {
     return state.roleId === 'quality' || state.roleId === 'director';
+  }
+
+  /* §23: «доступно N из M» — те же числа, что у шага permissions. */
+  function caseCountLabel(meta) {
+    if (!meta || meta.total === undefined) return '';
+    if (!meta.dropped) return 'Кейсы: доступны все ' + meta.total;
+    var reason = '';
+    for (var k in meta.by_reason) {
+      if (Object.prototype.hasOwnProperty.call(meta.by_reason, k)) {
+        reason = k + ': ' + meta.by_reason[k];
+        break;
+      }
+    }
+    return 'Кейсы: доступно ' + meta.available + ' из ' + meta.total
+      + (reason ? ' · ' + reason : '');
   }
 
   /* ------------------------------------------------------------------ консоль */
@@ -309,6 +333,9 @@
   function makeRolePicker(id) {
     return function () {
       state.roleId = id;
+      // §23: кейсы отбираются по роли — кеш прошлой роли показывал бы чужие.
+      state.caseCache = null;
+      state.caseMeta = null;
       renderTabs();
       updateHint();
       renderRolesScreen();
@@ -452,18 +479,33 @@
       'Кейсы пополняются ролями руководителей. В поиске они участвуют наравне с документами, но при конфликте регламент сильнее.'));
     if (!canWrite()) {
       host.appendChild(el('p', 'permnote',
-        'Чтение кейсов доступно всем · добавление — службе качества и руководству (§23). '
+        'Кейсы отбираются по роли: свои отделы и общая практика. '
+        + 'Добавление — службе качества и руководству (§23). '
         + 'Кнопка неактивна намеренно: видно, что функция есть, но не для этой роли.'));
     }
     var cases = state.mock ? global.MockLex.cases() : (state.caseCache || []);
+    if (state.mock) {
+      host.appendChild(el('p', 'permnote', 'Кейсы: ' + cases.length + ' (мок-режим, без фильтра ролей)'));
+    } else if (state.caseMeta) {
+      host.appendChild(el('p', 'permnote', caseCountLabel(state.caseMeta)));
+    }
     if (!state.mock && state.caseCache === null) {
-      fetch('api/cases').then(function (r) { return r.json(); }).then(function (j) {
-        state.caseCache = Array.isArray(j) ? j : (j.cases || []);
-        renderCasesScreen();
-      }).catch(function () {
-        state.caseCache = [];
-        renderCasesScreen();
-      });
+      // §23: роль обязательна. Без неё сервер отвечает 400 — и правильно:
+      // «покажи все» больше не дефолт. Пока роль не выбрана, кейсы не грузим.
+      if (!state.roleId) {
+        host.appendChild(el('p', 'permnote', 'Выберите роль — от неё зависит, какие кейсы агент вправе показать.'));
+        return;
+      }
+      fetch('api/cases?role_id=' + encodeURIComponent(state.roleId))
+        .then(function (r) { return r.json(); }).then(function (j) {
+          state.caseCache = Array.isArray(j) ? j : (j.cases || []);
+          state.caseMeta = (j && j.total !== undefined) ? j : null;
+          renderCasesScreen();
+        }).catch(function () {
+          state.caseCache = [];
+          state.caseMeta = null;
+          renderCasesScreen();
+        });
       return;
     }
     if (!cases.length) return;
@@ -931,10 +973,45 @@
     return card;
   }
 
+  /* «Здоровье системы» — что работает прямо сейчас, из GET /api/health. */
+  function renderHealthBlock(host, h) {
+    host.appendChild(el('h3', 'detail-h', 'Здоровье системы'));
+    var llm = h.llm || {}, emb = h.embed || {}, rr = h.rerank || {}, corp = h.corpus || {};
+    var indexed = corp.indexed_at || corp.rebuilt_at || corp.last_indexed || corp.index_built_at;
+    var rows = [
+      ['Слот модели', llm.slot || '—'],
+      ['LLM', llm.reachable ? 'доступен' : 'недоступен'],
+      ['Embed', (emb.model || '—') + ' · ' + (emb.reachable ? 'доступен' : 'недоступен')],
+      ['Rerank', (rr.model || '—') + ' · ' + (rr.reachable ? 'доступен' : 'недоступен')],
+      ['Корпус', (corp.documents != null ? corp.documents : '—') + ' документов / '
+        + (corp.chunks != null ? corp.chunks : '—') + ' чанков'],
+      ['Индекс пересчитан', indexed || '— (пока не измерялось)']
+    ];
+    var t = el('table', 'wikitable');
+    for (var i = 0; i < rows.length; i++) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, rows[i][0]));
+      tr.appendChild(el('td', null, rows[i][1]));
+      t.appendChild(tr);
+    }
+    host.appendChild(t);
+  }
+
   /* Экран для жюри: три критерия + таймлайн — всё из GET /api/stats (реальные журналы). */
   function renderJuryStats(host, s) {
     if (!s || s.empty) {
       host.appendChild(el('p', 'section-sub', s && s.hint ? s.hint : 'Журнал пуст — данных для аналитики нет.'));
+      return;
+    }
+    /* ноль и «не измерялось» — разные состояния */
+    function na(v) { return v === null || v === undefined ? '— (пока не измерялось)' : String(v); }
+    if (s.fallback) {
+      var a = s.analytics || {};
+      var ar = a.caveats && a.caveats.answer_rate;
+      host.appendChild(el('p', 'section-sub',
+        'Удалённый стенд: /api/stats недоступен — критерии 1–3 пока не измерялись. Реальные данные /api/analytics: '
+        + 'всего ' + (a.total != null ? a.total : '—') + ' · отказов ' + (a.refusals != null ? a.refusals : '—')
+        + (ar ? ' · ответы ' + ar.plain + '/' + ar.caveated + '/' + ar.refused : '')));
       return;
     }
     var c1 = s.criterion1 || {}, c2 = s.criterion2 || {}, c3 = s.criterion3 || {};
@@ -956,7 +1033,7 @@
 
     var rg = c1.relevance_gate || {};
     host.appendChild(el('p', 'section-sub',
-      'Гейт релевантности остановил ответ: ' + (rg.stops || 0) + ' раз из ' + (rg.retrieve_steps || 0)
+      'Гейт релевантности остановил ответ: ' + na(rg.stops) + ' раз из ' + (rg.retrieve_steps || 0)
       + ' шагов retrieve (порог покрытия темы < ' + rg.subject_coverage_min + ' или косинус < ' + rg.top_cosine_min + ').'));
     var reasons = c1.top_escalation_reasons || [];
     if (reasons.length) {
@@ -986,8 +1063,8 @@
     host.appendChild(el('h3', 'detail-h', 'Критерий 3 · кейсы из заявок службы качества'));
     host.appendChild(el('p', 'section-sub',
       'Кейсов из заявок: ' + (c3.cases_from_tickets || 0)
-      + ' · среднее время заявка→кейс: ' + (c3.avg_hours_ticket_to_case || 0) + ' ч'
-      + ' · вопросов отвечено из кейсов: ' + (c3.answered_from_cases || 0)));
+      + ' · среднее время заявка→кейс: ' + na(c3.avg_ticket_to_case_hours) + ' ч'
+      + ' · вопросов отвечено из кейсов: ' + na(c3.answered_from_cases)));
 
     var days = s.timeline || [];
     host.appendChild(el('h3', 'detail-h', 'Ответы по дням'));
@@ -1030,12 +1107,28 @@
     host.appendChild(el('p', 'section-sub',
       'Считается по журналу запросов (контракт §2, /api/analytics). В мок-режиме данные демонстрационные.'));
     if (!state.mock && !state.juryStats) {
-      fetch('api/stats').then(function (r) { return r.json(); }).then(function (j) {
+      fetch('api/stats').then(function (r) {
+        if (!r.ok) throw new Error('stats ' + r.status);
+        return r.json();
+      }).then(function (j) {
         state.juryStats = j;
         renderStatsScreen();
-      }).catch(function () { /* без данных — честное пустое состояние */ });
+      }).catch(function () {
+        /* старый стенд без /api/stats: честно показываем, что есть в /api/analytics */
+        fetch('api/analytics').then(function (r) { return r.json(); }).then(function (a) {
+          state.juryStats = { empty: false, fallback: true, analytics: a };
+          renderStatsScreen();
+        }).catch(function () {});
+      });
+    }
+    if (!state.mock && !state.health) {
+      fetch('api/health').then(function (r) { return r.json(); }).then(function (h) {
+        state.health = h;
+        renderStatsScreen();
+      }).catch(function () {});
     }
     if (!state.mock && state.juryStats) renderJuryStats(host, state.juryStats);
+    if (!state.mock && state.health) renderHealthBlock(host, state.health);
     var table = el('table', 'wikitable');
     var head = el('tr');
     ['Показатель', 'Значение'].forEach(function (h) { head.appendChild(el('th', null, h)); });
@@ -1372,19 +1465,45 @@
     scrollFeed();
   }
 
-  /* §13.1: развёрнутый ответ — разделы, таблицы, цитаты — прямо в ленте. */
+  /* §13.1: развёрнутый ответ — разделы, таблицы, цитаты — прямо в ленте.
+     Деталь принадлежит роли и сессии, которые получили ответ: сервер
+     отказывает чужому запросу, поэтому роль и сессию передаём явно. */
   function loadDetails(hostD, data, turnId) {
-    var detail = null;
-    if (state.mock) detail = global.MockLex.expand(data.detail_id);
-    if (!detail) {
-      // без /api/expand показываем полный текст, если он есть
-      if (data.text && data.text !== data.short) {
-        var lede = el('p');
-        fillWithNotes(lede, data.text, turnId);
-        hostD.appendChild(lede);
-      }
-      return;
+    if (state.mock) { renderDetail(hostD, global.MockLex.expand(data.detail_id), data, turnId); return; }
+    if (!data.detail_id || !state.roleId) { renderDetailFallback(hostD, data, turnId); return; }
+    hostD.appendChild(el('p', 'detail-note', 'Загружаем развёрнутую версию…'));
+    fetch('api/expand', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        detail_id: data.detail_id,
+        section: 'all',
+        role_id: state.roleId,
+        session_id: state.sessionId || ''
+      })
+    }).then(function (r) {
+      if (!r.ok) throw new Error('expand ' + r.status);
+      return r.json();
+    }).then(function (detail) {
+      hostD.textContent = '';
+      renderDetail(hostD, detail, data, turnId);
+    }).catch(function () {
+      hostD.textContent = '';
+      renderDetailFallback(hostD, data, turnId);
+    });
+  }
+
+  function renderDetailFallback(hostD, data, turnId) {
+    // без /api/expand показываем полный текст, если он есть
+    if (data.text && data.text !== data.short) {
+      var lede = el('p');
+      fillWithNotes(lede, data.text, turnId);
+      hostD.appendChild(lede);
     }
+  }
+
+  function renderDetail(hostD, detail, data, turnId) {
+    if (!detail) { renderDetailFallback(hostD, data, turnId); return; }
 
     if (detail.detailed) {
       var d = el('p');
@@ -2174,7 +2293,17 @@
     }
 
     if (ev.type === 'done') {
-      consoleView.push({ kind: 'done', key: 'done', title: 'Готово', detail: 'путь: ' + (d.inference_path || '—') + ' · журнал: ' + (d.journal_id || '—'), ms: d.elapsed_ms });
+      /* Токены вх/вых — из usage провайдера, за весь запрос (все попытки LLM).
+         Нет данных (мок, локальный путь) — строку не рисуем вовсе, чтобы не
+         показывать «0» там, где счётчик просто не снимался. */
+      var tok = d.tokens;
+      var tokenText = '';
+      if (tok && (tok.total || tok.prompt || tok.completion)) {
+        tokenText = ' · токены ' + fmtNum(tok.prompt || 0) + ' вх + '
+          + fmtNum(tok.completion || 0) + ' вых = ' + fmtNum(tok.total || 0);
+        if (tok.calls > 1) tokenText += ' (' + tok.calls + ' выз.)';
+      }
+      consoleView.push({ kind: 'done', key: 'done', title: 'Готово', detail: 'путь: ' + (d.inference_path || '—') + ' · журнал: ' + (d.journal_id || '—') + tokenText, ms: d.elapsed_ms });
       /* После отказа «готово» вводит в заблуждение: отвечать было нечем. */
       if (ctx.outcome === 'error') {
         consoleView.setStatus('запрос прерван: сбой на стороне агента', 'bad');

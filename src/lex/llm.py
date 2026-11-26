@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,22 +27,22 @@ import urllib.request
 from . import llm_debug
 
 MIN_MAX_TOKENS = 1024
-# Базовый лимит ответа. 1024 — нижняя граница, при которой слот вообще
-# способен ответить; но на длинном контексте этого не хватает (замер: 25%
-# пустых), поэтому по умолчанию 4096. Порог в конфиге: на другом слоте
-# цифра будет иной.
-DEFAULT_MAX_TOKENS = int(os.environ.get("LEX_LLM_BASE_TOKENS", "4096"))
-DEFAULT_TIMEOUT = 180.0
+# Базовый лимит ответа. Замер 26.11.2026 на claude-sonnet-4-7: рассуждение
+# занимало 31 010 символов и съедало весь потолок 8192 — finish_reason=length,
+# content пуст, ответа нет. Поэтому база 16384: рассуждение + ответ должны
+# уместиться оба, иначе слот стабильно возвращает пустоту на «сложных»
+# вопросах (а на простых проходит — отсюда была нестабильность 2/3).
+DEFAULT_MAX_TOKENS = int(os.environ.get("LEX_LLM_BASE_TOKENS", "16384"))
+DEFAULT_TIMEOUT = 240.0
 
-# «Пустой content» в живом прогоне — не редкость, а закономерность слота:
-# модель пишет блок рассуждения, и при малом лимите ответ не начинается.
-# Два повтора с крупным шагом лимита снимают почти все случаи; третий —
-# уже ожидание вместо ответа, поэтому нет.
-EMPTY_RETRIES = int(os.environ.get("LEX_LLM_EMPTY_RETRIES", "2"))
-# Бюджеты попыток: 1024 -> 4096 -> 8192. Рост вчетверо, а не вдвое: на
-# диагностике видно, что reasoning занимает тысячи токенов, и шаг «1024 →
-# 2048 → 4096» всё равно упирается в тот же потолок.
-EMPTY_MAX_TOKENS = int(os.environ.get("LEX_LLM_MAX_TOKENS", "8192"))
+# «Пустой content» — закономерность слота: модель пишет блок рассуждения, и
+# при малом лимите ответ не начинается. Повтор с ЕЩЁ большим потолком имеет
+# смысл только если первая попытка упёрлась в length; при 16384 чаще всего
+# уже хватает, поэтому один повтор.
+EMPTY_RETRIES = int(os.environ.get("LEX_LLM_EMPTY_RETRIES", "1"))
+# Бюджеты попыток растут от базы. Потолок 32768 — верхняя граница, которую
+# слот отдаёт без ошибки; выше начинается уже отказ провайдера.
+EMPTY_MAX_TOKENS = int(os.environ.get("LEX_LLM_MAX_TOKENS", "32768"))
 
 # Троттлинг апстрима (OpenRouter 429 внутри NexusLink-502) — вторая причина
 # провалов, и она НЕ лечится размером лимита. Диагностика 26.11.2026: при
@@ -54,7 +55,7 @@ RATE_BASE_PAUSE = float(os.environ.get("LEX_LLM_RATE_PAUSE", "3.0"))
 _RATE_MARKERS = ("429", "ratelimit", "rate limit", "too many requests",
                  "candidates exhausted", "quota")
 RETRY_BUDGETS = tuple(
-    int(x) for x in (os.environ.get("LEX_LLM_RETRY_BUDGETS") or "4096,8192").split(",")
+    int(x) for x in (os.environ.get("LEX_LLM_RETRY_BUDGETS") or "16384,32768").split(",")
     if x.strip()
 )
 
@@ -117,7 +118,7 @@ def base_url() -> str:
 
 
 def model_name() -> str:
-    return os.environ.get("NEXUS_LINK_MODEL") or "claude-sonnet-5"
+    return os.environ.get("NEXUS_LINK_MODEL") or "claude-sonnet-4-7"
 
 
 def api_key() -> str:
@@ -161,6 +162,12 @@ def chat(
             budgets.append(b)
 
     last: tuple[dict, dict] | None = None
+    # Почему не дошли до ответа — для честного сообщения, если он так и не
+    # получился. Раньше здесь стоял `assert last is not None`: когда все
+    # попытки выпали по троттлингу, `last` оставался пустым, AssertionError
+    # летел без текста, и SSE-кадр уходил с `message: ""` — жюри видело
+    # «пустой ответ» вместо причины.
+    last_error: LLMError | None = None
     for attempt, budget in enumerate(budgets):
         t0 = time.monotonic()
         try:
@@ -176,11 +183,13 @@ def chat(
                 raise
             # Троттлинг или разрыв связи с апстримом: пауза растёт линейно
             # (3 с, 6 с, 9 с). Бюджет не меняем — он тут ни при чём.
+            last_error = exc
             if _throttle_wait(attempt + 1):
                 continue
             raise
         content = _content_of(payload, body)
         reasoning = _reasoning_of(payload)
+        _tokens_add(payload)
         llm_debug.record(
             model=model_name(), max_tokens=budget,
             finish_reason=_finish_reason(payload), content=content,
@@ -192,7 +201,11 @@ def chat(
             return content
         last = (payload, body)
 
-    assert last is not None
+    if last is None:
+        raise LLMError(
+            "NexusLink не отдал ответ ни на одной попытке: "
+            f"{last_error or 'апстрим недоступен'} (попыток {len(budgets)})"
+        )
     _raise_empty(*last)
 
 
@@ -278,6 +291,51 @@ def _reasoning_of(payload: dict) -> str:
 
 def _finish_reason(payload: dict) -> str:
     return str(_first_choice(payload).get("finish_reason") or "")
+
+
+# --- счётчик токенов ---------------------------------------------------------
+# Расход считается по ответам провайдера (`usage`), а не по локальной оценке:
+# у нас нет токенизатора слота, а `usage` приходит в каждом ответе. Копим за
+# весь запрос (все попытки и все вызовы LLM на шагах), потому что человеку
+# нужно «сколько стоил этот вопрос», а не «сколько стоил один HTTP-вызов».
+#
+# Счётчик НЕ thread-local: генератор SSE и вызов LLM могут исполняться в
+# разных потоках (anyio-пул в uvicorn), и тогда reset в одном потоке не виден
+# в другом — счётчик молча оставался нулевым. Состояние защищено замком, а
+# обнуление вызывается в начале запроса.
+_TOKEN_LOCK = threading.Lock()
+_TOKENS: dict[str, int] = {"prompt": 0, "completion": 0, "calls": 0}
+
+
+def _tokens_reset() -> None:
+    with _TOKEN_LOCK:
+        _TOKENS["prompt"] = 0
+        _TOKENS["completion"] = 0
+        _TOKENS["calls"] = 0
+
+
+def _tokens_add(payload: dict) -> None:
+    usage = payload.get("usage") or {}
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    with _TOKEN_LOCK:
+        _TOKENS["prompt"] += prompt
+        _TOKENS["completion"] += completion
+        _TOKENS["calls"] += 1
+
+
+def tokens_total() -> dict:
+    """Накопленный расход текущего вопроса: ``{prompt, completion, total, calls}``."""
+    with _TOKEN_LOCK:
+        prompt = int(_TOKENS["prompt"])
+        completion = int(_TOKENS["completion"])
+        calls = int(_TOKENS["calls"])
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "total": prompt + completion,
+        "calls": calls,
+    }
 
 
 def _raise_empty(payload: dict, body: dict) -> None:

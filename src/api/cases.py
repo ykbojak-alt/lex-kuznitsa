@@ -32,7 +32,7 @@ def add(payload: dict) -> dict:
 
 
 def list_cases(limit: int = 50, role_id: str | None = None,
-               tag: str | None = None, rule_key: str | None = None) -> list[dict]:
+               tag: str | None = None, rule_key: str | None = None) -> dict:
     return core.list_cases(limit=limit, role_id=role_id, tag=tag, rule_key=rule_key)
 
 

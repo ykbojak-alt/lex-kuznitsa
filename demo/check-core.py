@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os as _os
 import sys
 import tempfile
 from datetime import date
@@ -381,12 +382,12 @@ def check_case_visibility() -> None:
         return store.add(question=question, answer_in_practice="ответ",
                          author_role=role, outcome="resolved").id
 
-    own = add("lawyer", "Срок согласования заявки на закупку?")
-    other = add("it", "Порядок выдачи ноутбука новому сотруднику?")
+    own = add("technical", "Срок согласования заявки на закупку?")
+    other = add("ib", "Порядок выдачи ноутбука новому сотруднику?")
     quality = add("quality", "Размер командировочной надбавки?")
     nobody = add("", "Импорт практики без автора")
 
-    seen = {c.id for c in store.visible("lawyer")}
+    seen = {c.id for c in store.visible("technical")}
     check("критерий 1: кейс чужой роли не виден", other not in seen, sorted(seen))
     check("критерий 1: свой кейс виден", own in seen, sorted(seen))
     # Ответ службы качества — на вопрос сотрудника: без него дообучение
@@ -399,10 +400,19 @@ def check_case_visibility() -> None:
           {c.id for c in store.visible("quality")} == {own, other, quality, nobody},
           sorted(c.id for c in store.visible("quality")))
 
-    # Та же роль, но из ИТ: юркейс ей не виден — фильтр симметричен.
-    seen_it = {c.id for c in store.visible("it")}
+    # Другой отдел: кейс technical ему не виден — фильтр симметричен.
+    seen_ib = {c.id for c in store.visible("ib")}
     check("критерий 1: фильтр симметричен по ролям",
-          own not in seen_it and other in seen_it, sorted(seen_it))
+          own not in seen_ib and other in seen_ib, sorted(seen_ib))
+
+    # v1.16: lawyer — псевдоним technical, автор кейса остаётся виден под
+    # старым id, хотя читается он новым. Без нормализации кейс «lawyer»
+    # проваливался бы в обе стороны.
+    legacy = add("lawyer", "Устаревший id автора кейса")
+    check("критерий 1: псевдоним lawyer видит свой старый кейс",
+          legacy in {c.id for c in store.visible("lawyer")}
+          and legacy in {c.id for c in store.visible("technical")},
+          sorted(c.id for c in store.visible("lawyer")))
 
     # Через HTTP-слой: /api/cases?role_id= отдаёт ту же выдачу, что поиск.
     from api import config as api_config
@@ -410,9 +420,13 @@ def check_case_visibility() -> None:
     old = api_config.CASES_PATH
     api_config.CASES_PATH = tmp / "cases.jsonl"
     try:
-        ids = {c["id"] for c in api_core.list_cases(role_id="lawyer")}
+        ids = {c["id"] for c in api_core.list_cases(role_id="technical")["cases"]}
         check("критерий 1: /api/cases?role_id фильтрует так же",
               other not in ids and own in ids, sorted(ids))
+        # §23: без роли — отказ, а не весь журнал.
+        bare = api_core.list_cases(role_id=None)
+        check("критерий 1: /api/cases без роли не отдаёт кейсы",
+              bare["cases"] == [] and bare["dropped"] == bare["total"], str(bare["dropped"]))
     finally:
         api_config.CASES_PATH = old
 
@@ -880,6 +894,395 @@ def check_journal_metrics() -> None:
           "subject_coverage" not in other and "top_cosine" not in other, "")
 
 
+def check_role_aliases() -> None:
+    """Старые id ролей принимаются на входе, но не показываются в списке.
+
+    v1.16 переименовала роли в отделы корпуса (lawyer/it/quality ->
+    technical/ib/dbrct). Старые клиенты и docs ломались на 400 «неизвестная
+    роль». Псевдоним принимается, но в /api/roles его быть не должно: UI
+    показал бы мёртвый пункт без отдела и направления.
+
+    Проверка идёт через настоящее приложение (TestClient): важно не «функция
+    вернула True», а «HTTP-ручка реально пропустила запрос».
+    """
+    from fastapi.testclient import TestClient
+
+    from api import app as appmod
+    from api import core as api_core
+
+    ids = sorted(api_core.role_ids())
+    check("алиасы: в списке ролей ровно действующие id",
+          "lawyer" not in ids and "it" not in ids, ", ".join(ids))
+    check("алиасы: lawyer и it известны на входе",
+          api_core.is_known_role("lawyer") and api_core.is_known_role("it"), "")
+    check("алиасы: выдуманная роль не известна",
+          not api_core.is_known_role("nonsense") and not api_core.is_known_role(""),
+          "")
+
+    client = TestClient(appmod.app)
+    roles = client.get("/api/roles")
+    got_ids = [r.get("id") for r in roles.json()] if roles.status_code == 200 else []
+    check("алиасы: /api/roles отдаёт 5 ролей без псевдонимов",
+          roles.status_code == 200 and len(got_ids) == 5
+          and "lawyer" not in got_ids and "it" not in got_ids,
+          f"{roles.status_code}, {len(got_ids)} ролей")
+
+    # §3: псевдоним — это вход для старого клиента. Достаточно, что запрос
+    # принят (200) и поток открылся: дальше идёт обычный каскад.
+    for rid in ("lawyer", "it"):
+        r = client.post("/api/ask", json={
+            "question": "Какой срок согласования заявки на закупку?",
+            "role_id": rid, "as_of": "2026-03-01",
+        })
+        check(f"алиасы: запрос с role_id={rid} принимается",
+              r.status_code == 200 and "event: step" in r.text,
+              f"{r.status_code}")
+
+    bad = client.post("/api/ask", json={
+        "question": "Какой срок согласования заявки на закупку?",
+        "role_id": "nonsense", "as_of": "2026-03-01",
+    })
+    check("алиасы: выдуманная роль по-прежнему 400 с перечнем",
+          bad.status_code == 400 and "Доступные роли" in bad.text
+          and "lawyer" not in bad.text,
+          f"{bad.status_code}")
+
+
+def check_p0_leaks() -> None:
+    """LEX-P0-LEAK: кейсы и развёрнутый ответ не читаются без роли.
+
+    Две дыры, найденные ARCH на живом стенде:
+
+    1. `GET /api/cases` БЕЗ `role_id` отдавал все 25 кейсов, хотя с
+       `?role_id=technical` — 9. Параметр влиял на ДОСТУП, а не на выборку:
+       пустой значил «покажи всё», то есть дверь мимо `CaseStore.visible`.
+    2. `POST /api/expand` отдавал деталь ответа по одному `detail_id` — без
+       роли и сессии. Кто знал идентификатор (он есть в SSE и в журнале),
+       читал цитаты документа, которого его роль не видит.
+
+    Проверяем через настоящее приложение (TestClient): важно, что HTTP-ручка
+    отвечает, а не что функция «в теории» принимает аргумент.
+    """
+    from fastapi.testclient import TestClient
+
+    from api import app as appmod
+    from api import config as api_config
+    from api import core as api_core
+    from lex.orchestrator import _DETAILS
+
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+    old_corpus = api_config.CORPUS_DIR
+    old_cases = api_config.CASES_PATH
+    tmp = Path(tempfile.mkdtemp())
+    api_config.CORPUS_DIR = real
+    api_config.CASES_PATH = tmp / "cases.jsonl"
+
+    # Кейсы: 25 всего, по 9 у двух отделов, 7 чужих (ни один отдел не видит).
+    rows = [
+        ("technical", "Кто согласует ТКП в пресейле?"),
+        ("technical", "Как оформить акт выполненных работ?"),
+        ("ib", "Как согласовать доступ к КД-ПС-02?"),
+        ("ib", "Кто ведёт реестр инцидентов?"),
+        ("dbrct", "Как подготовить отчёт ДБРЦТ?"),
+        ("director", "Как утвердить бюджет проекта?"),
+        ("quality", "Что делать с противоречием редакций?"),
+    ]
+
+    def _mk(role: str, q: str) -> dict:
+        return {"question": q, "answer_in_practice": "По практике: " + q.lower(),
+                "outcome": "resolved", "author_role": role, "author_name": "—",
+                "content_type": "text", "tags": [], "linked_docs": []}
+
+    for role, q in rows * 4:                      # 28 записей
+        api_core.add_case(_mk(role, q))
+    # Чужие кейсы — у роли, которой в корпусе нет.
+    for _ in range(7):
+        api_core.add_case(_mk("outsider", "Чужая практика"))
+
+    client = TestClient(appmod.app)
+    try:
+        total = len(api_core.case_store().cases)
+        check("P0-LEAK: кейсов в журнале больше, чем видит роль",
+              total >= 20, f"всего {total}")
+
+        # --- дыра 1: /api/cases без role_id
+        leak = client.get("/api/cases")
+        check("P0-LEAK: /api/cases без role_id -> 400, не весь журнал",
+              leak.status_code == 400 and "Доступные роли" in leak.text,
+              f"{leak.status_code}: {leak.text[:120]}")
+
+        bad = client.get("/api/cases?role_id=nonsense")
+        check("P0-LEAK: /api/cases с выдуманной ролью -> 400",
+              bad.status_code == 400, f"{bad.status_code}")
+
+        tech = client.get("/api/cases?role_id=technical")
+        body = tech.json() if tech.status_code == 200 else {}
+        got = {c["author_role"] for c in body.get("cases", [])}
+        # Кейсы качества/руководства видны всем — это правило `visible()`,
+        # а не обход: служба качества ведёт базу, её ответы адресованы всем.
+        check("P0-LEAK: /api/cases?role_id=technical не отдаёт чужие отделы",
+              tech.status_code == 200
+              and got <= {"technical", "quality", "director"}
+              and "outsider" not in got and "ib" not in got and "dbrct" not in got,
+              f"{tech.status_code}, роли {sorted(got)}")
+        check("P0-LEAK: отбор отдаёт dropped/by_reason для UI",
+              body.get("dropped", 0) == total - body.get("available", 0)
+              and bool(body.get("by_reason")),
+              f"total={body.get('total')} available={body.get('available')} "
+              f"dropped={body.get('dropped')}")
+
+        boss = client.get("/api/cases?role_id=director")
+        bbody = boss.json() if boss.status_code == 200 else {}
+        check("P0-LEAK: director видит больше, чем technical",
+              len(bbody.get("cases", [])) > len(body.get("cases", [])),
+              f"director {len(bbody.get('cases', []))} vs technical {len(body.get('cases', []))}")
+
+        # --- дыра 2: /api/expand чужой ролью / чужой сессией
+        caller = TestClient(appmod.app)
+        answer = None
+        with caller.stream("POST", "/api/ask", json={
+            "question": "Кто согласует ТКП в пресейле?",
+            "role_id": "director", "session_id": "s-leak-boss",
+        }) as r:
+            for raw in r.iter_lines():
+                raw = raw.rstrip("\r")
+                if not raw.startswith("data: "):
+                    continue
+                try:
+                    ev = json.loads(raw[6:])
+                except Exception:
+                    continue
+                if "detail_id" in ev:
+                    answer = ev
+        check("P0-LEAK: ответ director несёт detail_id",
+              bool(answer and answer.get("detail_id")),
+              str((answer or {}).get("detail_id")))
+
+        did = (answer or {}).get("detail_id") or ""
+        no_role = client.post("/api/expand",
+                              json={"detail_id": did, "section": "all"})
+        check("P0-LEAK: /api/expand без role_id -> 400",
+              no_role.status_code == 400, f"{no_role.status_code}")
+
+        foreign = client.post("/api/expand", json={
+            "detail_id": did, "section": "all",
+            "role_id": "technical", "session_id": "s-leak-tech",
+        })
+        check("P0-LEAK: деталь director не читается ролью technical",
+              foreign.status_code == 404, f"{foreign.status_code}")
+
+        other_session = client.post("/api/expand", json={
+            "detail_id": did, "section": "all",
+            "role_id": "director", "session_id": "s-leak-other",
+        })
+        check("P0-LEAK: деталь director не читается чужой сессией той же роли",
+              other_session.status_code == 404, f"{other_session.status_code}")
+
+        own = client.post("/api/expand", json={
+            "detail_id": did, "section": "all",
+            "role_id": "director", "session_id": "s-leak-boss",
+        })
+        check("P0-LEAK: владелец получает свою деталь",
+              own.status_code == 200 and "detailed" in own.json(),
+              f"{own.status_code}")
+
+        # Владелец переживает псевдоним: lawyer -> technical (тот же отдел),
+        # но НЕ получает деталь, выданную роли director.
+        alias_den = client.post("/api/expand", json={
+            "detail_id": did, "section": "all",
+            "role_id": "lawyer", "session_id": "s-leak-boss",
+        })
+        check("P0-LEAK: псевдоним lawyer не открывает деталь director",
+              alias_den.status_code == 404, f"{alias_den.status_code}")
+    finally:
+        api_config.CORPUS_DIR = old_corpus
+        api_config.CASES_PATH = old_cases
+        _DETAILS.clear()
+
+
+def check_unstable_compose() -> None:
+    """LEX-P0-UNSTABLE: один вопрос — один результат, даже если модель плавает.
+
+    Владелец: «Он на любой вопрос будет тикет создавать?! Нас жюри убьёт».
+    Факт на стенде: «Как формируется команда проекта?» (director, corpus-real)
+    5 прогонов подряд → 3 пустых кадра ошибки и один ответ из 2 символов.
+    Причины две, обе проверяются здесь:
+
+    1. `llm.chat` падал `AssertionError()` без текста, когда ВСЕ попытки
+       выпали по троттлингу. Пустой `message` в кадре error — это и есть
+       «message», которое видело жюри. Теперь — `LLMError` с причиной.
+    2. compose звал модель один раз: один сетевой сбой = нет ответа. Теперь
+       два вызова, из них — лучший по опоре на цитаты.
+
+    Сеть в тесте не нужна: `chat` подменяется управляемым сбоем, поэтому
+    проверка не зависит от живого слота и от его троттлинга.
+    """
+    from lex import llm as llm_mod
+
+    # --- 1. Все попытки — троттлинг: не AssertionError, а текст.
+    # `chat` до сетевого слоя не доходит, если слот не настроен, поэтому
+    # подставляем фиктивные значения: проверяется код повторов, а не .env.
+
+    real_post = llm_mod._post_chat
+    saved_env = {k: _os.environ.get(k) for k in ("NEXUS_LINK_BASE_URL", "NEXUSLINK_KEY")}
+    _os.environ.setdefault("NEXUS_LINK_BASE_URL", "http://127.0.0.1:1")
+    _os.environ.setdefault("NEXUSLINK_KEY", "test-key")
+
+    def throttle(*_a, **_k):
+        raise llm_mod.LLMError("NexusLink HTTP 502: all candidates exhausted (429)")
+
+    llm_mod._post_chat = throttle
+    orig_pause = llm_mod.RATE_BASE_PAUSE
+    llm_mod.RATE_BASE_PAUSE = 0.0
+    try:
+        try:
+            llm_mod.chat([{"role": "user", "content": "x"}])
+            raised: Exception | None = None
+        except Exception as exc:
+            raised = exc
+        check("UNSTABLE: исчерпание ретраев — LLMError с текстом, не пустой assertion",
+              isinstance(raised, llm_mod.LLMError) and bool(str(raised).strip())
+              and "429" in str(raised),
+              f"{type(raised).__name__}: {str(raised)[:90]}")
+    finally:
+        llm_mod._post_chat = real_post
+        llm_mod.RATE_BASE_PAUSE = orig_pause
+        for _k, _v in saved_env.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+    # --- 2. Первый вызов модели срывается — compose не сдаётся, а повторяет.
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+    calls = {"n": 0}
+    good = "Команда проекта формируется из руководителя проекта и архитектора [1]. [1]"
+
+    def flaky(_self, frames, state):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise llm_mod.LLMError("NimbusLink недоступен: сымитированный обрыв")
+        return good
+
+    orch_cls = Orchestrator
+    orig_ask = orch_cls._ask_model
+    orig_attempts = __import__("lex.orchestrator", fromlist=["x"]).COMPOSE_ATTEMPTS
+    import lex.orchestrator as omod
+    omod.COMPOSE_ATTEMPTS = 2
+    orch_cls._ask_model = flaky
+    try:
+        out = asyncio.run(_run("Какие роли участвуют в проектной деятельности?",
+                               role="director", corpus_root=real,
+                               session="s-unst-retry", no_llm=False))
+    finally:
+        orch_cls._ask_model = orig_ask
+        omod.COMPOSE_ATTEMPTS = orig_attempts
+    kinds = [s.kind for s in out]
+    answer = next((s.data for s in out if s.kind == "answer"), None)
+    check("UNSTABLE: сбой первого вызова не съедает ответ (повтор вытягивает)",
+          answer is not None and calls["n"] == 2,
+          f"исходы {kinds}, вызовов {calls['n']}")
+
+    # --- 3. Оба вызова сорвались — кадр error обязан нести причину.
+    def dead(_self, frames, state):
+        raise llm_mod.LLMError("NimbusLink недоступен: сымитированный обрыв")
+
+    orch_cls._ask_model = dead
+    try:
+        out = asyncio.run(_run("Какие роли участвуют в проектной деятельности?",
+                               role="director", corpus_root=real,
+                               session="s-unst-dead", no_llm=False))
+    finally:
+        orch_cls._ask_model = orig_ask
+    err = next((s.data for s in out if s.kind == "error"), None)
+    check("UNSTABLE: двойной сбой — error с текстом, а не пустой кадр",
+          err is not None and bool(str(getattr(err, "message", "")).strip()),
+          repr(getattr(err, "message", ""))[:90])
+
+    # --- 4. Пустое исключение не превращается в пустой кадр SSE.
+    from api import sse
+
+    frame = sse.error("", "compose")
+    check("UNSTABLE: sse.error с пустым текстом называет стадию",
+          "compose" in frame and '"message":""' not in frame.replace(" ", ""),
+          frame.splitlines()[1][:100] if "\n" in frame else frame[:100])
+
+
+def check_verify_zero() -> None:
+    """LEX-P0-VERIFY-ZERO: непустой ответ не выбрасывается из-за разбора.
+
+    Владелец нашла шаг за шагом: compose дал ответ с 96% опоры на цитаты,
+    verify насчитал «утверждений 0» и увёл в уточнение. Ответ уничтожался
+    при РАЗБОРЕ, а не при генерации.
+
+    Два случая проверяются отдельно:
+    1. Ответ структурой, из которой `split_sentences` не выделяет ни одного
+       предложения — verify ОБЯЗАН переразобрать, а если и это не помогло,
+       отдать текст с оговоркой «структура не распознана», не отказом.
+    2. Текст вообще без точек/границ — второй стратегии тоже нечего разобрать.
+       Тогда ответ отдаётся, но с `similarity_checked=False`: verify не врёт,
+       что проверил опору.
+    """
+    from lex.grounding import check_grounding
+    from lex.orchestrator import _flatten_for_grounding, _whole_text_report
+
+    # (1) markdown-заголовки и списки без обычных границ предложения.
+    odd = "**Ответ**\n\n**Раздел 1**\n\n**Раздел 2**"
+    raw = check_grounding(odd, ["фрагмент [1] текст"])
+    check("VERIFY-ZERO: разбор даёт 0 утверждений на непустом ответе (исходный дефект)",
+          raw.total == 0 and odd.strip(), f"total={raw.total}")
+
+    flat = _flatten_for_grounding(odd)
+    retry = check_grounding(flat, ["фрагмент [1] текст"])
+    check("VERIFY-ZERO: вторая стратегия разбора находит утверждения",
+          retry.total > 0, f"после снятия разметки total={retry.total}")
+
+    # (2) Совсем нерасчленяемый текст: отчёт-заглушка не роняет ответ.
+    stub = _whole_text_report(raw, "слово " * 40)
+    check("VERIFY-ZERO: нерасчленяемый ответ не считается «нет ответа»",
+          stub.total == 1 and not stub.nothing_covered,
+          f"total={stub.total} nothing_covered={stub.nothing_covered}")
+    check("VERIFY-ZERO: заглушка честно говорит, что опора не проверялась",
+          stub.similarity_checked is False and "не распознана" in stub.similarity_note,
+          stub.similarity_note)
+
+    # (3) Регрессия из задачи: compose с повтором НЕ теряет текст для verify.
+    # Ошибка была в моей же правке: note-ветка возвращала шаг до записи
+    # answer_text, и verify проверял пустую строку.
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+    good = ("Команда проекта формируется руководителем проекта [1]. "
+            "[1] Архитектор назначается приказом.")
+    calls = {"n": 0}
+
+    def flaky(_self, frames, state):
+        calls["n"] += 1
+        return good
+
+    orig_ask = Orchestrator._ask_model
+    Orchestrator._ask_model = flaky
+    try:
+        out = asyncio.run(_run("Какие роли участвуют в проектной деятельности?",
+                               role="director", corpus_root=real,
+                               session="s-vz-1", no_llm=False))
+    finally:
+        Orchestrator._ask_model = orig_ask
+    verify = next((s.data for s in out if s.kind == "step"
+                   and s.data.key == "verify"), None)
+    answer = next((s.data for s in out if s.kind == "answer"), None)
+    det = getattr(verify, "detail", "")
+    check("VERIFY-ZERO: после повтора verify видит ответ, а не пустую строку",
+          answer is not None and "утверждений 0" not in det,
+          det[:100])
+    check("VERIFY-ZERO: верный ответ доходит до сотрудника как answer",
+          answer is not None, ",".join(s.kind for s in out))
+
+
 def main() -> int:
     corpus = load_corpus(CORPUS)
     print(f"корпус: документов {len(corpus.documents)}, чанков {len(corpus.chunks)}, "
@@ -899,6 +1302,10 @@ def main() -> int:
     check_loop_criterion3()
     check_crit3_train()
     check_journal_metrics()
+    check_role_aliases()
+    check_p0_leaks()
+    check_unstable_compose()
+    check_verify_zero()
     print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed")
     if FAIL:
         print("провал: " + ", ".join(FAIL))
