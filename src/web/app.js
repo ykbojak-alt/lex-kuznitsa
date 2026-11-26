@@ -1701,6 +1701,14 @@
 
     if (data.hint) box.appendChild(el('p', 'refusal__reason', 'Подсказка: ' + data.hint));
 
+    /* OUTCOME: refusal — человеку нужно знать, куда идти дальше, и номер заявки. */
+    if (!outOfScope) {
+      var next = el('p', 'refusal__next', 'Обратитесь в службу качества — она ответит по существу вопроса.');
+      var tid = d.ticket || state.lastTicket;
+      if (tid) next.appendChild(el('span', 'refusal__ticket', ' · заявка № ' + tid));
+      box.appendChild(next);
+    }
+
     if (data.sources && data.sources.length) {
       var srcs = el('div', 'refusal__sources');
       srcs.appendChild(el('span', null, 'связанные документы'));
@@ -1745,6 +1753,12 @@
     head.appendChild(el('span', 'ticketcard__badge ticketcard__badge--' + (TICKET_STATUS_TONE[status] || 'muted'),
       TICKET_STATUS_LABEL[status] || status));
     box.appendChild(head);
+
+    /* OUTCOME: escalate — явно говорим, что заявка передана, и называем срок. */
+    if (!data.status || status === 'open' || status === 'assigned') {
+      box.appendChild(el('p', 'lettercard__lead',
+        'Заявка передана в службу качества. Срок ответа — до 2 рабочих дней.'));
+    }
 
     var meta = el('dl', 'lettercard__meta');
     /* Живой escalate не присылает ни question, ни email: поля собираются из
@@ -2019,7 +2033,7 @@
         sla_due: d.sla_due, question: d.question, email: d.email, next: d.next
       }, {});
       state.lastTicket = d.ticket;
-      consoleView.setStatus('письмо отправлено: ' + d.ticket + ' · ждёт службу качества', 'warn');
+      consoleView.setStatus('заявка передана в службу качества: ' + d.ticket + ' · ответ до 2 рабочих дней', 'warn');
       ctx.outcome = 'refusal';
       progressView.finish('refusal', 'Передано в службу качества');
       /* §18.4/§22: карточка в чате меняет состояние, когда служба качества ответила. */

@@ -28,7 +28,10 @@ import numpy as np
 from .corpus import Corpus
 from .models import Chunk
 
-EMBED_URL = os.environ.get("LEX_EMBED_URL", "http://127.0.0.1:8081/v1/embeddings")
+# Корень сервиса, путь дописываем сами: одно и то же значение LEX_EMBED_URL
+# читают и index.py, и journal.py, и api/config.py, и scripts/check-lex-stack.sh.
+# Пока здесь стоял полный эндпоинт, значение из .env ломало одну из сторон.
+EMBED_URL = os.environ.get("LEX_EMBED_URL", "http://127.0.0.1:8081").rstrip("/")
 EMBED_MODEL = os.environ.get("LEX_EMBED_MODEL", "bge-m3")
 EMBED_DIM = int(os.environ.get("LEX_EMBED_DIM", "1024"))
 
@@ -96,7 +99,8 @@ def embed_texts(texts: list[str], *, timeout: float = 600.0, batch: int = 8) -> 
 def _embed_batch(texts: list[str], timeout: float) -> list[list[float]]:
     body = json.dumps({"model": EMBED_MODEL, "input": texts}).encode("utf-8")
     req = urllib.request.Request(
-        EMBED_URL, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        f"{EMBED_URL}/v1/embeddings", data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -219,11 +223,19 @@ class SearchIndex:
 
     def vector(self, query: str, top: int = 20) -> list[Hit]:
         if self._vecs is None:
-            self.build_vectors()
-        if self._vecs is None or len(self._vecs) == 0:
-            # Эмбеддер лёг на этапе индексации: векторного канала нет, но BM25
-            # работает. Пустой список — честный ответ «вектор не дал ничего»,
-            # в отличие от исключения, которое убьёт весь поиск.
+            # Кэш не загрузился (нет файла или он не совпал по chunk_ids).
+            # build_vectors() здесь звать НЕЛЬЗЯ: на реальном корпусе это
+            # 20+ минут синхронного CPU внутри запроса — сервер просто виснет.
+            # Векторы готовит demo/build-index-cache.py заранее; поиск честно
+            # деградирует до BM25 и сообщает об этом.
+            loaded = self._load_cache()
+            if loaded is None:
+                raise EmbeddingError(
+                    "векторный кэш не найден или устарел — "
+                    "постройте его: python demo/build-index-cache.py"
+                )
+            self._vecs = loaded
+        if len(self._vecs) == 0:
             raise EmbeddingError("векторный канал недоступен: векторы не построены")
         qv = np.asarray(embed_texts([query])[0], dtype=np.float64)
         qv /= np.linalg.norm(qv) + 1e-12

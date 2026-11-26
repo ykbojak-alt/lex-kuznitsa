@@ -31,6 +31,8 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+from lex.index import reset_index
+
 from . import config, sse
 
 CoreEvent = tuple[str, dict]
@@ -99,6 +101,11 @@ def corpus():
 
 def reload_corpus() -> None:
     _corpus_cache.clear()
+    # Индекс кэшируется отдельно от корпуса (index._CACHE): без сброса
+    # /api/ingest перечитывал корпус, а поиск продолжал работать по старой
+    # матрице и старым чанкам. Дообучение через службу качества выглядело бы
+    # «ничего не изменилось».
+    reset_index(config.CORPUS_DIR)
     m = core_modules()["corpus"]
     if m is not None and hasattr(m, "load_corpus"):
         corpus()

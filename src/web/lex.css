@@ -702,6 +702,10 @@ html[data-theme="dark"] .refusal { background: #2c1a1c; }
 
 .refusal__reason { margin: 0; white-space: pre-wrap; }
 
+/* OUTCOME: что делать после отказа и номер заявки, если она создана */
+.refusal__next { margin: 8px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.refusal__ticket { font-family: var(--font-mono); color: var(--link); }
+
 .refusal__sources {
   margin-top: 8px;
   display: flex;
@@ -1615,6 +1619,9 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 .lettercard__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lettercard__env { font-size: 15px; line-height: 1; color: var(--link); }
 .lettercard__title { font-weight: 700; font-size: 13.5px; }
+
+/* OUTCOME: эскалация — заявка передана и назван срок ответа */
+.lettercard__lead { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
 
 .lettercard__meta { margin: 2px 0 0; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 10px; }
 .lettercard__meta dt { font-size: 11.5px; color: var(--text-2); }

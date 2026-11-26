@@ -265,6 +265,7 @@ class DocumentMeta(BaseModel):
     subtype: str = ""
     department: str = ""
     system: str = ""
+    business_line: str = ""
     owner: str = ""
     version: str = ""
     issued: str = ""

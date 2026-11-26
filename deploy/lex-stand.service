@@ -1,0 +1,25 @@
+[Unit]
+Description=LEX stand — HTTP-слой агента поиска ответов по регламентам
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lex-kuznitsa
+EnvironmentFile=/opt/lex-kuznitsa/.env
+Environment=PYTHONUNBUFFERED=1
+# Векторный сервис (bge-m3, ~2 ГБ RAM) на стенде заказчика НЕ работает: 2 ядра
+# и ~900 МБ свободной памяти. Векторы чанков считаются заранее и лежат в
+# .lex-index.npz рядом с корпусом — в рантайме из них нужен только ОДИН
+# embed запроса. Поэтому строка ниже закомментирована: поиск идёт на BM25,
+# /api/health покажет embed.reachable=false, ответ придёт с оговоркой
+# no_similarity. Если рядом поднят живой embed (полный гибрид) — раскомментировать.
+# Значение — КОРЕНЬ сервиса без пути: index.py и config.py дописывают свой
+# (/v1/embeddings, /health), и полный URL сломал бы одну из сторон.
+#Environment=LEX_EMBED_URL=http://127.0.0.1:8081
+ExecStart=/opt/lex-kuznitsa/.venv/bin/python -m uvicorn api.app:app --host 127.0.0.1 --port 8090 --app-dir /opt/lex-kuznitsa/src
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

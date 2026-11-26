@@ -17,7 +17,8 @@ import os
 import urllib.error
 import urllib.request
 
-RERANK_URL = os.environ.get("LEX_RERANK_URL", "http://127.0.0.1:8082/rerank")
+# Корень сервиса, путь дописываем сами — см. комментарий в index.py про EMBED_URL.
+RERANK_URL = os.environ.get("LEX_RERANK_URL", "http://127.0.0.1:8082").rstrip("/")
 RERANK_MODEL = os.environ.get("LEX_RERANK_MODEL", "bge-reranker-base")
 
 
@@ -33,7 +34,8 @@ def rerank(query: str, documents: list[str], *, top: int | None = None, timeout:
         {"model": RERANK_MODEL, "query": query, "documents": documents}
     ).encode("utf-8")
     req = urllib.request.Request(
-        RERANK_URL, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        f"{RERANK_URL}/rerank", data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

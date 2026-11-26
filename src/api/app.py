@@ -65,6 +65,7 @@ class AskRequest(BaseModel):
     session_id: str | None = None
     answers: dict | None = None
     tone: str = "plain"
+    business_line: str | None = None
 
 
 class CaseRequest(BaseModel):
@@ -203,7 +204,8 @@ async def ask(req: AskRequest):
             raise HTTPException(status_code=400, detail="as_of должен быть YYYY-MM-DD") from None
 
     gen = core.stream_answer(req.question, req.role_id, req.as_of,
-                             req.session_id, req.answers, req.tone)
+                             req.session_id, req.answers, req.tone,
+                             business_line=req.business_line)
     return StreamingResponse(
         gen,
         media_type="text/event-stream",

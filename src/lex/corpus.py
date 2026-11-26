@@ -73,28 +73,69 @@ def _split_sections(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _overlap_tail(cur: str, overlap_chars: int) -> str:
+    """Хвост для перекрытия — начатый с границы строки, а не с середины слова.
+
+    Срез ``cur[-overlap_chars:]`` даёт чанк, который начинается посреди слова
+    («…ных ресурсов»): такая цитата не находится дословно. Берём последние
+    целые строки, влезающие в перекрытие; ни одной — перекрытие отменяем.
+    """
+    if not overlap_chars or len(cur) <= overlap_chars:
+        return cur
+    cut = len(cur) - overlap_chars
+    nl = cur.find("\n", cut)
+    return cur[nl + 1 :] if nl >= 0 else ""
+
+
+def _split_long(text: str, limit_chars: int) -> list[str]:
+    """Один сверхдлинный пункт: режем по последнему пробелу до лимита.
+
+    Резка ровно по ``limit_chars`` рвёт слово пополам («…инженер» / «ных
+    ресурсов»), и такая цитата не находится дословно ни в документе, ни в
+    проверке. Пробел — минимальная граница, которая всегда есть.
+    """
+    out: list[str] = []
+    rest = text
+    while len(rest) > limit_chars:
+        cut = rest.rfind(" ", 0, limit_chars)
+        if cut <= 0:
+            cut = limit_chars
+        out.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        out.append(rest)
+    return out
+
+
 def _window(text: str, limit: int, overlap: int) -> list[str]:
     """Скользящее окно по абзацам: ~limit токенов, перекрытие overlap."""
     if estimate_tokens(text) <= limit:
         return [text]
-    paras = [p for p in re.split(r"\n{2,}", text) if p.strip()]
+    # В реальных регламентах пункты идут подряд без пустых строк: весь документ
+    # приходит одним абзацем, и окно по абзацам не срабатывает. Поэтому режем
+    # по СТРОКАМ — каждая строка «12.3. …» это целый пункт, и разрыв посреди
+    # пункта ломает цитату (проверка §21 требует дословного совпадения).
+    paras = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+    units: list[str] = []
+    for p in paras:
+        lines = [ln for ln in p.split("\n") if ln.strip()]
+        units.extend(lines if len(lines) > 1 else [p])
     limit_chars = int(limit * CHARS_PER_TOKEN)
     overlap_chars = int(overlap * CHARS_PER_TOKEN)
     out: list[str] = []
     cur = ""
-    for p in paras:
-        candidate = f"{cur}\n\n{p}" if cur else p
+    for p in units:
+        candidate = f"{cur}\n{p}" if cur else p
         if len(candidate) <= limit_chars:
             cur = candidate
             continue
         if cur:
             out.append(cur)
-            tail = cur[-overlap_chars:] if overlap_chars and len(cur) > overlap_chars else cur
-            cur = f"{tail}\n\n{p}" if tail else p
+            tail = _overlap_tail(cur, overlap_chars)
+            cur = f"{tail}\n{p}" if tail else p
         else:
-            # Один абзац длиннее окна — режем по символам, иначе потеряем текст.
-            for i in range(0, len(p), limit_chars):
-                out.append(p[i : i + limit_chars])
+            # Один пункт длиннее окна — режем по границам слов, иначе потеряем текст.
+            out.extend(_split_long(p, limit_chars))
             cur = ""
     if cur:
         out.append(cur)
@@ -109,6 +150,7 @@ def _doc_meta(d: dict) -> DocumentMeta:
         subtype=str(d.get("subtype") or ""),
         department=str(d.get("department") or ""),
         system=str(d.get("system") or ""),
+        business_line=str(d.get("business_line") or ""),
         owner=str(d.get("owner") or ""),
         version=str(d.get("version") or ""),
         issued=str(d.get("issued") or ""),

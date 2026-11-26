@@ -945,6 +945,14 @@ class Dialogue:
                                    business_line=business_line)
             return Decision(escalate=ticket, iterations=iterations, reason=why)
 
+        if searched and searched.get("no_norm"):
+            # §15 / критерий 1 заказчика: причина не «вопрос непонятен», а
+            # «нормы нет». Сотрудник уже назвал предмет (срок хранения
+            # бухгалтерских документов), и никакой ответ на «о каком заказе
+            # речь» не создаст норму в регламенте. Такой вопрос уходит в
+            # службу качества сразу, а не крутит круги уточнений.
+            return _escalate()
+
         if self.out_of_base(session.question):
             decision = _escalate()
             decision.out_of_base = True

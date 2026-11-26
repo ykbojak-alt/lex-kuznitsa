@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -38,7 +39,7 @@ from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
 from .forms import get_form
-from .grounding import GroundingReport, check_grounding
+from .grounding import GroundingReport, check_grounding, subject_coverage
 from .index import SearchIndex, embed_texts, get_index
 from .media import inspect_corpus
 from .models import (
@@ -63,6 +64,19 @@ DEFAULT_CORPUS = ROOT / "sample-corpus"
 TOP_K = int(os.environ.get("LEX_TOP_K", "6"))
 # Сколько кандидатов берём на вход реранкера.
 CANDIDATES = int(os.environ.get("LEX_CANDIDATES", "24"))
+# Сколько из них реально уходит в реранкер. Реранкер — cross-encoder на CPU и
+# тратит ~3 с на документ: 24 кандидата это ~70 с ожидания в живом запросе,
+# что для демо недопустимо. Гибрид (BM25+вектор, RRF) уже дал порядок, поэтому
+# реранк — второе мнение по верхушке, а не по всему списку.
+RERANK_TOP = int(os.environ.get("LEX_RERANK_TOP", "8"))
+# Ниже этой доли предмета вопроса во фрагментах считаем, что нормы нет.
+# SPARK замерил на 15 вопросах: отвечаемые дают 1.00, ловушки 0.25-0.60.
+SUBJECT_MIN_COVERAGE = float(os.environ.get("LEX_SUBJECT_MIN", "0.75"))
+# Близость вектора к лучшему фрагменту. Ниже — слова нашлись, а тема не та.
+SUBJECT_MIN_COSINE = float(os.environ.get("LEX_SUBJECT_COSINE", "0.50"))
+# Вопрос ссылается на конкретный документ («в документе Регламент „X"»).
+_DOC_REF = re.compile(r"в\s+документ|по\s+документ|документ[аеу]?\s+[«\"]|"
+                      r"Регламент[ае]?\s+[«\"]|Инструкци[ия]\s+[«\"]", re.IGNORECASE)
 # Порог близости для проверки покрытия (§12.2, барьер 2).
 GROUNDING_THRESHOLD = float(os.environ.get("LEX_GROUNDING_THRESHOLD", "0.45"))
 
@@ -269,14 +283,15 @@ class Orchestrator:
         """
         state: dict = {}
         yield Signal("step", self._stage_accept(1, state))
-        clarify = self._stage_clarify(2, state)
-        if clarify is not None:
-            yield Signal("step", self._clarify_step(2, state))
-            yield clarify
-            return                      # §10: после clarify поток закрывается
         # §17: policy — первый содержательный шаг, ДО всякого поиска. Если
         # вопрос не наш или роли не положено, дальше не идём вовсе: «не ищем»,
         # а не «нашли, но не покажем».
+        #
+        # Порядок с clarify важен: policy уже знает направление (его вычисляет
+        # _line_of_text по тексту вопроса). Пока clarify стоял ПЕРЕД policy,
+        # на вопрос «Какие роли участвуют в проектной деятельности?» он
+        # спрашивал направление у сотрудника, хотя оно названо в самом
+        # вопросе — уточнение там, где ответ уже есть.
         stage = self._stage_policy(2, state)
         yield Signal("step", stage.event)
         if stage.signal is not None:
@@ -287,6 +302,11 @@ class Orchestrator:
             if stage.signal.kind == "refusal":
                 yield Signal("done", self._done())
             return
+        clarify = self._stage_clarify(3, state)
+        if clarify is not None:
+            yield Signal("step", self._clarify_step(3, state))
+            yield clarify
+            return                      # §10: после clarify поток закрывается
         async for sig in self._run_stages(state):
             yield sig
         if state.get("escalate_pending"):
@@ -343,6 +363,12 @@ class Orchestrator:
                 state["final"] = ("done", None)
                 return
             if outcome is _STOP:
+                # Стадия остановила каскад, но у неё есть что показать:
+                # event лежит в state["stop_step"].
+                stop_ev = state.pop("stop_step", None)
+                if stop_ev is not None:
+                    self._timeline[stop_ev.key] = _now_ms(t_stage)
+                    yield Signal("step", stop_ev)
                 state["final"] = ("done", None)
                 return
             if isinstance(outcome, Signal):
@@ -382,6 +408,10 @@ class Orchestrator:
             "accessible": len(allowed),
             "top": [getattr(h.chunk, "doc_id", "") for h in hits][:5],
             "performed": performed,
+            # Причина «нормы нет в регламентах». Диалог по ней не уточняет
+            # предмет, а сразу создаёт заявку в службу качества.
+            "no_norm": bool(state.get("no_norm")),
+            "subject_coverage": state.get("subject_coverage"),
         }
 
     def _session_id(self) -> str:
@@ -443,6 +473,10 @@ class Orchestrator:
             as_of=self.opts.as_of.isoformat() if self.opts.as_of else None,
             session_id=self.opts.session_id,
             answers=self.opts.answers or None,
+            # Направление уже посчитал policy (шаг 2). Спрашивать его у
+            # сотрудника, когда оно названо в вопросе, — издевательство.
+            ctx={"params": {"business_line": state.get("line")}}
+            if state.get("line") else None,
         )
         if not questions:
             ctx = (dlg.apply_answers(self.opts.session_id, self.opts.answers)
@@ -561,6 +595,53 @@ class Orchestrator:
                   f"кандидатов {len(doc_hits)} · после rerank {after}")
         if after < len(doc_hits):
             detail += f" · отсеяно {len(doc_hits) - after}"
+
+        # §12.8 / критерий 1 заказчика: поиск не умеет «ничего не найти» —
+        # гибрид всегда отдаёт 24 фрагмента, и по ним получается связный, но
+        # не тот ответ. «Срок хранения бухгалтерских документов» цеплялся за
+        # КД-ПД-04 только потому, что там есть слова «бухгалтерских
+        # документов» в пункте про приёмку работ. Проверяем, что ПРЕДМЕТ
+        # вопроса вообще виден во фрагментах: если нет — тема наша, ответа
+        # нет, и честный путь — заявка в службу качества (§15), а не
+        # пересказ похожего пункта.
+        subj, missing = subject_coverage(
+            self.opts.question, [h.chunk.text for h in ranked[:RERANK_TOP]]
+        )
+        # Второй признак — близость вектора к лучшему фрагменту. Одного
+        # покрытия терминов мало: «охрана труда на площадке» даёт 1.00, потому
+        # что слова разошлись по разным чанкам, а нормы об ответственности в
+        # них нет. SPARK замерил на 28 вопросах: правило «покрытие >= 0.75 И
+        # косинус >= 0.50» дало 2 ошибки, обе — ложный проход, пропусков ноль.
+        # Асимметрия намеренная: лучше лишний раз ответить по цитате, чем
+        # отказать там, где норма есть.
+        cos1 = max((h.cosine for h in ranked[:RERANK_TOP]), default=0.0)
+        state["subject_coverage"] = round(subj, 2)
+        state["top_cosine"] = round(cos1, 3)
+        detail += f" · предмет {subj:.0%} · близость {cos1:.2f}"
+        # Вопрос, называющий конкретный документ, гейт не режет: в синтетике
+        # сотрудник пишет «в документе Регламент „прочая"», и такой вопрос уже
+        # адресован, даже если поиск промахнулся мимо нужного чанка.
+        names_doc = bool(_DOC_REF.search(self.opts.question))
+        if missing and not names_doc and (
+                subj < SUBJECT_MIN_COVERAGE or cos1 < SUBJECT_MIN_COSINE):
+            detail += f" · предмет вопроса не найден ({subj:.0%})"
+            # Раньше здесь ставился только escalate_pending, и каскад шёл
+            # дальше: compose собирал ответ по нерелевантным фрагментам,
+            # verify его отбрасывал, и человек получал уточнение вместо
+            # честного «нормы нет». Останавливаемся сразу — дальше искать
+            # нечего.
+            state["no_norm"] = True
+            state["escalate_pending"] = RefusalData(
+                reason=("В регламентах нет нормы по этому вопросу: "
+                        f"не найдены слова {', '.join(missing[:4])}"),
+                sources=[getattr(h.chunk, "doc_id", "") for h in ranked[:3]],
+                kind="not_in_corpus",
+                searched=self._searched(state),
+            )
+            # _STOP обрывает каскад, но событие шага всё равно надо отдать:
+            # жюри и UI видят, ПОЧЕМУ остановились.
+            state["stop_step"] = _step(n, "retrieve", detail, self._t0, color="amber")
+            return _STOP
         return _step(n, "retrieve", detail, self._t0)
 
     def _stage_cases(self, n: int, state: dict) -> StepEvent:
@@ -783,6 +864,7 @@ class Orchestrator:
         current, nxt = self._editions_around(state)
         return caveat_mod.build_caveat(caveat_mod.CaveatInput(
             mean_similarity=conf,
+            similarity_checked=report.similarity_checked,
             sources=sources,
             dropped=report.external,
             total_claims=report.total,
@@ -872,9 +954,9 @@ class Orchestrator:
     def _rerank(self, query: str, hits: list) -> list:
         if not hits:
             return []
-        docs = [h.chunk.text for h in hits]
+        docs = [h.chunk.text for h in hits][:RERANK_TOP]
         try:
-            order = rerank.rerank(query, docs, top=len(hits))
+            order = rerank.rerank(query, docs, top=len(docs))
         except rerank.RerankError:
             # Без реранкера поиск продолжает работать: порядок гибрида — не мусор,
             # а реранк — второе мнение.
@@ -885,6 +967,9 @@ class Orchestrator:
                 h = hits[idx]
                 h.score = float(score)
                 out.append(h)
+        # Хвост за пределами RERANK_TOP сохраняем в исходном порядке гибрида:
+        # выбросить его значит отдать в промпт меньше, чем нашлось.
+        out.extend(hits[len(docs):])
         return out
 
     def _search_cases(self) -> list[Case]:
@@ -1024,8 +1109,21 @@ class Orchestrator:
         """
         lines = []
         for f in frames[:3]:
-            head = f.doc_id if f.kind == "doc" else f"кейс {f.doc_id}"
-            lines.append(f"{head}: {f.text.strip()[:300]} [{f.index}]")
+            # Маркер [n] — на КАЖДУЮ строку, а не одним хвостом блока.
+            # Проверка §21 режет ответ на утверждения по предложениям: при
+            # маркере в конце блока ссылку получало только последнее
+            # предложение фрагмента, остальные отбрасывались как «нет ссылки
+            # [n]», и верный ответ уходил в эскалацию.
+            #
+            # doc_id префиксом НЕ ставим: «ТЗ-ЭКЗ-СР01-Р1:» — это метка
+            # источника, и проверка якорей §21.4 справедливо требовала её в
+            # цитате, отбрасывая верное утверждение. Источник и так виден по
+            # ссылке [n] и в citations.
+            body = f.text.strip()[:300]
+            marked = "\n".join(
+                f"{ln} [{f.index}]" for ln in body.split("\n") if ln.strip()
+            )
+            lines.append(marked)
         return "\n".join(lines)
 
     def _citations(self, frames: list[Frame], answer: str) -> list[Citation]:
@@ -1088,6 +1186,10 @@ class Orchestrator:
             "documents": len(self.corpus.documents),
             "cases": len(self.cases.cases),
             "business_lines": [state["line"]] if state.get("line") else [],
+            # Причина «нормы нет» — не то же, что «искали и не нашли»:
+            # уточнять предмет бессмысленно, норма отсутствует в регламентах.
+            "no_norm": bool(state.get("no_norm")),
+            "subject_coverage": state.get("subject_coverage"),
         }
 
     # ------------------------------------------------- §13: раскрытие и формы
