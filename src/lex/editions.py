@@ -18,6 +18,18 @@ from datetime import date
 from .corpus import Corpus
 from .models import DocumentMeta, Rule, RuleRevision
 
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """1 редакция, 2 редакции, 5 редакций. 11–14 — по «many»."""
+    if 10 <= n % 100 <= 20:
+        return many
+    if n % 10 == 1:
+        return one
+    if 2 <= n % 10 <= 4:
+        return few
+    return many
+
+
 # Сильный -> слабый. Чем меньше число, тем сильнее документ.
 LEVELS: dict[str, int] = {
     "приказ": 1,
@@ -77,11 +89,13 @@ class Resolution:
         if self.in_force is None:
             first = self.rule.first_effective or (self.rule.revisions[0].effective if self.rule.revisions else "?")
             return (
-                f"{total} редакций, ни одна не действует на {self.as_of}: "
+                f"{total} {_plural(total, 'редакция', 'редакции', 'редакций')}, "
+                f"ни одна не действует на {self.as_of}: "
                 f"первая — с {first}"
             )
         tag = f"Р{self.in_force.revision}"
-        return f"{total} редакций, действует {tag} от {self.in_force.effective}"
+        return (f"{total} {_plural(total, 'редакция', 'редакции', 'редакций')}, "
+                f"действует {tag} от {self.in_force.effective}")
 
 
 def resolve_rule(rule: Rule, as_of: date | None) -> Resolution:

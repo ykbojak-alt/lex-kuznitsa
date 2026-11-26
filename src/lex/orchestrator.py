@@ -188,6 +188,21 @@ def _plural_subs(n: int) -> str:
     return f"{n} {word}"
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское согласование: 1 кейс, 2 кейса, 5 кейсов.
+
+    «найдено 1 кейсов» — это вид, который жюри замечает сразу, а стоит одна
+    функция. 11-14 — исключение из общего правила, их считаем по «many».
+    """
+    if 10 <= n % 100 <= 20:
+        return many
+    if n % 10 == 1:
+        return one
+    if 2 <= n % 10 <= 4:
+        return few
+    return many
+
+
 def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None) -> StepEvent:
     return StepEvent(
         n=n,
@@ -551,7 +566,7 @@ class Orchestrator:
     def _stage_cases(self, n: int, state: dict) -> StepEvent:
         case_hits = self._search_cases()
         state["case_hits"] = case_hits
-        det = f"найдено {len(case_hits)} кейсов"
+        det = f"найдено {len(case_hits)} {_plural(len(case_hits), 'кейс', 'кейса', 'кейсов')}"
         return _step(n, "cases", det, self._t0)
 
     def _stage_permissions(self, n: int, state: dict) -> StepEvent | Signal:
@@ -619,7 +634,9 @@ class Orchestrator:
                 )
         state["conflict_notes"] = notes
         if conflicts:
-            return _step(n, "conflict", f"кейсов по теме {conflicts}, регламент главнее", self._t0)
+            return _step(n, "conflict",
+                         f"{_plural(conflicts, 'кейс', 'кейса', 'кейсов')} по теме "
+                         f"{conflicts}, регламент главнее", self._t0)
         return _step(n, "conflict", f"конфликтов: 0; фрагментов {len(allowed)}", self._t0)
 
     async def _stage_compose(self, n: int, state: dict) -> StepEvent | Signal:

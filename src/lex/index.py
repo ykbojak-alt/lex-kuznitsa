@@ -77,8 +77,14 @@ class EmbeddingError(RuntimeError):
     pass
 
 
-def embed_texts(texts: list[str], *, timeout: float = 180.0, batch: int = 32) -> list[list[float]]:
-    """Векторы для списка текстов; порядок результата = порядок входа."""
+def embed_texts(texts: list[str], *, timeout: float = 600.0, batch: int = 8) -> list[list[float]]:
+    """Векторы для списка текстов; порядок результата = порядок входа.
+
+    Батч 8 и таймаут 600 с, а не 32/180: замер на реальном корпусе заказчика
+    дал ~14 с на чанк при 2 потоках CPU, и пачка из 32 длинных чанков не
+    укладывалась в 180 с — индексация падала с таймаутом на ровном месте.
+    Один запрос на 8 текстов — это ~2 минуты, с запасом.
+    """
     if not texts:
         return []
     out: list[list[float]] = []

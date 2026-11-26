@@ -86,6 +86,37 @@
     conflict_unresolved: 'конфликт не разрешён'
   };
 
+  /* Промпт велит модели отвечать «ОТКАЗ: <причина>», но бэкенд этот маркер не
+     разбирает и присылает его обычным текстом ответа — с цитатой, как будто это
+     ответ. UI не имеет права выдавать отказ за ответ: распознаём маркер и
+     рисуем отказ. Найдено на живом прогоне (вопрос про утечку учётных данных:
+     пришло «ОТКАЗ: В фрагментах нет ответа…» в зелёной карточке ответа). */
+  var REFUSAL_MARKER = /^\s*ОТКАЗ\s*(?:[::]|—|–|-)\s*/i;
+
+  function refusalFromAnswer(d) {
+    var text = String(d.short || d.text || '');
+    var m = REFUSAL_MARKER.exec(text);
+    if (!m) {
+      /* Пустой ответ — не ответ. Барьер §12 усекает текст до покрытых фраз, и
+         при неудаче приходит answer с пустым текстом; зелёная карточка без
+         содержимого врёт сильнее, чем честный отказ. */
+      if (!text.trim()) {
+        return {
+          kind: 'not_in_corpus',
+          reason: 'Модель не дала ни одного утверждения, подтверждённого базой знаний',
+          hint: 'Агент может передать вопрос в службу качества — это следующий шаг.'
+        };
+      }
+      return null;
+    }
+    var reason = text.slice(m[0].length).replace(/\s*\[\d+\]/g, ' ').replace(/\s+/g, ' ').trim();
+    return {
+      kind: 'not_in_corpus',
+      reason: reason || 'Модель не нашла ответа во фрагментах базы знаний',
+      hint: 'Агент может передать вопрос в службу качества — это следующий шаг.'
+    };
+  }
+
   var TICKET_STATUS_LABEL = { open: 'открыт', assigned: 'в работе', answered: 'отвечен', closed: 'закрыт' };
   var TICKET_STATUS_TONE = { open: 'danger', assigned: 'amber', answered: 'ok', closed: 'muted' };
 
@@ -395,9 +426,16 @@
         'Чтение кейсов доступно всем · добавление — службе качества и руководству (§23). '
         + 'Кнопка неактивна намеренно: видно, что функция есть, но не для этой роли.'));
     }
-    var cases = state.mock ? global.MockLex.cases() : [];
-    if (!state.mock) {
-      host.appendChild(el('p', 'section-sub', 'В живом режиме список приходит из GET /api/cases.'));
+    var cases = state.mock ? global.MockLex.cases() : (state.caseCache || []);
+    if (!state.mock && state.caseCache === null) {
+      fetch('api/cases').then(function (r) { return r.json(); }).then(function (j) {
+        state.caseCache = Array.isArray(j) ? j : (j.cases || []);
+        renderCasesScreen();
+      }).catch(function () {
+        state.caseCache = [];
+        renderCasesScreen();
+      });
+      return;
     }
     if (!cases.length) return;
     for (var i = 0; i < cases.length; i++) {
@@ -688,7 +726,13 @@
       host.appendChild(el('p', 'detail-quote', t.quality_answer));
     }
 
-    var draft = state.mock ? global.MockLex.draft(id) : null;
+    var draft = state.mock ? global.MockLex.draft(id) : state.ticketDraftCache[id];
+    if (!state.mock && !draft && (t.status === 'answered' || t.status === 'closed')) {
+      var draftHost = host;
+      fetch('api/tickets/' + encodeURIComponent(id) + '/draft').then(function (r) { return r.json(); })
+        .then(function (j) { state.ticketDraftCache[id] = j; renderTicketDetail(id); })
+        .catch(function () { draftHost.appendChild(el('p', 'section-sub', 'Черновик кейса пока недоступен.')); });
+    }
     if (draft && (t.status === 'answered' || t.status === 'closed') && draft.status !== 'resolved') {
       host.appendChild(renderDraftCard(id, draft));
     }
@@ -858,7 +902,15 @@
     return card;
   }
 
-  function renderStatsScreen() {    var host = $('screen-stats');
+  function renderStatsScreen() {
+    if (!state.mock && !state.stats) {
+      fetch('api/analytics').then(function (r) { return r.json(); }).then(function (j) {
+        state.stats = j;
+        state.similar = Array.isArray(j.similar_questions) ? j.similar_questions : [];
+        renderStatsScreen();
+      }).catch(function () { /* экран останется с честными прочерками */ });
+    }
+    var host = $('screen-stats');
     clear(host);
     host.appendChild(el('h2', 'section-title', 'Аналитика'));
     host.appendChild(el('p', 'section-sub',
@@ -897,7 +949,22 @@
     var rows = state.mock
       ? [['Всего запросов', '42'], ['Отказов', '7 (16.7%)'], ['Средняя латентность', '3.8 с'],
          ['p95 латентность', '9.1 с'], ['Чаще всего нет документа', 'лицензирование — 5']]
-      : [['Всего запросов', '—'], ['Отказов', '—'], ['Средняя латентность', '—']];
+      : (function () {
+        var s = state.stats || {};
+        var miss = (s.missing_by_line || [])[0];
+        var topic = ((s.tickets || {}).top_topics || [])[0];
+        return [
+          ['Всего запросов', s.total != null ? String(s.total) : '—'],
+          ['Отказов', s.refusals != null
+            ? String(s.refusals) + (s.refusal_rate != null ? ' (' + Math.round(s.refusal_rate * 100) + '%)' : '')
+            : '—'],
+          ['Средняя латентность', s.avg_latency_ms != null ? (s.avg_latency_ms / 1000).toFixed(1) + ' с' : '—'],
+          ['p95 латентность', s.p95_latency_ms != null ? (s.p95_latency_ms / 1000).toFixed(1) + ' с' : '—'],
+          ['Чаще всего нет документа', miss ? miss.line + ' — ' + miss.count : '—'],
+          ['Тикетов', (s.tickets || {}).total != null ? String(s.tickets.total) : '—'],
+          ['Тема тикета', topic ? topic.topic + ' — ' + topic.count : '—']
+        ];
+      })();
     for (var i = 0; i < rows.length; i++) {
       var tr = el('tr');
       tr.appendChild(el('td', null, rows[i][0]));
@@ -1912,6 +1979,16 @@
 
     if (ev.type === 'answer') {
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
+      /* Отказ, пришедший текстом «ОТКАЗ: …», — не ответ. Рисуем его отказом:
+         иначе человек читает «нет ответа» в оформлении ответа и верит ему. */
+      var asRefusal = refusalFromAnswer(d);
+      if (asRefusal) {
+        renderRefusal(ctx.host, asRefusal);
+        consoleView.setStatus('в базе знаний ответа нет: агент сам отказал', 'idle');
+        ctx.outcome = 'refusal';
+        progressView.finish('refusal', 'Ответа в базе нет');
+        return;
+      }
       d._turnId = ctx.turnId;
       renderAnswer(ctx.host, d);
       if (d.caveat) {
