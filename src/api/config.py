@@ -47,7 +47,11 @@ NO_LLM = os.environ.get("LEX_NO_LLM", "").lower() in ("1", "true", "yes", "on")
 SLA_HOURS = {"normal": float(os.environ.get("LEX_SLA_HOURS", "48")),
              "high": float(os.environ.get("LEX_SLA_HOURS_HIGH", "8"))}
 # §19.6: один кейс — наблюдение, три — сигнал.
-CR_MIN_CASES = int(os.environ.get("LEX_CR_MIN_CASES", "3"))
+# Каноническое имя — LEX_CR_MIN_CASES. Имя без префикса LEX_ читается как
+# запасное (легаси), чтобы старые .env продолжали задавать тот же порог.
+CR_MIN_CASES = int(
+    os.environ.get("LEX_CR_MIN_CASES") or os.environ.get("CR_MIN_CASES", "3")
+)
 
 # §22.4: обращение в службу качества в демо — имитация письма.
 # Домен example.invalid зарезервирован RFC 2606: письмо физически некуда отправить,

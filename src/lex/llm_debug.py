@@ -1,8 +1,9 @@
 """Журнал вызовов модели — чтобы «иногда падает» стало числом.
 
 Владелец: нужен числой ответ, а не «иногда». Поэтому каждый вызов
-``/chat/completions`` пишет одну строку в ``var/llm-debug.jsonl``: модель,
-лимит, ``finish_reason``, длины ``content`` и ``reasoning``, время.
+``/chat/completions`` (когда журнал включён — ``LEX_LLM_DEBUG=1``) пишет одну
+строку в ``var/llm-debug.jsonl``: модель, лимит, ``finish_reason``, длины
+``content`` и ``reasoning``, время.
 
 Лог пишется **на диск, не в stdout**: демо идёт в терминале, и отладочные
 строки там дороже, чем польза от них. Файл — JSONL, чтобы его можно было
@@ -23,9 +24,10 @@ ROOT = Path(__file__).resolve().parents[2]
 DEBUG_PATH = Path(os.environ.get("LEX_LLM_DEBUG_PATH") or (ROOT / "var" / "llm-debug.jsonl"))
 
 _LOCK = threading.Lock()
-# Флаг: писать ли вообще. По умолчанию — да: цена одной строки на вызов
-# ничтожна, а без этого не бывает ответа на «сколько пустых».
-ENABLED = os.environ.get("LEX_LLM_DEBUG", "1").lower() not in ("0", "false", "no", "off")
+# Флаг: писать ли вообще. По умолчанию — нет: в журнал попадает текст
+# вопросов сотрудников, и на стенде он должен появляться по явному
+# решению (LEX_LLM_DEBUG=1), а не молча при каждом вопросе.
+ENABLED = os.environ.get("LEX_LLM_DEBUG", "0").lower() in ("1", "true", "yes", "on")
 
 
 def record(*, model: str, max_tokens: int, finish_reason: str, content: str,

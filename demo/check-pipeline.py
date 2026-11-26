@@ -534,7 +534,10 @@ def main() -> int:
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     # Журнал вызовов модели — в каталог прогона, чтобы --stress его прочёл.
+    # Журнал по умолчанию выключен (в нём текст вопросов сотрудников), а гейт
+    # читает его в --stress — включаем явно.
     os.environ["LEX_LLM_DEBUG_PATH"] = str(state_dir / "llm-debug.jsonl")
+    os.environ["LEX_LLM_DEBUG"] = "1"
     print(f"сервер: {base} · состояние: {state_dir}\n")
 
     proc = None

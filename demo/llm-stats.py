@@ -175,6 +175,9 @@ def main() -> int:
 
     debug_path = Path(args.debug) if args.debug else ROOT / "var" / "llm-debug.jsonl"
     os.environ["LEX_LLM_DEBUG_PATH"] = str(debug_path)
+    # Журнал по умолчанию выключен (в нём текст вопросов сотрудников), а этот
+    # скрипт существует ради его разбора — включаем явно, до импорта llm_debug.
+    os.environ["LEX_LLM_DEBUG"] = "1"
     if not args.keep and debug_path.exists():
         debug_path.unlink()
 

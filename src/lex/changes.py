@@ -29,7 +29,11 @@ from . import policy
 # Порог «это уже система, а не случайность». Один случай — наблюдение,
 # три — сигнал (§19.6). Порог в конфиге, потому что в настоящей организации
 # он зависит от объёма: 3 кейса из 5 — сигнал, 3 из 500 — ещё нет.
-CR_MIN_CASES = int(os.environ.get("CR_MIN_CASES", "3"))
+# Каноническое имя — LEX_CR_MIN_CASES (как в api/config.py). Имя без
+# префикса LEX_ читается как запасное, чтобы старые .env не потеряли порог.
+CR_MIN_CASES = int(
+    os.environ.get("LEX_CR_MIN_CASES") or os.environ.get("CR_MIN_CASES", "3")
+)
 
 STATUSES = ("proposed", "accepted", "rejected", "merged")
 
