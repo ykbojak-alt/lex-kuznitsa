@@ -4,16 +4,20 @@
 
     python demo/check-articles.py
 
-Проверяет требования владельца к набору статей:
-  * объём набора в заданных границах (24-40 статей);
+Набор проверяется по реальному корпусу заказчика (corpus-real/manifest.json).
+Если локального реального корпуса нет, скрипт честно сообщает об этом и
+проверяет набор по демонстрационному манифесту (sample-corpus/manifest.json).
+
+Проверки:
+  * объём набора в заданных границах (24-32 статьи);
   * у каждой статьи есть все обязательные секции шаблона
     (docs/db/ARTICLE-TEMPLATE.md);
   * у каждой статьи есть обе обязательные строки про "навигационная карта,
     а не источник ответа";
-  * идентификаторы демо-корпуса, упомянутые в статьях, существуют
-    в sample-corpus/manifest.json;
-  * термины статей попадают в словарь направлений policy.BUSINESS_LINES,
-    и по каждому направлению словаря есть хотя бы одна статья;
+  * идентификаторы документов, упомянутые в статьях, существуют в манифесте;
+  * каждый документ корпуса упомянут хотя бы в одной статье (навигация
+    не оставляет документ без статьи);
+  * термины статей попадают в словарь направлений policy.BUSINESS_LINES;
   * в статьях нет нормативных значений (сроков, сумм, порогов) и нет
     смешения кириллицы с латиницей.
 
@@ -33,10 +37,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from lex.policy import BUSINESS_LINES
 
 ARTICLES = ROOT / "docs" / "db" / "articles"
-MANIFEST = ROOT / "sample-corpus" / "manifest.json"
+REAL_MANIFEST = ROOT / "corpus-real" / "manifest.json"
+DEMO_MANIFEST = ROOT / "sample-corpus" / "manifest.json"
 
 MIN_ARTICLES = 24
-MAX_ARTICLES = 40
+MAX_ARTICLES = 32
 
 REQUIRED_SECTIONS = (
     "## Суть",
@@ -46,7 +51,7 @@ REQUIRED_SECTIONS = (
     "## Чего в базе НЕТ",
     "## Типичные ловушки",
     "## Пример вопроса",
-    "## Примеры в демо-корпусе",
+    "## Примеры в локальном корпусе",
 )
 
 LINE_SOURCE = "Ответ берётся из документа-источника, не из этой статьи"
@@ -55,13 +60,11 @@ LINE_NO_SOURCE = (
     "что ответа нет, а не собирать из статьи"
 )
 
-DOC_ID_RE = re.compile(
-    "\u0422\u0417-\u042d\u041a\u0417-[0-9A-Z\u0410-\u042f]+"
-    "(?:-[A-Z\u0410-\u042f0-9]+)*"
-)
+# Идентификатор документа реального корпуса: КД-ПД-01, КД-ПС-02.
+DOC_ID_RE = re.compile(r"КД-[А-Я]{2}-\d{2}")
 # Нормативное значение в статье быть не должно: срок, сумма, процент.
 VALUE_RE = re.compile(
-    r"(\d+ ?(?:рабочих дней|дней|дня|дн\.|руб\.?|рублей|%|процентов))"
+    r"(\d+ ?(?:рабочих дней|дней|дня|дн\.|руб\.?|рублей|%|процентов|недель|месяцев))"
     r"|(?:не менее|не более)\s+\d+"
     r"|(?:восемь|девять|десять|семь|шесть|пять|четыре|три|два)\s+"
     r"(?:рабочих дней|дней|дня|рублей|руб\.?)"
@@ -85,11 +88,18 @@ def main() -> int:
     if not MIN_ARTICLES <= len(files) <= MAX_ARTICLES:
         fail(f"число статей вне границ: {len(files)} (нужно {MIN_ARTICLES}-{MAX_ARTICLES})")
 
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    if REAL_MANIFEST.exists():
+        manifest_path = REAL_MANIFEST
+        corpus = "реальный (corpus-real)"
+    else:
+        manifest_path = DEMO_MANIFEST
+        corpus = "демонстрационный (sample-corpus) — реального корпуса нет локально"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     known_ids = {d["doc_id"] for d in manifest["documents"]}
 
     keywords = {k: [w.lower() for w in v["keywords"]] for k, v in BUSINESS_LINES.items()}
     covered: dict[str, list[str]] = {k: [] for k in keywords}
+    cited: dict[str, set[str]] = {doc_id: set() for doc_id in known_ids}
 
     for path in files:
         text = path.read_text(encoding="utf-8")
@@ -111,6 +121,7 @@ def main() -> int:
             doc_id = match.group(0)
             if doc_id not in known_ids:
                 fail(f"{name}: идентификатор {doc_id} нет в манифесте")
+            cited[doc_id].add(name)
 
         hit = VALUE_RE.search(text)
         if hit:
@@ -133,13 +144,20 @@ def main() -> int:
         if not names:
             fail(f"направление '{line}' не покрыто ни одной статьёй")
 
-    print(f"1. статей в наборе: {len(files)} (границы {MIN_ARTICLES}-{MAX_ARTICLES})")
-    print("2. обязательные секции и строки: ok")
-    print("3. идентификаторы демо-корпуса: все есть в манифесте")
-    print("4. термины в словаре направлений: ok")
+    for doc_id, names in cited.items():
+        if not names:
+            fail(f"документ {doc_id} не упомянут ни в одной статье — навигация неполна")
+
+    print(f"1. корпус для проверки: {corpus}")
+    print(f"2. статей в наборе: {len(files)} (границы {MIN_ARTICLES}-{MAX_ARTICLES})")
+    print("3. обязательные секции и строки: ok")
+    print(f"4. идентификаторы в манифесте: ok ({len(known_ids)} документов)")
+    for doc_id in sorted(cited):
+        print(f"   - {doc_id}: {len(cited[doc_id])} ст.")
+    print("5. термины в словаре направлений: ok")
     for line, names in covered.items():
         print(f"   - {line}: {len(names)} ст.")
-    print("5. нормативных значений и смешения кириллицы: нет")
+    print("6. нормативных значений и смешения кириллицы: нет")
     print("OK: набор статей прошёл проверку")
     return 0
 
