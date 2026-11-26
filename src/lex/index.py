@@ -34,6 +34,10 @@ from .models import Chunk
 EMBED_URL = os.environ.get("LEX_EMBED_URL", "http://127.0.0.1:8081").rstrip("/")
 EMBED_MODEL = os.environ.get("LEX_EMBED_MODEL", "bge-m3")
 EMBED_DIM = int(os.environ.get("LEX_EMBED_DIM", "1024"))
+# Таймаут на вектор ОДНОГО вопроса. Держим коротким намеренно: если стенд
+# настроен на удалённый эмбеддер и тот молчит, вопрос не должен висеть
+# 10 минут — лучше честно деградировать до BM25 за секунды.
+EMBED_QUERY_TIMEOUT = float(os.environ.get("LEX_EMBED_QUERY_TIMEOUT", "30"))
 
 # BM25: k1=1.5, b=0.75 — стандарт для коротких текстов; словарь тут маленький,
 # подбирать параметры на 27 документах смысла нет.
@@ -237,7 +241,7 @@ class SearchIndex:
             self._vecs = loaded
         if len(self._vecs) == 0:
             raise EmbeddingError("векторный канал недоступен: векторы не построены")
-        qv = np.asarray(embed_texts([query])[0], dtype=np.float64)
+        qv = np.asarray(embed_texts([query], timeout=EMBED_QUERY_TIMEOUT)[0], dtype=np.float64)
         qv /= np.linalg.norm(qv) + 1e-12
         sims = self._vecs @ qv
         order = np.argsort(-sims)[:top]

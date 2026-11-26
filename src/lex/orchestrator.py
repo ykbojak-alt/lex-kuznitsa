@@ -75,8 +75,14 @@ SUBJECT_MIN_COVERAGE = float(os.environ.get("LEX_SUBJECT_MIN", "0.75"))
 # Близость вектора к лучшему фрагменту. Ниже — слова нашлись, а тема не та.
 SUBJECT_MIN_COSINE = float(os.environ.get("LEX_SUBJECT_COSINE", "0.50"))
 # Вопрос ссылается на конкретный документ («в документе Регламент „X"»).
-_DOC_REF = re.compile(r"в\s+документ|по\s+документ|документ[аеу]?\s+[«\"]|"
-                      r"Регламент[ае]?\s+[«\"]|Инструкци[ия]\s+[«\"]", re.IGNORECASE)
+_DOC_REF = re.compile(
+    r"(?:в|по)\s+документ\w*"
+    r"|документ\w*\s+[«\"]"
+    r"|(?:Регламент|Инструкци\w+|Порядок|Стандарт)\w*\s+[«\"]"
+    r"|ТЗ-[А-ЯЁ0-9-]+|КД-[А-ЯЁ0-9-]+",
+    re.IGNORECASE,
+)
+
 # Порог близости для проверки покрытия (§12.2, барьер 2).
 GROUNDING_THRESHOLD = float(os.environ.get("LEX_GROUNDING_THRESHOLD", "0.45"))
 
