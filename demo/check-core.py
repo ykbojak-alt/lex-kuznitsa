@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "demo"))
 
 from lex import caveat as caveat_mod
 from lex import policy
@@ -56,13 +57,13 @@ def _probe_llm() -> str:
     try:
         from api import config  # noqa: F401  — load_dotenv, иначе llm не видит ключ
         from lex import llm
-    except Exception as exc:  # noqa: BLE001 — проба не должна ронять прогон
+    except Exception as exc:
         return f"lex.llm не импортируется: {type(exc).__name__}"
     if not llm.configured():
         return "модель не сконфигурирована (NEXUS_LINK_BASE_URL/NEXUSLINK_KEY)"
     try:
         llm.chat([{"role": "user", "content": "ок"}], max_tokens=5)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         text = str(exc).replace("\n", " ")
         return f"{type(exc).__name__}: {text[:140]}"
     return ""
@@ -963,6 +964,66 @@ def check_journal_metrics() -> None:
           "subject_coverage" not in other and "top_cosine" not in other, "")
 
 
+def check_grounding_parser() -> None:
+    """N-3: где парсер даёт total=0 при непустом тексте.
+
+    Диагностика, а не фикс. ``split_sentences`` выбрасывает строку целиком,
+    если её НАЧАЛО совпало с ``_HEADING_RE``. Для ``\\*\\*...\\*\\*$`` это верно —
+    строка-заголовок не несёт утверждения. Но ветка ``#{1,6}\\s`` проверяется
+    через ``match()``, без якоря конца, поэтому «## Срок: три рабочих дня [1].»
+    уходит ВСЯ ВМЕСТЕ С СОДЕРЖИМЫМ: sentences=0, claims=0.
+
+    Ниже два класса проверок: то, что ДОЛЖНО быть зелено уже сейчас (разбор
+    обычного текста, ретрай через ``_flatten_for_grounding`` спасает markdown),
+    и то, что красное — сам дефект ``split_sentences``. Красное помечено
+    ``xfail``: это баг парсера, а не теста.
+    """
+    from lex.orchestrator import _flatten_for_grounding
+
+    # --- зелёное: обычный текст режется, покрытие считается ---
+    plain = ("Согласно регламенту, срок согласования заявки на закупку — "
+             "три рабочих дня [1]. Отсчёт идёт с момента поступления [2].")
+    check("N-3: обычный ответ — два утверждения",
+          len(split_sentences(plain)) == 2 and
+          check_grounding(plain, ["фрагмент"] * 10).total == 2, "")
+
+    # --- зелёное: пустой/пробельный текст честно даёт ноль ---
+    check("N-3: пустой текст и пробелы — honest total=0",
+          split_sentences("   \n\t\n ") == [] and
+          check_grounding("   \n\t\n ", ["фрагмент"] * 10).total == 0, "")
+
+    # --- зелёное: verify спасает markdown вторым разбором ---
+    # Дефект split_sentences реальный, но каскад его перекрывает:
+    # _stage_verify при total==0 и непустом тексте переразбирает «плоско».
+    md = "## Срок: три рабочих дня [1]."
+    raw = check_grounding(md, ["фрагмент"] * 10).total
+    flat = check_grounding(_flatten_for_grounding(md), ["фрагмент"] * 10).total
+    check("N-3: ретрай verify поднимает markdown-ответ с 0 до 1",
+          raw == 0 and flat == 1, f"сырой {raw}, плоский {flat}")
+
+    # --- красное: сам дефект split_sentences на «#»-строке с ответом ---
+    # xfail: чинится в lex/grounding.py (_HEADING_RE -> fullmatch для «#»
+    # либо якорь конца). Снять пометку, когда строка перестанет теряться.
+    check("N-3: «## Срок: три дня [1].» не должно теряться целиком",
+          len(split_sentences(md)) >= 1,
+          f"sentences={len(split_sentences(md))}", xfail=True)
+
+    # --- красное: markdown-жирный не снимается, мусор остаётся в тексте ---
+    # «**Срок:** три дня [1].» -> 'Срок:** три дня [1].' — закрывающие **
+    # переживают lstrip и попадают в текст утверждения.
+    bold = split_sentences("**Срок:** три рабочих дня [1].")
+    check("N-3: markdown-жирный снимается до утверждения",
+          bool(bold) and "**" not in bold[0],
+          repr(bold[0] if bold else ""), xfail=True)
+
+    # --- красное: строка из одной разметки даёт total=0 ---
+    # «---», «***», «- » — не текст ответа, но и не «пусто». Сейчас это ловится
+    # веткой «нет предложений», и verify уводит в отказ на непустом тексте.
+    check("N-3: маркер разметки («---») не считается непустым ответом",
+          check_grounding("---", ["фрагмент"] * 10).total == 0 and
+          "---".strip() == "---", "---", xfail=True)
+
+
 def check_tokens_and_line() -> None:
     """N-4: расход токенов в кадре done и направление в журнале.
 
@@ -1023,6 +1084,18 @@ def check_tokens_and_line() -> None:
     no_tok = sse.done(120, "local", "q-test", None)
     check("токены: без вызовов модели блок tokens не выдумывается",
           "tokens" not in json.loads(no_tok.split("data: ", 1)[1].strip()), "")
+
+    # --- живой путь: провайдер подменён, каскад настоящий ---
+    # Проверки выше дергают части по отдельности; эта подтверждает, что они
+    # соединены: stream_answer действительно кладёт tokens в done и
+    # business_line в журнал. Провайдер подменяется модулем n4_live, чтобы
+    # тест шёл без сети и не зависел от слота модели.
+    try:
+        import n4_live
+        n4_live.run(check)
+    except Exception as exc:
+        check("N-4: живой путь stream_answer", False,
+              f"{type(exc).__name__}: {str(exc)[:120]}")
 
 
 def check_role_aliases() -> None:
@@ -1503,6 +1576,103 @@ def check_role_denial_reason() -> None:
           ",".join(s.kind for s in out if s.kind != "step"))
 
 
+def check_answer_with_caveat() -> None:
+    """F-3 / §20.5: ответ с малой опорой отдаётся с оговоркой, не отказом.
+
+    Владелец (дословно, 27.11.2026): «Если LLM дал ответ, но verify его
+    срезал — не уходить в clarify, а отдавать с оговоркой. Введи правило:
+    answer с покрытием <30% идёт как answer+caveat, а не как отказ.»
+
+    До правки ветка `report.nothing_covered` создавала тикет и возвращала
+    refusal: человек получал «модель не опиралась на базу», хотя модель
+    ответила по существу. Теперь текст с хотя бы одним законченным
+    утверждением уходит как answer, оговорка weak_grounding уровня high.
+
+    Обратная сторона тоже проверяется: пустой ответ и одни обрывки обязаны
+    остаться отказом — иначе «сначала оговорка» превратится в «выдаём что
+    угодно».
+    """
+    from lex.grounding import Claim, GroundingReport
+    from lex.orchestrator import _keep_unverified
+
+    def _rep(*texts):
+        r = GroundingReport()
+        for t in texts:
+            c = Claim(text=t, refs=[])
+            c.covered = False
+            c.complete = True
+            r.claims.append(c)
+        return r
+
+    # 1. Ответ по существу, без единой цитаты — сохраняется.
+    body = ("Партнёра подбирает директор по развитию после согласования "
+            "с коммерческим блоком. Решение оформляется протоколом.")
+    kept = _keep_unverified(body, _rep("Партнёра подбирает директор по развитию.",
+                                       "Решение оформляется протоколом."))
+    check("F-3: непустой ответ без цитат сохраняется, а не выбрасывается",
+          kept == body, kept[:60])
+
+    # 2. Пустой текст — сохранять нечего, отказ остаётся.
+    check("F-3: пустой ответ по-прежнему отказ",
+          _keep_unverified("", _rep()) == "", "")
+    check("F-3: ответ из двух слов — не ответ",
+          _keep_unverified("Да, верно.", _rep("Да, верно.")) == "", "")
+
+    # 3. Одни обрывки — половина нормы, показывать нельзя.
+    cut = GroundingReport()
+    c = Claim(text="Срок согласования — пяти рабочих дней [2]", refs=[])
+    c.covered = False
+    c.complete = False
+    cut.claims.append(c)
+    check("F-3: сплошные обрывки — отказ, а не половина нормы",
+          _keep_unverified("Срок согласования — пяти рабочих дней [2]", cut) == "",
+          "")
+
+    # 4. Оговорка weak_grounding: покрытие ниже 30% даёт уровень high.
+    from lex.caveat import CaveatInput, build_caveat
+
+    weak = build_caveat(CaveatInput(coverage_ratio=0.1, covered_claims=1,
+                                    total_claims=10, similarity_checked=True))
+    check("F-3: покрытие <30% даёт оговорку high",
+          weak is not None and weak.level == "high"
+          and any(r.code == "weak_grounding" for r in weak.reasons),
+          f"{getattr(weak, 'level', None)}")
+    strong = build_caveat(CaveatInput(coverage_ratio=0.9, covered_claims=9,
+                                      total_claims=10, similarity_checked=True,
+                                      sources=3))
+    check("F-3: покрытие 90% оговорки weak_grounding не даёт",
+          strong is None
+          or not any(r.code == "weak_grounding" for r in strong.reasons),
+          f"{getattr(strong, 'level', None)}")
+
+    # 5. Сквозной прогон: модель отвечает без ссылок — ответ доходит с
+    #    оговоркой. Модель подменяется, чтобы тест не зависел от сети.
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+    body = ("Партнёра подбирает директор по развитию после согласования "
+            "с коммерческим блоком. Решение оформляется протоколом.")
+    orig_ask = Orchestrator._ask_model
+    orig_ratio = Orchestrator._grounded_ratio
+    Orchestrator._ask_model = lambda _self, _f, _s: body
+    Orchestrator._grounded_ratio = lambda _self, _t, _f: 0.0
+    try:
+        out = asyncio.run(_run("Кто подбирает партнёра на пресейле?",
+                               role="director", corpus_root=real,
+                               session="s-f3-cover", no_llm=False))
+    finally:
+        Orchestrator._ask_model = orig_ask
+        Orchestrator._grounded_ratio = orig_ratio
+    ans = next((s.data for s in out if s.kind == "answer"), None)
+    final_kind = next((s.kind for s in out
+                       if s.kind in ("answer", "refusal", "clarify", "escalate")), "—")
+    check("F-3: ответ без цитат доходит как answer, а не отказ",
+          final_kind == "answer", final_kind)
+    check("F-3: такой ответ несёт оговорку high",
+          ans is not None and ans.caveat is not None and ans.caveat.level == "high",
+          getattr(getattr(ans, "caveat", None), "level", None))
+
+
 def main() -> int:
     global LLM_DOWN
     corpus = load_corpus(CORPUS)
@@ -1529,12 +1699,14 @@ def main() -> int:
     check_loop_criterion3()
     check_crit3_train()
     check_journal_metrics()
+    check_grounding_parser()
     check_tokens_and_line()
     check_role_aliases()
     check_p0_leaks()
     check_unstable_compose()
     check_verify_zero()
     check_role_denial_reason()
+    check_answer_with_caveat()
     print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed, "
           f"{len(EXPECTED_FAIL)} expected-fail, {len(UNEXPECTED_PASS)} xpass")
     if EXPECTED_FAIL:

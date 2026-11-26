@@ -37,6 +37,11 @@ from .models import Caveat, CaveatReason
 # с цитатой (0.85-0.95) оговорки не давало, а пересказ «своими словами»
 # (0.6-0.7) — давал.
 CAVEAT_MIN_COVERAGE = float(os.environ.get("CAVEAT_MIN_COVERAGE", "0.72"))
+# Ниже этой доли подтверждённых утверждений ответ отдаётся с оговоркой
+# high, а не отказом (F-3, указание владельца 27.11.2026). 30% — не «наука»:
+# это граница, за которой ответ держится на одном-двух фрагментах из многих,
+# и действовать по нему без проверки нельзя.
+WEAK_COVERAGE = float(os.environ.get("CAVEAT_WEAK_COVERAGE", "0.30"))
 # Ниже этого числа независимых источников — «подтверждения нет».
 CAVEAT_MIN_SOURCES = int(os.environ.get("CAVEAT_MIN_SOURCES", "2"))
 # Тот же порог, что §9: ниже — «распознан неуверенно».
@@ -50,6 +55,12 @@ EDITION_NEAR_DAYS = int(os.environ.get("CAVEAT_EDITION_NEAR_DAYS", "30"))
 _WEIGHT = {
     "ocr_low": "high",          # текст мог быть распознан неверно целиком
     "edition_conflict": "high",  # ответ может быть устаревшим на дату
+    # Слабая опора на цитаты: модель ответила, но подтверждена малая доля
+    # утверждений. §20 говорит «сначала оговорка, отказ — последнее
+    # средство», и владелец подтвердил правило 27.11.2026: ответ с покрытием
+    # ниже порога отдаётся с оговоркой, а не выбрасывается. Вес high: человек
+    # не должен действовать по такому ответу без проверки.
+    "weak_grounding": "high",
     "low_coverage": "medium",    # смысл верен, формулировка не дословная
     "partial_answer": "medium",  # ответ неполон — человек должен знать
     "practice_only": "medium",   # практика не норма
@@ -83,6 +94,12 @@ class CaveatInput:
     # Отброшено утверждений (§12.2 барьер 3).
     dropped: int = 0
     total_claims: int = 0
+    # Доля подтверждённых утверждений (covered/total). None — не считалось.
+    # Владелец, 27.11.2026: «Если LLM дал ответ, но verify его срезал — не
+    # уходить в clarify, а отдавать с оговоркой. Правило: answer с покрытием
+    # <30% идёт как answer+caveat, а не как отказ.»
+    coverage_ratio: float | None = None
+    covered_claims: int = 0
     # Ответ по практике без регламента (§19.3).
     practice_only: bool = False
     # Минимальная уверенность OCR среди цитируемых источников (None — нет сканов).
@@ -116,6 +133,19 @@ class CaveatBuilder:
 def build_caveat(inp: CaveatInput) -> Caveat | None:
     """Собирает оговорку по §20.1. None — уверенность достаточная, оговорки нет."""
     b = CaveatBuilder()
+
+    # Покрыто столько мало утверждений, что ответ держится на одном-двух
+    # фрагментах из многих. Это не «нет ответа», но и не уверенный ответ:
+    # §20 требует оговорку, §20.5 — не превращать её в отказ.
+    if inp.coverage_ratio is not None and inp.coverage_ratio < WEAK_COVERAGE:
+        covered = inp.covered_claims or 0
+        b.add(
+            "weak_grounding",
+            f"подтверждена малая доля ответа: {covered} из {inp.total_claims} "
+            f"утверждений опираются на цитаты (доля {inp.coverage_ratio:.0%} "
+            f"при пороге {WEAK_COVERAGE:.0%}). Фрагменты по теме есть, но "
+            f"покрывают её частично — сверьте с документом целиком",
+        )
 
     if inp.mean_similarity is not None and inp.mean_similarity < CAVEAT_MIN_COVERAGE:
         b.add(

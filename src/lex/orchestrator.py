@@ -301,6 +301,52 @@ def _whole_text_report(base: GroundingReport, text: str) -> GroundingReport:
     return base
 
 
+def _keep_unverified(text: str, report: GroundingReport) -> str:
+    """Текст модели, который verify не подтвердил, — сохранить или отбросить.
+
+    F-3 / §20.5: «сначала оговорка, отказ — последнее средство». Если модели
+    есть что сказать по фрагментам (сколько-нибудь связный текст), человеку
+    полезнее ответ с оговоркой high, чем пустота. Но не любой ценой:
+
+      * пустой текст — отдавать нечего;
+      * одни обрывки (все утверждения неполные) — половина нормы без точки,
+        такое показывать нельзя;
+      * ничего, кроме служебных заголовков, — тоже не ответ.
+
+    Возвращает текст для ответа или "" — тогда verify отказывает как раньше.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    claims = list(getattr(report, "claims", []) or [])
+    if claims and all(not getattr(c, "complete", True) for c in claims):
+        return ""
+    letters = sum(1 for ch in text if ch.isalpha())
+    if letters < 24:
+        return ""
+    return text
+
+
+def _trim_incomplete(text: str, report: GroundingReport) -> str:
+    """Отрезать оборванный хвост, сохранив всё остальное.
+
+    ``covered_text`` для неподтверждённого ответа не годится: там ноль
+    покрытых утверждений, и он вернёт пустоту. Здесь цель другая — убрать
+    только последнее незаконченное предложение, если оно случайно оказалось
+    в конце (модель упёрлась в лимит).
+    """
+    text = (text or "").strip()
+    claims = list(getattr(report, "claims", []) or [])
+    if not claims or not text:
+        return text
+    tail = getattr(claims[-1], "complete", True)
+    if tail:
+        return text
+    body = text[:text.rfind(claims[-1].text)] if claims[-1].text in text else text
+    body = body.strip()
+    return body if sum(1 for ch in body if ch.isalpha()) >= 24 else text
+
+
 def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None,
           total: int | None = None) -> StepEvent:
     return StepEvent(
@@ -1023,16 +1069,29 @@ class Orchestrator:
                 state["grounding"] = report
 
         if report.nothing_covered:
-            # §18.1: тема наша, ответа нет — агент сам создаёт тикет.
-            ticket_id = self._open_ticket(state, "not_in_corpus")
-            state["final"] = ("refusal", RefusalData(
-                reason="Модель не опиралась на базу знаний: ни одно утверждение не подтверждено цитатой",
-                sources=[f.doc_id for f in frames],
-                kind="not_in_corpus",
-                searched=self._searched(state),
-                hint=self._refusal_hint(ticket_id),
-            ))
-            return _step(n, "verify", report.detail(), self._t0, color="amber", total=self._total())
+            kept = _keep_unverified(text, report)
+            if kept:
+                # F-3 / §20.5: модели есть что сказать, но ни одно утверждение
+                # не подтверждено цитатой. Раньше это был отказ «модель не
+                # опиралась на базу». Владелец 27.11.2026: «Если LLM дал
+                # ответ, но verify его срезал — не уходить в clarify, а
+                # отдавать с оговоркой». Отказ остался только там, где от
+                # ответа нечего взять: пустой текст или одни обрывки.
+                state["answer_text"] = kept
+                text = kept
+                state["unverified_kept"] = True
+            else:
+                # §18.1: тема наша, ответа нет — агент сам создаёт тикет.
+                ticket_id = self._open_ticket(state, "not_in_corpus")
+                state["final"] = ("refusal", RefusalData(
+                    reason="Модель не опиралась на базу знаний: ни одно утверждение не подтверждено цитатой",
+                    sources=[f.doc_id for f in frames],
+                    kind="not_in_corpus",
+                    searched=self._searched(state),
+                    hint=self._refusal_hint(ticket_id),
+                ))
+                return _step(n, "verify", report.detail(), self._t0,
+                             color="amber", total=self._total())
 
         # Барьер 3: усекаем до покрытых ЗАКОНЧЕННЫХ фраз — и отдаём усечённый
         # ответ. Раньше здесь стоял return без state["final"], и каскад
@@ -1045,7 +1104,14 @@ class Orchestrator:
         # человеку («пяти рабочих дней [2]» без точки).
         truncated = report.external
         dropped = report.incomplete
-        if truncated or dropped:
+        if state.get("unverified_kept"):
+            # Усекать нечем: covered_text() при нулевой опоре вернёт пустоту и
+            # съест ответ, который мы только что решили сохранить. Отрезаем
+            # только оборванный хвост, если он есть.
+            text = _trim_incomplete(text, report)
+            state["answer_text"] = text
+            truncated, dropped = 0, 0
+        elif truncated or dropped:
             state["answer_text"] = report.covered_text()
             text = state["answer_text"]
 
@@ -1131,12 +1197,17 @@ class Orchestrator:
                 min_ocr = c.ocr_confidence if min_ocr is None else min(min_ocr, c.ocr_confidence)
 
         current, nxt = self._editions_around(state)
+        ratio = None
+        if report.total > 0:
+            ratio = round(report.covered / report.total, 4)
         return caveat_mod.build_caveat(caveat_mod.CaveatInput(
             mean_similarity=conf,
             similarity_checked=report.similarity_checked,
             sources=sources,
             dropped=report.external,
             total_claims=report.total,
+            coverage_ratio=ratio,
+            covered_claims=report.covered,
             practice_only=practice_only,
             min_ocr=min_ocr,
             current_edition=current,
