@@ -20,6 +20,8 @@
   --link: #3366cc;
   --link-visited: #795cb2;
   --danger: #d73333;
+  /* фон «красной» подложки: отказ и конфликт (§20 — честность, а не ошибка) */
+  --danger-bg: #fdf2f2;
   --success: #14866d;
 
   /* шаги консоли: приглушённые тона, не неон */
@@ -70,6 +72,7 @@ html[data-theme="dark"] {
   --link: #6e9bf0;
   --link-visited: #a48ad8;
   --danger: #e26a6a;
+  --danger-bg: #2c1a1c;
   --success: #3fb8a0;
 
   --s-slate: #a2a9b1;
@@ -676,10 +679,8 @@ html[data-theme="dark"] .sk__line {
   border-radius: var(--radius);
   padding: 12px 14px;
   margin: 0 0 16px;
-  background: #fdf2f2;
+  background: var(--danger-bg);
 }
-
-html[data-theme="dark"] .refusal { background: #2c1a1c; }
 
 .refusal__head {
   display: flex;
@@ -1303,10 +1304,9 @@ html[data-theme="dark"] .form__warn { background: #3a2c14; color: #e8c98a; }
 
 .sug { border-radius: var(--radius); padding: 9px 11px; display: grid; gap: 5px; }
 .sug--missing { border: 1px solid var(--s-amber); background: #fef6e7; }
-.sug--conflict { border: 1px solid var(--danger); background: #fdf2f2; }
+.sug--conflict { border: 1px solid var(--danger); background: var(--danger-bg); }
 
 html[data-theme="dark"] .sug--missing { background: #3a2c14; }
-html[data-theme="dark"] .sug--conflict { background: #2c1a1c; }
 
 .sug__title { margin: 0; font-weight: 700; font-size: 12.5px; }
 .sug--missing .sug__title { color: #7a4b00; }
@@ -1320,13 +1320,15 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 
 .draftcard__done { display: grid; gap: 8px; justify-items: start; }
 
-/* карточка тикета в чате */
+/* Карточка заявки: экраны tickets и escalate.
+   Белая подложка, серая рамка, красная полоса слева — заявка это честность,
+   а не ошибка (§20). Все цвета — из токенов :root. */
 .ticketcard {
+  background: var(--page);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--s-amber);
+  border-left: 3px solid var(--danger);
   border-radius: var(--radius);
-  background: var(--panel);
-  padding: 11px 13px;
+  padding: 14px;
   margin: 0 0 14px;
   display: grid;
   gap: 5px;
@@ -1339,12 +1341,34 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
   border-radius: 2px;
   font-size: 11px;
 }
-.ticketcard__badge--danger { border-color: var(--danger); color: var(--danger); }
+/* Статус заявки: «открыт» — не ошибка (янтарный), «решён» — зелёный.
+   Разметка зовёт тон бейджа ticketcard__badge--<тон> (app.js, TICKET_STATUS_TONE),
+   поэтому «открыт» приходит как --danger: по ТЗ он янтарный. */
+.ticketcard__badge--danger { border-color: var(--s-amber); color: var(--s-amber); }
 .ticketcard__badge--amber { border-color: var(--s-amber); color: var(--s-amber); }
 .ticketcard__badge--ok { border-color: var(--success); color: var(--success); }
 .ticketcard__badge--muted { border-color: var(--border-soft); color: var(--text-3); }
 
-.ticketcard__id { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+/* статус по имени — как в ТЗ */
+.ticketcard__status--open { color: var(--s-amber); }
+.ticketcard__status--resolved { color: var(--success); }
+
+/* номер заявки: моноширинный синий */
+.ticketcard__id {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--link);
+}
+
+/* Номер заявки в карточке, которую рисует renderTicketCard: разметка кладёт
+   его в .lettercard__meta (dd с кнопкой «Скопировать»). Пока класс
+   .ticketcard__id в разметку не вернулся — красим тот же элемент. */
+.lettercard__meta dd:has(.lettercard__copy) {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--link);
+}
 .ticketcard__by { margin-left: auto; font-size: 11px; color: var(--text-3); }
 .ticketcard__line { margin: 0; font-size: 13px; }
 .ticketcard__reason { margin: 0; font-size: 12.5px; color: var(--text-2); }
@@ -1512,17 +1536,21 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 
 /* ------------------------------------------------------------ §20 оговорка */
 
+/* Оговорка: янтарная полоса слева и тёплая подложка — честность про
+   уверенность, а не ошибка (§20). Все цвета — из токенов :root. */
 .caveat {
   margin-top: 10px;
   padding: 9px 12px 10px;
-  border: 1px solid var(--cav-low);
-  border-left-width: 3px;
+  border: 1px solid var(--cav-medium);
+  border-left: 3px solid var(--cav-medium);
   border-radius: var(--radius);
-  background: var(--cav-low-bg);
+  background: var(--cav-medium-bg);
   display: grid;
   gap: 4px;
 }
 
+/* тихий уровень остаётся тихим: серый, а не янтарный */
+.caveat--low { border-color: var(--cav-low); border-left-color: var(--cav-low); background: var(--cav-low-bg); }
 .caveat--medium { border-color: var(--cav-medium); background: var(--cav-medium-bg); }
 .caveat--high { border-color: var(--cav-high); background: var(--cav-high-bg); }
 
@@ -1536,6 +1564,13 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 }
 .caveat--medium .caveat__head { color: var(--cav-medium); }
 .caveat--high .caveat__head { color: var(--cav-high); }
+
+/* Заголовок оговорки: янтарный и жирный. В разметке сегодня заголовок —
+   это .caveat__head (app.js), он наследует цвет уровня; класс .caveat__title
+   — на случай, если он вернётся в разметку. */
+.caveat__title { color: var(--cav-medium); font-weight: 700; }
+.caveat--low .caveat__title { color: var(--cav-low); }
+.caveat--high .caveat__title { color: var(--cav-high); }
 
 .caveat__icon { font-size: 13px; line-height: 1; }
 
@@ -1599,13 +1634,16 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 
 /* ------------------------------------------------------------ §22 письмо */
 
+/* Карточка письма-заявки. Сегодня renderTicketCard кладёт сюда карточку
+   заявки (app.js), поэтому вид — как у .ticketcard: белая подложка, серая
+   рамка, красная полоса слева, поля 14px. */
 .lettercard {
   margin: 14px 0;
+  background: var(--page);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--link);
+  border-left: 3px solid var(--danger);
   border-radius: var(--radius);
-  background: var(--panel);
-  padding: 11px 13px 12px;
+  padding: 14px;
   display: grid;
   gap: 7px;
   animation: mailFly 250ms var(--ease) both;
