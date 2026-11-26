@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Ответ по регламенту">
+  <path d="M15 8.75h23l11 11V50a5 5 0 0 1-5 5H15a5 5 0 0 1-5-5V13.75a5 5 0 0 1 5-5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
+  <path d="M38 9v11h11M19 28h20M19 35h14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="43" cy="45" r="10" fill="white" stroke="currentColor" stroke-width="1.75"/>
+  <path d="m38.5 45 3 3 6-6.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Запрос в службу качества">
+  <rect x="9.75" y="14.75" width="44.5" height="34.5" rx="3" stroke="currentColor" stroke-width="1.75"/>
+  <path d="m11 17 21 17 21-17M11 47l14-12m28 12L39 35" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="47" cy="43" r="10" fill="white" stroke="currentColor" stroke-width="1.75"/>
+  <path d="M47 37v6m0 4v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+</svg>

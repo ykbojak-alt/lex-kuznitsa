@@ -205,6 +205,8 @@ def _doc_lines() -> dict[str, str]:
 def _question_lines(question: str) -> list[str]:
     text = (question or "").lower()
     return [line for line, needles in (
+        ("пресейл", ("пресейл",)),
+        ("проектная деятельность", ("проектная деятельность", "проектного", "проекту")),
         ("закупки", ("закупк", "заявк", "поставщ")),
         ("лицензирование", ("лиценз", "продукт x", "сертиф")),
         ("качество", ("качеств", "проверк", "приёмк", "брак")),
@@ -368,7 +370,16 @@ def stats(path: str | Path | None = None, *, recompute: bool = False,
         docs = [str(x) for x in (e.get("doc_ids") or [])]
         for d in docs:
             sources[d] += 1
-            line_counts[doc_lines.get(d, "общее")] += 1
+        # Направление из записи (его пишет policy), иначе из doc_id, иначе из вопроса.
+        own_line = str(e.get("business_line") or "").strip()
+        if own_line:
+            line_counts[own_line] += 1
+        elif docs:
+            for d in docs:
+                line_counts[doc_lines.get(d, "общее")] += 1
+        else:
+            for line in _question_lines(str(e.get("question") or "")):
+                line_counts[line] += 1
         if e.get("refused"):
             reasons[str(e.get("refusal_kind") or "not_in_corpus")] += 1
             topic = str(e.get("topic") or e.get("refusal_topic") or e.get("question") or "")[:120]

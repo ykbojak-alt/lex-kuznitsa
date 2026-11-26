@@ -58,8 +58,9 @@ async def lifespan(app: FastAPI):
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     try:
-        tok = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        _kw = {"local_files_only": True} if (os.path.isabs(model_path) and os.path.isdir(model_path)) else {}
+        tok = AutoTokenizer.from_pretrained(model_path, **_kw)
+        model = AutoModelForSequenceClassification.from_pretrained(model_path, **_kw)
         model.eval()
         model.to("cpu")
     except Exception as e:

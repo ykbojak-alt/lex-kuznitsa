@@ -1,0 +1,12 @@
+[Unit]
+Description=Check LEX stand health every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Persistent=true
+Unit=lex-watchdog.service
+
+[Install]
+WantedBy=timers.target

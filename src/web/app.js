@@ -973,6 +973,31 @@
     return card;
   }
 
+  /* Экономика: всё считает /api/stats, UI только показывает его числа. */
+  function renderEconomyBlock(host, tu) {
+    host.appendChild(el('h3', 'detail-h', 'Экономика · расход токенов'));
+    if (!tu || tu.empty) {
+      host.appendChild(el('p', 'section-sub', (tu && tu.hint)
+        ? tu.hint : 'Недостаточно записей с данными о токенах — пустое состояние, а не нули.'));
+      return;
+    }
+    var t = el('table', 'wikitable');
+    function row(label, value) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, label));
+      tr.appendChild(el('td', 'num', value === null || value === undefined ? '— (пока не измерялось)' : String(value)));
+      t.appendChild(tr);
+    }
+    row('Prompt-токенов', tu.prompt_tokens);
+    row('Completion-токенов', tu.completion_tokens);
+    row('Всего токенов', tu.total_tokens);
+    row('Среднее на запрос', tu.avg_total_per_request);
+    row('p95 на запрос', tu.p95_total_per_request);
+    row('LLM-вызовов', tu.llm_calls);
+    row('Оценочная стоимость', tu.cost_estimate);
+    host.appendChild(t);
+  }
+
   /* «Здоровье системы» — что работает прямо сейчас, из GET /api/health. */
   function renderHealthBlock(host, h) {
     host.appendChild(el('h3', 'detail-h', 'Здоровье системы'));
@@ -985,7 +1010,9 @@
       ['Rerank', (rr.model || '—') + ' · ' + (rr.reachable ? 'доступен' : 'недоступен')],
       ['Корпус', (corp.documents != null ? corp.documents : '—') + ' документов / '
         + (corp.chunks != null ? corp.chunks : '—') + ' чанков'],
-      ['Индекс пересчитан', indexed || '— (пока не измерялось)']
+      ['Размер индекса', corp.index_bytes || corp.index_size || '— (пока не измерялось)'],
+      ['Индекс пересчитан', indexed || '— (пока не измерялось)'],
+      ['Последний запрос', (state.juryStats && state.juryStats.last_request_ts) || '— (пока не измерялось)']
     ];
     var t = el('table', 'wikitable');
     for (var i = 0; i < rows.length; i++) {
@@ -1106,6 +1133,13 @@
     host.appendChild(el('h2', 'section-title', 'Аналитика'));
     host.appendChild(el('p', 'section-sub',
       'Считается по журналу запросов (контракт §2, /api/analytics). В мок-режиме данные демонстрационные.'));
+    var refresh = el('button', 'btn btn--small', 'Обновить');
+    refresh.type = 'button';
+    refresh.addEventListener('click', function () {
+      state.juryStats = null; state.health = null; state.stats = null;
+      renderStatsScreen();
+    });
+    host.appendChild(refresh);
     if (!state.mock && !state.juryStats) {
       fetch('api/stats').then(function (r) {
         if (!r.ok) throw new Error('stats ' + r.status);
@@ -1127,7 +1161,10 @@
         renderStatsScreen();
       }).catch(function () {});
     }
-    if (!state.mock && state.juryStats) renderJuryStats(host, state.juryStats);
+    if (!state.mock && state.juryStats) {
+      renderJuryStats(host, state.juryStats);
+      renderEconomyBlock(host, state.juryStats.token_usage);
+    }
     if (!state.mock && state.health) renderHealthBlock(host, state.health);
     var table = el('table', 'wikitable');
     var head = el('tr');

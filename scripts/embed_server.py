@@ -64,7 +64,44 @@ async def lifespan(app: FastAPI):
     from sentence_transformers import SentenceTransformer
 
     try:
-        m = SentenceTransformer(model_path, device="cpu")
+        if os.path.isabs(model_path) and os.path.isdir(model_path):
+            # Локальный каталог: ST 2.x/3.x валидирует путь как HF repo_id
+            # и падает. Обходим через transformers напрямую + pooling.
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+            model = AutoModel.from_pretrained(model_path, local_files_only=True)
+            model.eval()
+
+            class _LocalEmbedder:
+                """Мини-обёртка: encode как у SentenceTransformer, но на AutoModel."""
+                def __init__(self, model, tokenizer, dim=1024):
+                    self.model = model
+                    self.tokenizer = tokenizer
+                    self.dim = dim
+                def get_sentence_embedding_dimension(self):
+                    return self.dim
+                def encode(self, texts, normalize_embeddings=True, batch_size=16,
+                          show_progress_bar=False, convert_to_numpy=True, **_):
+                    out = []
+                    for i in range(0, len(texts), batch_size):
+                        batch = texts[i:i+batch_size]
+                        enc = self.tokenizer(batch, padding=True, truncation=True,
+                                             max_length=512, return_tensors="pt")
+                        with torch.no_grad():
+                            res = self.model(**enc)
+                            # mean pooling
+                            mask = enc["attention_mask"].unsqueeze(-1).float()
+                            pooled = (res.last_hidden_state * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+                        if normalize_embeddings:
+                            pooled = torch.nn.functional.normalize(pooled, dim=1)
+                        out.append(pooled.numpy())
+                    return np.vstack(out) if len(out) > 1 else out[0]
+
+            m = _LocalEmbedder(model, tokenizer, dim=1024)
+        else:
+            from sentence_transformers import SentenceTransformer
+            m = SentenceTransformer(model_path, device="cpu")
     except Exception as e:
         log.error("не удалось загрузить модель: %s", e)
         raise

@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 120" color="#202122" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="empty-title">
-  <title id="empty-title">Ничего не найдено</title>
-  <path d="M30 15h46l15 15v50H30z"/>
-  <path d="M76 15v15h15M40 42h31M40 51h22M40 60h17" stroke="#54595d"/>
-  <path d="M40 69h11" stroke="#3366cc"/>
-  <circle cx="99" cy="75" r="17" fill="#fff"/>
-  <path d="m111 87 16 16" stroke="#202122" stroke-width="1.6"/>
-  <path d="M94 75h10" stroke="#a2a9b1"/>
-  <path d="M26 101h61" stroke="#a2a9b1"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Пустое состояние поиска</title>
+  <desc id="desc">Документ и лупа. Задайте вопрос по регламентам компании.</desc>
+  <path d="M104 25h69l28 28v62a8 8 0 0 1-8 8h-89a8 8 0 0 1-8-8V33a8 8 0 0 1 8-8Z" fill="#f8f9fa" stroke="#a2a9b1" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M173 26v28h28M121 69h54m-54 12h44m-44 12h35" stroke="#54595d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="195" cy="105" r="24" fill="#fff" stroke="#3366cc" stroke-width="2"/>
+  <path d="m212 122 17 17" stroke="#3366cc" stroke-width="3" stroke-linecap="round"/>
+  <path d="M160 163h.1" stroke="#a2a9b1" stroke-width="2" stroke-linecap="round"/>
+  <text x="160" y="183" text-anchor="middle" fill="#54595d" font-family="system-ui, sans-serif" font-size="12">Задайте вопрос по регламентам компании</text>
 </svg>

@@ -11,7 +11,12 @@
 (function (global) {
   'use strict';
 
-  var ROW_H = 42;
+  /* Высота строки: .step = padding 6+6 + border-bottom 1 + две строки текста
+     (.step__key 12px*1.45≈17 + gap 1 + .step__val 11.5px*1.45≈17) ≈ 48px.
+     Было 42 — распорки недосчитывали 6px на строку, и при десятке шагов
+     прокрутка уезжала. Оценка снизу: лучше чуть переоценить, чем недосчитать,
+     потому что заниженный padBottom обрезает низ списка. */
+  var ROW_H = 48;
   var OVERSCAN = 6;
   /* Высота строки метрик релевантности. В CSS это .step__relevance:
      height 18px + margin-top 3px. Держим в константе, чтобы прокрутка
@@ -141,6 +146,7 @@
     this.statusNode = statusNode;
     this.steps = [];
     this.paramsNode = null;
+    this._newIndex = -1;
 
     this.vlist = el('div', 'vlist');
     this.padTop = el('div', 'vlist__pad');
@@ -185,7 +191,11 @@
   ConsoleView.prototype.push = function (step) {
     this.renderEmpty(false);
     this.steps.push(step);
+    /* Индекс только что добавленной строки: renderWindow навесит на неё
+       step--new, и анимация появления сыграет один раз, а не у всего окна. */
+    this._newIndex = this.steps.length - 1;
     this.renderWindow();
+    this._newIndex = -1;
     this.updateMeta();
     var nearBottom = this.body.scrollTop + this.body.clientHeight >= this.body.scrollHeight - ROW_H * 2;
     if (nearBottom) {
@@ -250,7 +260,9 @@
 
     this.windowNode.textContent = '';
     for (var i = first; i < last; i++) {
-      this.windowNode.appendChild(rowNode(this.steps[i], i === total - 1));
+      var node = rowNode(this.steps[i], i === total - 1);
+      if (i === this._newIndex) node.className += ' step--new';
+      this.windowNode.appendChild(node);
     }
   };
 

@@ -18,7 +18,7 @@ load_dotenv(ROOT / ".env")
 
 VERSION = "1.14.0"
 
-CORPUS_DIR = Path(os.environ.get("LEX_CORPUS_DIR") or (ROOT / "sample-corpus"))
+CORPUS_DIR = Path(os.environ.get("LEX_CORPUS_DIR") or (ROOT / "corpus-real"))
 VAR_DIR = Path(os.environ.get("LEX_VAR_DIR") or (ROOT / "var"))
 STATIC_DIR = Path(os.environ.get("LEX_STATIC_DIR")
                   or (Path(__file__).resolve().parent / "static"))

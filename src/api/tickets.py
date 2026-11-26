@@ -488,6 +488,11 @@ def _auto_case_payload(row: dict, kind: str) -> dict:
     if kind == "esc":
         # сама заявка и есть эскалация: её номер и есть escalation_id
         escalation_id = escalation_id or str(row.get("id") or "")
+    # ticket_id обязателен только у настоящей заявки очереди СК (LEX-...).
+    # У эскалации esc-NNNN номер — это escalation_id, отдельного тикета может
+    # и не быть; тогда кейс всё равно пишется, но метрика «тикет -> кейс»
+    # его не считает (нет created_at тикета).
+    ticket_id = str(row.get("id") or "") if kind == "tk" else ""
     return {
         "question": str(row.get("question") or "").strip(),
         "answer_in_practice": answer,
@@ -498,8 +503,10 @@ def _auto_case_payload(row: dict, kind: str) -> dict:
         "tags": _tags_from(row),
         "rule_key": _rule_key_from_text(answer),
         "content_type": "text",
-        "source": "escalation" if escalation_id else "ticket",
+        "source": "quality_ticket" if ticket_id else "escalation",
         "escalation_id": escalation_id,
+        "ticket_id": ticket_id,
+        "approved_at": str(row.get("answered_at") or ""),
     }
 
 
@@ -565,6 +572,10 @@ def confirm_ticket(tid: str, payload: dict) -> dict:
     case["source"] = "escalation"
     case["escalation_id"] = row.get("escalation_id") or ""
     case["ticket"] = tid
+    # §16.3: метрика «тикет -> кейс» считается по этим двум полям, поэтому
+    # кейс, подтверждённый вручную, тоже обязан их нести.
+    case["ticket_id"] = tid
+    case["approved_at"] = row.get("answered_at") or _now()
 
     # Один кейс — одна заявка: если кейс уже создан автоматически при
     # ответе службы качества, второй не создаём.

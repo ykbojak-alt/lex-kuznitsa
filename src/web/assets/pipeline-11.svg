@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 160" role="img" aria-labelledby="title desc">
+  <title id="title">Конвейер обработки вопроса</title>
+  <desc id="desc">Одиннадцать шагов от приёма вопроса до проверки ответа.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 7 4 1 7" fill="none" stroke="#a2a9b1" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <g fill="none" stroke="#a2a9b1" stroke-width="1.4" marker-end="url(#arrow)">
+    <path d="M78 46h28M187 46h28M296 46h28M405 46h28M514 46h28M623 46h28M732 46h28M841 46h28M950 46h28M1059 46h28"/>
+  </g>
+  <g font-family="system-ui, sans-serif" font-size="11" text-anchor="middle">
+    <g style="color:#54595d" fill="currentColor" stroke="currentColor"><circle cx="50" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="50" y="50" fill="currentColor" stroke="none">1</text><text x="50" y="91" fill="#202122" stroke="none">Приём</text></g>
+    <g style="color:var(--s-pink, #54595d)" fill="currentColor" stroke="currentColor"><circle cx="159" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="159" y="50" fill="currentColor" stroke="none">2</text><text x="159" y="91" fill="#202122" stroke="none">Компетенция</text></g>
+    <g style="color:#6b4ba1" fill="currentColor" stroke="currentColor"><circle cx="268" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="268" y="50" fill="currentColor" stroke="none">3</text><text x="268" y="91" fill="#202122" stroke="none">Разбор</text></g>
+    <g style="color:#4a5a8f" fill="currentColor" stroke="currentColor"><circle cx="377" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="377" y="50" fill="currentColor" stroke="none">4</text><text x="377" y="91" fill="#202122" stroke="none">Источники</text></g>
+    <g style="color:#2f6f7f" fill="currentColor" stroke="currentColor"><circle cx="486" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="486" y="50" fill="currentColor" stroke="none">5</text><text x="486" y="91" fill="#202122" stroke="none">Поиск</text></g>
+    <g style="color:#0f6b6b" fill="currentColor" stroke="currentColor"><circle cx="595" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="595" y="50" fill="currentColor" stroke="none">6</text><text x="595" y="91" fill="#202122" stroke="none">Кейсы</text></g>
+    <g style="color:#a66200" fill="currentColor" stroke="currentColor"><circle cx="704" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="704" y="50" fill="currentColor" stroke="none">7</text><text x="704" y="91" fill="#202122" stroke="none">Права</text></g>
+    <g style="color:#2b5fa8" fill="currentColor" stroke="currentColor"><circle cx="813" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="813" y="50" fill="currentColor" stroke="none">8</text><text x="813" y="91" fill="#202122" stroke="none">Редакция</text></g>
+    <g style="color:#b8404f" fill="currentColor" stroke="currentColor"><circle cx="922" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="922" y="50" fill="currentColor" stroke="none">9</text><text x="922" y="91" fill="#202122" stroke="none">Сопоставление</text></g>
+    <g style="color:#14866d" fill="currentColor" stroke="currentColor"><circle cx="1031" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="1031" y="50" fill="currentColor" stroke="none">10</text><text x="1031" y="91" fill="#202122" stroke="none">Сборка</text></g>
+    <g style="color:#14866d" fill="currentColor" stroke="currentColor"><circle cx="1140" cy="46" r="19" fill="#fff" stroke-width="1.7"/><text x="1140" y="50" fill="currentColor" stroke="none">11</text><text x="1140" y="91" fill="#202122" stroke="none">Проверка</text></g>
+  </g>
+</svg>

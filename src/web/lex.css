@@ -14,7 +14,12 @@
   --panel-hover: #eaecf0;
   --text: #202122;
   --text-2: #54595d;
-  --text-3: #72777d;
+  /* --text-3 держит 4.5:1 на ХУДШЕЙ поверхности, а не на белой: бейджи и
+     служебные подписи стоят и на --panel (#f8f9fa), и на --panel-hover
+     (#eaecf0) под курсором. Было #72777d: 4.52 на белом, но 3.82 на
+     --panel-hover — провал AA ровно там, где пользователь наводит мышь.
+     #666b70: 5.38 / 5.11 / 4.55. */
+  --text-3: #666b70;
   --border: #a2a9b1;
   --border-soft: #c8ccd1;
   --link: #3366cc;
@@ -75,7 +80,9 @@ html[data-theme="dark"] {
   --panel-hover: #232a31;
   --text: #eaecf0;
   --text-2: #a2a9b1;
-  --text-3: #7d858d;
+  /* То же правило в тёмной теме: было #7d858d — 4.94 на --page, но 3.88 на
+     --panel-hover. #8e969c: 6.16 / 5.53 / 4.83. */
+  --text-3: #8e969c;
   --border: #43464a;
   --border-soft: #33373b;
   --link: #6e9bf0;
@@ -230,6 +237,27 @@ a:visited { color: var(--link-visited); }
   color: #fff;
 }
 
+/* Фокус внутрь пункта. Общее правило (:focus-visible, outline-offset: 1px)
+   рисует кольцо СНАРУЖИ, а .nav — скроллящийся контейнер (overflow-y: auto):
+   внешнее кольцо обрезается по его краю, и у пунктов, прижатых к границе,
+   фокус становится невидимым. Отрицательный offset держит кольцо внутри
+   прямоугольника пункта. */
+.nav__item:focus-visible {
+  outline-offset: -3px;
+  /* Кольцо --link на заливке --link не видно: активный пункт залит тем же
+     цветом. currentColor даёт видимую рамку на любом фоне пункта. */
+  outline-color: currentColor;
+}
+
+/* Тёмная тема: заливка активного пункта — --link тёмной темы (#6e9bf0,
+   бледный), и белый текст на нём даёт 2.76:1 при норме 4.5. В светлой теме
+   то же правило работало (белый на #3366cc = 5.37), а при переходе на
+   светлый синий перестало. Текст красим в --page (#101418): 6.70:1,
+   hover --s-blue #8ab4f0 — 8.69:1. Кольцо фокуса при этом становится
+   видимым само собой: currentColor следует за цветом текста. */
+html[data-theme="dark"] .nav__item[aria-current="page"] { color: var(--page); }
+html[data-theme="dark"] .nav__item[aria-current="page"]:hover { color: var(--page); }
+
 .nav__count {
   color: var(--text-3);
   font-size: 11.5px;
@@ -282,6 +310,10 @@ a:visited { color: var(--link-visited); }
 
 .tab:hover { text-decoration: underline; }
 
+/* Фокус внутрь. Вкладки прижаты к верхней кромке .work (overflow: hidden) и к
+   границе .tabs, поэтому внешнее кольцо срезается сверху и по краям. */
+.tab:focus-visible { outline-offset: -2px; }
+
 /* Активный таб: подчёркивание 3px в цвет ссылки. Было 2px — спецификация
    просит 3px; margin-bottom компенсирует, чтобы линия легла на границу. */
 .tab[aria-selected="true"] {
@@ -297,7 +329,7 @@ a:visited { color: var(--link-visited); }
   padding: 1px 5px;
   border: 1px solid var(--border);
   border-radius: 2px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-2);
   vertical-align: 1px;
 }
@@ -443,6 +475,10 @@ a:visited { color: var(--link-visited); }
   padding: 0 1px;
   cursor: pointer;
 }
+/* Сноска кликабельна, но выглядела как обычный текст курса: наведение и фокус
+   не давали никакого отклика — пользователь не знал, что это ссылка. */
+.fn:hover { text-decoration: underline; }
+.fn:focus-visible { outline-offset: 1px; }
 
 /* блок источников — как примечания в Википедии */
 .refs {
@@ -491,7 +527,7 @@ a:visited { color: var(--link-visited); }
 
 .ref__type {
   display: inline-block;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
   border: 1px solid var(--border);
@@ -505,7 +541,7 @@ a:visited { color: var(--link-visited); }
 .ref__type--mixed { border-color: var(--s-indigo); color: var(--s-indigo); }
 
 .ref__line {
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
   border: 1px solid var(--border-soft);
@@ -952,9 +988,15 @@ html[data-theme="dark"] .asof input { color-scheme: dark; }
   gap: 1px 6px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-soft);
-  animation: fadein 170ms ease both;
+  /* Анимация появления — ТОЛЬКО у новой строки. Виртуализация пересоздаёт
+     все строки окна на каждый push; если анимация висит на .step, она
+     переигрывается у всего окна (translateY 3px + opacity 0), и лента
+     дрожит на каждом шаге. Класс step--new ставит console-view.js только
+     той строке, которая добавилась сейчас. */
   transition: background var(--t) ease, opacity var(--t) ease;
 }
+
+.step--new { animation: fadein 170ms ease both; }
 
 .step:last-child { border-bottom: 0; }
 .step--old { opacity: 0.62; }
@@ -998,7 +1040,7 @@ html[data-theme="dark"] .step__icon { filter: invert(0.86); }
   word-break: break-word;
 }
 
-.step__ms { color: var(--text-3); font-size: 10.5px; white-space: nowrap; }
+.step__ms { color: var(--text-3); font-size: 11px; white-space: nowrap; }
 
 /* §12.8: метрики релевантности поиска — пилюлями под detail шага.
    Два числа, по которым видно работу проверки: покрытие предмета вопроса и
@@ -1301,7 +1343,7 @@ html[data-theme="dark"] .form__warn { background: #3a2c14; color: #e8c98a; }
   border: 1px solid var(--danger);
   border-radius: 2px;
   color: var(--danger);
-  font-size: 10.5px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -1856,6 +1898,9 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 .stat--ok .stat__value, #screen-stats .rate--answered .rate__num { color: var(--success); }
 .stat--warn .stat__value, #screen-stats .rate--caveated .rate__num { color: var(--s-amber); }
 
+/* Таймлайн ответов: SVG-спарклайн без библиотек */
+.sparkline { display: block; width: 100%; height: 60px; margin: 6px 0 12px; }
+
 .lettercard__meta { margin: 2px 0 0; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 10px; }
 .lettercard__meta dt { font-size: 11.5px; color: var(--text-2); }
 .lettercard__meta dd { margin: 0; font-size: 12.5px; color: var(--text); word-break: break-word; }
@@ -1918,6 +1963,8 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 }
 .feed__todown[hidden] { display: none; }
 .feed__todown:hover { background: var(--panel-hover); }
+/* Кнопка висит у правого края .feed; внешнее кольцо срезалось бы по его краю. */
+.feed__todown:focus-visible { outline-offset: -2px; }
 
 /* скелетоны вместо пустого места */
 .sk__line {
@@ -1956,6 +2003,11 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 }
 .console__toggle::after { content: '⌄'; margin-left: auto; font-size: 14px; color: var(--text-2); }
 .console.is-collapsed .console__toggle::after { content: '⌃'; }
+/* Переключатель консоли — панель во всю ширину, единственный элемент без
+   отклика на наведение и фокус. Стрелка ⌄/⌃ подсказывает состояние лишь
+   после того, как её заметят; подсветка делает кнопку кнопкой. */
+.console__toggle:hover { background: var(--panel-hover); }
+.console__toggle:focus-visible { outline-offset: -3px; }
 
 @media (max-width: 940px) {
   .console__toggle { display: flex; }
