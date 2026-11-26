@@ -977,4 +977,11 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Windows-консоль по умолчанию cp1251: кириллица в сводке превращается
+    # в кракозябры (а при строгом режиме — в UnicodeEncodeError).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     raise SystemExit(main())

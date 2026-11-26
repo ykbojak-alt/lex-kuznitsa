@@ -107,43 +107,50 @@ else
 fi
 
 # --- 4. Модель ---------------------------------------------------------------
+# MODEL_KEY_NAME — имя переменной (его и печатаем), MODEL_KEY — значение
+# (только в заголовок, никогда в вывод). Раньше они жили в одной переменной,
+# и проверка «ключ задан (переменная $k)» печатала сам токен в консоль.
+MODEL_KEY_NAME=""
 MODEL_KEY=""
 MODEL_BASE=""
 MODEL_NAME=""
-for k in MODEL_API_KEY LLM_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+# Порядок = приоритет. NEXUSLINK_* идёт первым: это наш основной путь
+# (sage-pl), и demo/run-local.sh читает ровно эти имена. Пока списки
+# расходились, preflight ругался «ключ не задан» на рабочем окружении.
+for k in NEXUSLINK_KEY MODEL_API_KEY LLM_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
   eval "v=\${$k:-}"
-  if [ -n "$v" ] && [ -z "$MODEL_KEY" ]; then
-    MODEL_KEY="$k"
-    eval "MODEL_KEY=\${$k}"
+  if [ -n "$v" ] && [ -z "$MODEL_KEY_NAME" ]; then
+    MODEL_KEY_NAME="$k"
+    MODEL_KEY="$v"
   fi
 done
-for k in MODEL_BASE_URL LLM_BASE_URL OPENAI_BASE_URL ANTHROPIC_BASE_URL; do
+for k in NEXUS_LINK_BASE_URL MODEL_BASE_URL LLM_BASE_URL OPENAI_BASE_URL ANTHROPIC_BASE_URL; do
   eval "v=\${$k:-}"
   if [ -n "$v" ] && [ -z "$MODEL_BASE" ]; then
     eval "MODEL_BASE=\${$k}"
   fi
 done
-for k in MODEL_NAME LLM_MODEL OPENAI_MODEL; do
+for k in NEXUS_LINK_MODEL MODEL_NAME LLM_MODEL OPENAI_MODEL; do
   eval "v=\${$k:-}"
   if [ -n "$v" ] && [ -z "$MODEL_NAME" ]; then
     eval "MODEL_NAME=\${$k}"
   fi
 done
 
-if [ -z "$MODEL_KEY" ]; then
-  warn "model" "не задана переменная с ключом модели (MODEL_API_KEY/LLM_API_KEY/...) — без неё RAG не поедет"
+if [ -z "$MODEL_KEY_NAME" ]; then
+  warn "model" "не задана переменная с ключом модели (NEXUSLINK_KEY/MODEL_API_KEY/...) — без неё RAG не поедет"
 else
-  ok "model" "ключ модели задан (переменная $MODEL_KEY, значение не выводится)"
+  ok "model" "ключ модели задан (переменная $MODEL_KEY_NAME, значение не выводится)"
 fi
 
 if [ -z "$MODEL_BASE" ]; then
-  warn "model-base" "не задан адрес провайдера модели (MODEL_BASE_URL/LLM_BASE_URL/...)"
+  warn "model-base" "не задан адрес провайдера модели (NEXUS_LINK_BASE_URL/MODEL_BASE_URL/...)"
 else
   ok "model-base" "адрес провайдера задан: $MODEL_BASE"
 fi
 
 if [ -z "$MODEL_NAME" ]; then
-  warn "model-name" "не задано имя модели (MODEL_NAME/LLM_MODEL/...)"
+  warn "model-name" "не задано имя модели (NEXUS_LINK_MODEL/MODEL_NAME/...)"
 else
   ok "model-name" "модель: $MODEL_NAME"
 fi
@@ -154,15 +161,37 @@ if [ "$PROBE_MODEL" = 1 ]; then
   elif ! command -v curl >/dev/null 2>&1; then
     warn "model-probe" "проба пропущена: нет curl"
   else
-    CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 \
-      ${MODEL_KEY:+-H "Authorization: Bearer $MODEL_KEY"} \
-      "${MODEL_BASE%/}/models" 2>/dev/null || echo "000")
+    # Ключ уходит заголовком через stdin (--config -), а не в argv: иначе он
+    # виден в списке процессов.
+    if [ -n "$MODEL_KEY" ]; then
+      CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$MODEL_KEY" \
+        | curl -s -o /dev/null -w '%{http_code}' --max-time 8 --config - \
+          "${MODEL_BASE%/}/models" 2>/dev/null || echo "000")
+    else
+      CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 \
+        "${MODEL_BASE%/}/models" 2>/dev/null || echo "000")
+    fi
     case "$CODE" in
-      200) ok "model-probe" "провайдер отвечает 200 на /models" ;;
+      200) ok "model-probe" "провайдер отвечает 200 на /models (все слоты live)" ;;
       401|403) fail "model-probe" "провайдер ответил $CODE — ключ отклонён" ;;
       000) warn "model-probe" "провайдер не ответил за 8 с (сеть или адрес)" ;;
       *) warn "model-probe" "провайдер ответил $CODE" ;;
     esac
+    # /models отвечает и без рабочего слота: на NexusLink 200 на /models
+    # не значит, что генерация пойдёт. Дёргаем настоящий чат — 1 токен,
+    # модель из окружения. Ловим ровно тот случай, который иначе всплыл бы
+    # на первом шаге RAG уже в спринте.
+    if [ -n "$MODEL_NAME" ] && [ "$CODE" = "200" ]; then
+      CHAT_BODY=$(printf '{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"ok"}]}' "$MODEL_NAME")
+      CHAT_CODE=$(printf 'header = "Authorization: Bearer %s"\nheader = "content-type: application/json"\n' "$MODEL_KEY" \
+        | curl -s -o /dev/null -w '%{http_code}' --max-time 25 --config - \
+          --data-binary "$CHAT_BODY" "${MODEL_BASE%/}/chat/completions" 2>/dev/null || echo "000")
+      case "$CHAT_CODE" in
+        200) ok "model-chat" "слот $MODEL_NAME генерирует (200 на /chat/completions)" ;;
+        000) warn "model-chat" "слот $MODEL_NAME не ответил за 25 с" ;;
+        *) warn "model-chat" "слот $MODEL_NAME ответил $CHAT_CODE на /chat/completions" ;;
+      esac
+    fi
   fi
 fi
 
@@ -251,6 +280,22 @@ PYEOF
   fi
 else
   warn "port" "не удалось проверить порт $PORT без Python"
+fi
+
+# --- 9. Корпус и вопросы -----------------------------------------------------
+if [ -f "$ROOT/sample-corpus/manifest.json" ]; then
+  if [ -f "$ROOT/sample-corpus/questions.jsonl" ]; then
+    Q_COUNT=$(grep -c '[^[:space:]]' "$ROOT/sample-corpus/questions.jsonl" 2>/dev/null || echo 0)
+    if [ "$Q_COUNT" -ge 1 ] 2>/dev/null; then
+      ok "corpus" "sample-corpus: manifest.json + $Q_COUNT вопросов"
+    else
+      warn "corpus" "questions.jsonl пуст — оценку не на чем строить"
+    fi
+  else
+    warn "corpus" "есть manifest.json, нет questions.jsonl"
+  fi
+else
+  warn "corpus" "нет sample-corpus/manifest.json — сгенерируйте: demo/gen-sample-corpus.py"
 fi
 
 # --- Итог ---------------------------------------------------------------------

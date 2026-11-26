@@ -214,13 +214,21 @@ fi
 step "Шаг 4/4: демо поиска (без инференса модели)"
 mkdir -p "$RUN_OUT"
 
-if ! "$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$NL_PATH_ID" <<'PYEOF'
+if ! PYTHONIOENCODING=utf-8 "$PY" - "$CORPUS_DIR" "$RUN_OUT" "$QUESTIONS" "$NL_PATH_ID" <<'PYEOF'
 import json
 import math
 import re
 import sys
 from collections import Counter
 from pathlib import Path
+
+# Windows-консоль по умолчанию cp1251: стрелка «→» в выводе роняла прогон
+# UnicodeEncodeError. PYTHONIOENCODING=utf-8 в вызове выше лечит консоль;
+# это — страховка на случай, если переменную всё же перебьют.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 corpus_dir, run_out, n_questions = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
 inference_path = sys.argv[4] if len(sys.argv) > 4 else "не определён"
