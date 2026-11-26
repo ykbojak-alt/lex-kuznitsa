@@ -177,6 +177,7 @@ def main() -> int:
             "subtype": "регламент",
             "department": meta["department"],
             "system": meta["business_line"],
+            "business_line": meta["business_line"],
             "owner": meta["department"],
             "version": "1",
             "issued": "",

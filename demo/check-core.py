@@ -29,7 +29,7 @@ from lex import policy
 from lex.cases import detect_deviation
 from lex.changes import ChangeRequestStore
 from lex.corpus import load_corpus
-from lex.grounding import check_grounding, extract_anchors
+from lex.grounding import check_grounding, extract_anchors, split_sentences
 from lex.models import STEP_ORDER
 from lex.orchestrator import Orchestrator, RunOptions
 from lex.policy import evaluate
@@ -131,6 +131,49 @@ def check_barriers() -> None:
     a1 = extract_anchors("пяти рабочих дней")
     a2 = extract_anchors("5 рабочих дней")
     check("§21 числительное словами = цифра", a1 == a2, f"{sorted(a1)}")
+
+    # Обрыв ответа: фраза без конца не должна попасть в усечённый текст.
+    from lex.grounding import is_complete_sentence
+
+    check("обрыв: «пяти рабочих дней [2]» без точки — не закончено",
+          not is_complete_sentence("пяти рабочих дней [2]"), "")
+    check("обрыв: «пять рабочих дней [1].» — закончено",
+          is_complete_sentence("Срок — пять рабочих дней [1]."), "")
+    r = check_grounding(
+        "Срок согласования — пять рабочих дней [1]. Редакция вступает 2026-06-01, и",
+        frag, embedder=None)
+    check("обрыв: усечение отбрасывает незаконченную фразу",
+          r.covered_text() == "Срок согласования — пять рабочих дней [1].",
+          repr(r.covered_text()))
+    # Фраза покрыта цитатой, но оборвана: external == 0, и раньше усечение не
+    # срабатывало вовсе — обрывок уходил человеку. Теперь виден в incomplete.
+    r = check_grounding("Срок согласования — пять рабочих дней [1], и", frag, embedder=None)
+    check("обрыв: покрытая оборванная фраза считается incomplete",
+          r.external == 0 and r.claims[0].covered and r.incomplete == 1,
+          f"external={r.external} covered={r.claims[0].covered} "
+          f"incomplete={r.incomplete}")
+
+    # Числительные основы ловили чужие слова: «дв» -> «дверь», «тр» -> «требования».
+    # Верное утверждение отбрасывалось на сверке якорей.
+    check("§21 «дверь» не даёт ложного числительного",
+          extract_anchors("дверь склада") == set(), str(extract_anchors("дверь склада")))
+    check("§21 «требования» не даёт ложного числительного",
+          extract_anchors("требования к срокам") == set(),
+          str(extract_anchors("требования к срокам")))
+    r = check_grounding("Дверь склада: три рабочих дня [1].", frag, embedder=None)
+    check("§21 верное утверждение с чужим словом не отбрасывается",
+          r.claims[0].covered, r.claims[0].reason)
+
+    # Составное числительное: «двести пятьдесят» — одно число, а не «200 50».
+    check("§21 составное числительное складывается",
+          extract_anchors("двести пятьдесят рабочих дней") == {"num:250:раб.дн"},
+          str(extract_anchors("двести пятьдесят рабочих дней")))
+
+    # Резчик рвал номер пункта: «п. 4 ч.1 ст.93» -> «п.» + «4 ч.1 ст.93».
+    # Первое уходило в связки, второе теряло ссылку — «покрыто 0» на верном ответе.
+    parts = split_sentences("Срок — п. 4 ч.1 ст.93 44-ФЗ.")
+    check("§21 номер пункта не рассекается на два «предложения»", len(parts) == 1,
+          repr(parts))
 
 
 # ------------------------------------------------------------- 4. оговорка

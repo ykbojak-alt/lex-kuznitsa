@@ -32,8 +32,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from . import access, detail, editions, llm, policy, rerank
 from . import caveat as caveat_mod
-from . import detail, editions, llm, policy, rerank
 from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
@@ -175,6 +175,17 @@ def _mean_similarity(report: GroundingReport) -> float | None:
     if not vals:
         return None
     return round(sum(vals) / len(vals), 4)
+
+
+def _plural_subs(n: int) -> str:
+    """§3: «1 подвопрос», «2-4 подвопроса», «5+ подвопросов» — без «1 подвопросов»."""
+    if n % 10 == 1 and n % 100 != 11:
+        word = "подвопрос"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "подвопроса"
+    else:
+        word = "подвопросов"
+    return f"{n} {word}"
 
 
 def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None) -> StepEvent:
@@ -396,9 +407,11 @@ class Orchestrator:
     def _stage_accept(self, n: int, state: dict) -> StepEvent | Signal:
         # §10: уточнение — не отказ. Но первый круг всегда проходит accept,
         # чтобы UI показал, что запрос понят.
-        as_of = self.opts.as_of.isoformat() if self.opts.as_of else "сегодня"
+        as_of = self.opts.as_of.isoformat() if self.opts.as_of else date.today().isoformat()
         state["as_of_label"] = as_of
-        return _step(n, "accept", f"роль {self.opts.role_id}, дата отсчёта {as_of}", self._t0)
+        role = access.get_role(self.opts.role_id)
+        role_title = (role or {}).get("title") or self.opts.role_id
+        return _step(n, "accept", f"роль {role_title}, дата отсчёта {as_of}", self._t0)
 
     def _stage_clarify(self, n: int, state: dict) -> Signal | None:
         """§10: хватает ли параметров для ответа.
@@ -500,8 +513,13 @@ class Orchestrator:
         subs = self._subquestions(self.opts.question)
         state["subquestions"] = subs
         state["line"] = line
-        det = (f"направление: {line} · " if line else "") + f"{len(subs)} подвопросов"
-        return _step(n, "decompose", det, self._t0)
+        parts = []
+        if line:
+            parts.append(f"направление: {line}")
+        parts.append(_plural_subs(len(subs)))
+        if len(subs) > 1:
+            parts.append(": " + "; ".join(subs))
+        return _step(n, "decompose", " · ".join(parts), self._t0)
 
     def _stage_inspect(self, n: int, state: dict) -> StepEvent:
         insp = inspect_corpus(self.opts.corpus_root)
@@ -518,9 +536,16 @@ class Orchestrator:
         doc_hits = [h for h in hits if getattr(h.chunk, "kind", "doc") == "doc"]
         # Документные хиты идут в реранк, кейсы — отдельной стадией (§8).
         ranked = self._rerank(self.opts.question, doc_hits)
-        bm_hits = len(doc_hits)
         state["doc_hits"] = ranked
-        detail = f"документов {bm_hits}"
+        # §3: жюри нужна не одна цифра, а путь: сколько дал каждый канал.
+        # BM25 и вектор считаются в index.search (RRF), флаг — в Hit.
+        bm_count = sum(1 for h in doc_hits if h.bm25 > 0)
+        vec_count = sum(1 for h in doc_hits if h.cosine != 0)
+        after = len(ranked)
+        detail = (f"BM25 {bm_count} · вектор {vec_count} → "
+                  f"кандидатов {len(doc_hits)} · после rerank {after}")
+        if after < len(doc_hits):
+            detail += f" · отсеяно {len(doc_hits) - after}"
         return _step(n, "retrieve", detail, self._t0)
 
     def _stage_cases(self, n: int, state: dict) -> StepEvent:
@@ -643,14 +668,34 @@ class Orchestrator:
             ))
             return _step(n, "verify", report.detail(), self._t0, color="amber")
 
-        # Барьер 3: усекаем до покрытых частей — и отдаём усечённый ответ.
-        # Раньше здесь стоял return без state["final"], и каскад завершался
-        # молчанием: 10 шагов, ноль ответа. Усечение — это всё ещё ответ,
-        # просто короче, поэтому дальше идёт обычная сборка AnswerData.
+        # Барьер 3: усекаем до покрытых ЗАКОНЧЕННЫХ фраз — и отдаём усечённый
+        # ответ. Раньше здесь стоял return без state["final"], и каскад
+        # завершался молчанием: 10 шагов, ноль ответа. Усечение — это всё ещё
+        # ответ, просто короче, поэтому дальше идёт обычная сборка AnswerData.
+        #
+        # Считаем не только «внешние» утверждения, но и оборванные: фраза
+        # может опираться на цитату и всё равно быть половинкой — если модель
+        # упёрлась в лимит. Раньше такой хвост проверку проходил и уходил
+        # человеку («пяти рабочих дней [2]» без точки).
         truncated = report.external
-        if truncated:
+        dropped = report.incomplete
+        if truncated or dropped:
             state["answer_text"] = report.covered_text()
             text = state["answer_text"]
+
+        if not text.strip():
+            # Всё, что модель написала, отброшено: либо нет цитат, либо фразы
+            # оборваны на полуслове. Пустой ответ — хуже отказа: человек
+            # увидит «ответ» и не поймёт, что ответа нет.
+            ticket_id = self._open_ticket(state, "not_in_corpus")
+            state["final"] = ("refusal", RefusalData(
+                reason="Ни одно утверждение не уцелело после проверки: модель не оперлась на базу или оборвала ответ",
+                sources=[f.doc_id for f in frames],
+                kind="not_in_corpus",
+                searched=self._searched(state),
+                hint=self._refusal_hint(ticket_id),
+            ))
+            return _step(n, "verify", report.detail(), self._t0, color="amber")
 
         citations = self._citations(frames, text)
         notes: list[str] = []
@@ -685,13 +730,15 @@ class Orchestrator:
                 refused=False,
                 practice_only=practice_only,
                 notes=notes + form_notes
-                + ([] if not truncated else [f"{truncated} утверждений отброшено (нет цитаты)"]),
+                + ([] if not truncated else [f"{truncated} утверждений отброшено (нет цитаты)"])
+                + ([] if not dropped else [f"{dropped} фраз оборвано и не показано"]),
                 forms=state.get("matched_forms") or [],
                 session_id=self.opts.session_id,
                 tone=self.opts.tone if self.opts.tone in ("plain", "formal") else "plain",
                 caveat=caveat,
                 grounding={"total": report.total, "covered": report.covered,
-                           "external": report.external, "threshold": report.threshold,
+                           "external": report.external, "incomplete": report.incomplete,
+                           "threshold": report.threshold,
                            "confidence": _mean_similarity(report)},
             ),
         )
@@ -705,7 +752,7 @@ class Orchestrator:
             det += f" · ОГОВОРКА ({caveat.level})"
         return _step(n, "verify", det, self._t0,
                      color="orange" if (caveat and caveat.level == "high")
-                     else ("amber" if (truncated or caveat) else None))
+                     else ("amber" if (truncated or dropped or caveat) else None))
 
     def _build_caveat(self, state: dict, report, citations: list, practice_only: bool):
         """§20.1: собрать причины оговорки из фактов прогона."""

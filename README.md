@@ -12,7 +12,9 @@ LEX помогает сотруднику находить ответы в ко�
 ## Быстрый старт: 5 команд
 
 Команды рассчитаны на Windows и запускаются в Git Bash из корня репозитория.
-Нужен Python 3.12 или новее.
+Для этих пяти шагов нужен Python 3.11 или новее — так указано в
+`pyproject.toml`. PowerShell-скрипты запуска локальных сервисов эмбеддингов и
+ранжирования отдельно требуют Python 3.12+ и `sentence-transformers`.
 
 ```bash
 # 1. Создать изолированное окружение Python
@@ -22,20 +24,28 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install fastapi uvicorn numpy httpx python-dotenv pydantic
 
 # 3. Создать небольшой синтетический корпус для проверки
-./.venv/Scripts/python.exe demo/gen-sample-corpus.py --out var/quickstart-corpus --count 20 --seed 20261126
+./.venv/Scripts/python.exe demo/gen-sample-corpus.py --out var/quickstart-corpus --count 20 --seed 20261126 --clean
 
 # 4. Выполнить лексический прогон без вызова LLM
 bash demo/run-local.sh --skip-preflight --keep --out var/quickstart-corpus --run-out var/quickstart-run
 
 # 5. Запустить HTTP API на локальном компьютере
-./.venv/Scripts/python.exe -m uvicorn src.api.app:app --host 127.0.0.1 --port 8874
+LEX_CORPUS_DIR=var/quickstart-corpus ./.venv/Scripts/python.exe -m uvicorn src.api.app:app --host 127.0.0.1 --port 8874
 ```
 
-После запуска API откройте `http://127.0.0.1:8874/api/docs`. Команда 4 проверяет
-только поиск по синтетическому корпусу и не обращается к языковой модели.
-Для полноценной работы задайте переменные подключения из `docs/MODEL.md` и
-запустите локальные сервисы эмбеддингов и ранжирования по инструкциям в
-`scripts/`.
+После запуска API откройте `http://127.0.0.1:8874/api/docs`. Команда 5 явно
+подключает созданный на шаге 3 корпус `var/quickstart-corpus`; при запуске API
+в другой сессии задайте ту же переменную `LEX_CORPUS_DIR`.
+
+Команда 4 выполняет лексический поиск без вызова `chat/completions` и без
+отправки вопроса языковой модели. В ходе прогона она проверяет доступность
+`/models` у локального fallback-сервиса и, если задан URL, у NexusLink.
+
+Для полноценного RAG-поиска запускайте локальные сервисы эмбеддингов и
+ранжирования скриптами `scripts/start-embed.ps1` и
+`scripts/start-rerank.ps1`. В коде используются переменные `LEX_EMBED_URL`
+и `LEX_RERANK_URL` (по умолчанию порты 8081 и 8082); параметры NexusLink —
+`NEXUS_LINK_BASE_URL`, `NEXUS_LINK_MODEL` и `NEXUSLINK_KEY`.
 
 В репозитории пока нет lock-файла Python-зависимостей; команда 2 устанавливает
 минимальный набор для старта API, но не фиксирует версии.
@@ -49,6 +59,24 @@ bash demo/run-local.sh --skip-preflight --keep --out var/quickstart-corpus --run
 - Локальная языковая модель не используется. Переменные адреса и токена
   задаются в окружении; секреты не хранятся в репозитории.
 - Примеры в `sample-corpus/` синтетические и не заменяют данные заказчика.
+
+### Какой корпус читать
+
+Корпус выбирается переменной `LEX_CORPUS_DIR`:
+
+```bash
+# синтетика для тестов — значение по умолчанию
+python -m uvicorn src.api.app:app --port 8874
+
+# реальные регламенты заказчика
+LEX_CORPUS_DIR=corpus-real python -m uvicorn src.api.app:app --port 8874
+```
+
+По умолчанию переменная не задана, и читается `sample-corpus/`. Значение по
+умолчанию на реальный корпус не меняется: синтетика нужна для тестов и для
+работы без данных третьей стороны. Каталоги `dataset/` и `corpus-real/`
+перечислены в `.gitignore` — документы заказчика в публичный репозиторий не
+попадают.
 
 ## Что переиспользовано из NEXUS
 

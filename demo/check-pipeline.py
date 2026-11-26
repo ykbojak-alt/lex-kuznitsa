@@ -36,7 +36,17 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-QUESTIONS = ROOT / "sample-corpus" / "questions.jsonl"
+
+
+def _corpus_dir() -> Path:
+    """Корпус выбирается так же, как в транспорте: LEX_CORPUS_DIR или sample-corpus."""
+    raw = os.environ.get("LEX_CORPUS_DIR") or "sample-corpus"
+    path = Path(raw)
+    return path if path.is_absolute() else ROOT / path
+
+
+CORPUS = _corpus_dir()
+QUESTIONS = CORPUS / "questions.jsonl"
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -326,7 +336,9 @@ def _pick_corpus(n: int) -> list[str]:
             continue
         doc = str(row.get("expected_doc_id") or "")
         question = str(row.get("question") or "").strip()
-        if not question or doc in seen_docs:
+        # Вопросы-отказы сюда не берём: у них нет документа, и отказы уже
+        # проверяются отдельно (НДС, старая дата).
+        if not question or not doc or row.get("refusal_expected") or doc in seen_docs:
             continue
         seen_docs.add(doc)
         out.append(question)
@@ -438,6 +450,66 @@ def _get_json(base: str, path: str) -> tuple[int, dict, str]:
 # -------------------------------------------------------------------- main
 
 
+def run_stress(base: str, runs: int, state_dir: Path) -> bool:
+    """Режим --stress: N прогонов подряд, ноль пустых content и error-кадров.
+
+    Проверяется не «ответ хороший», а «ответ вообще пришёл». Пустой content
+    на compose — блокер демо: сотрудник видит ошибку вместо нормы. Поэтому
+    считаем именно это, а не форму ответа.
+
+    Вопрос берём один и тот же намеренно: если слот троттлит, это проявится
+    на повторах, а разные вопросы лишь размыли бы картину.
+    """
+    question = ("Какой срок согласования заявки на закупку?")
+    debug_path = state_dir / "llm-debug.jsonl"
+    empties = 0
+    errors = 0
+    answered = 0
+
+    for i in range(1, runs + 1):
+        status, _raw, events = ask(base, question, as_of="2026-03-01")
+        kinds = [n for n, _ in events]
+        if status != 200:
+            errors += 1
+            print(f"  {i:02d}/{runs} HTTP {status}")
+            continue
+        if "error" in kinds:
+            errors += 1
+            msg = next((d.get("message", "") for n, d in events if n == "error"), "")
+            print(f"  {i:02d}/{runs} error: {str(msg)[:80]}")
+            continue
+        terminal = next((d for n, d in events if n in TERMINAL), None)
+        if terminal is None:
+            empties += 1
+            print(f"  {i:02d}/{runs} нет терминального события")
+            continue
+        if terminal.get("refused") is False:
+            answered += 1
+        print(f"  {i:02d}/{runs} {kinds[-1]:<8} "
+              f"{len(_step_keys(events))} шагов")
+
+    check(f"stress: {runs} прогонов подряд без error-кадров", errors == 0,
+          f"ошибок {errors}")
+    check(f"stress: {runs} прогонов подряд без пустого терминального",
+          empties == 0, f"пустых {empties}")
+
+    # Подтверждение из журнала самого клиента модели: сколько вызовов пришло
+    # пустыми. Если сюда ничего не попало, значит ответы не пустые ни разу.
+    rows = []
+    if debug_path.exists():
+        for line in debug_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    empty_calls = sum(1 for r in rows if r.get("empty"))
+    check("stress: llm-debug не содержит пустых content", empty_calls == 0,
+          f"вызовов {len(rows)}, пустых {empty_calls}")
+    return errors == 0 and empties == 0 and empty_calls == 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="E2E-гейт конвейера LEX (HTTP + SSE)")
     ap.add_argument("--no-llm", action="store_true",
@@ -445,10 +517,15 @@ def main() -> int:
     ap.add_argument("--keep-state", action="store_true",
                     help="оставить временный каталог прогона")
     ap.add_argument("--questions", type=int, default=5, help="сколько вопросов корпуса (5)")
+    ap.add_argument("--stress", type=int, default=0, metavar="N",
+                    help="режим стабильности: N прогонов подряд, ноль пустых ответов")
     args = ap.parse_args()
 
     has_key = load_env()
     if not has_key:
+        if args.stress:
+            print("SKIP: режим --stress требует живой ключ NexusLink в .env")
+            return 0
         skip("живой LLM", "NEXUSLINK_KEY/NEXUS_LINK_BASE_URL не заданы в .env")
     if args.no_llm:
         os.environ["LEX_NO_LLM"] = "1"
@@ -456,6 +533,8 @@ def main() -> int:
     state_dir = Path(tempfile.mkdtemp(prefix="lex-e2e-"))
     port = free_port()
     base = f"http://127.0.0.1:{port}"
+    # Журнал вызовов модели — в каталог прогона, чтобы --stress его прочёл.
+    os.environ["LEX_LLM_DEBUG_PATH"] = str(state_dir / "llm-debug.jsonl")
     print(f"сервер: {base} · состояние: {state_dir}\n")
 
     proc = None
@@ -470,6 +549,20 @@ def main() -> int:
             return 1
 
         ok("сервер поднялся, /api/health = ok", detail)
+
+        if args.stress:
+            print(f"режим стабильности: {args.stress} прогонов подряд\n")
+            stable = run_stress(base, args.stress, state_dir)
+            print()
+            if FAIL:
+                print(f"{PASS.__len__()} passed, {len(FAIL)} failed")
+                print("провал: " + "; ".join(FAIL[:6]))
+                code = 1
+            else:
+                print(f"{PASS.__len__()} passed, 0 failed — "
+                      f"{args.stress} прогонов стабильны")
+                code = 0
+            return code if stable else 1
 
         questions = _pick_corpus(args.questions)
         if not questions:

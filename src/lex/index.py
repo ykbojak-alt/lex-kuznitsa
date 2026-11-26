@@ -99,6 +99,11 @@ def _embed_batch(texts: list[str], timeout: float) -> list[list[float]]:
         raise EmbeddingError(f"эмбеддер недоступен ({EMBED_URL}): {exc}") from exc
     except json.JSONDecodeError as exc:
         raise EmbeddingError(f"эмбеддер вернул не JSON: {exc}") from exc
+    except (TimeoutError, OSError) as exc:
+        # Таймаут чтения приходит как socket.timeout (TimeoutError), а не как
+        # URLError. Без этой ветки зависший эмбеддер валил весь поиск вместо
+        # того, чтобы честно деградировать до BM25 (см. search()).
+        raise EmbeddingError(f"эмбеддер не ответил за {timeout:.0f} с: {exc}") from exc
 
     data = payload.get("data")
     if not isinstance(data, list) or len(data) != len(texts):
@@ -209,7 +214,11 @@ class SearchIndex:
     def vector(self, query: str, top: int = 20) -> list[Hit]:
         if self._vecs is None:
             self.build_vectors()
-        assert self._vecs is not None and len(self._vecs) > 0
+        if self._vecs is None or len(self._vecs) == 0:
+            # Эмбеддер лёг на этапе индексации: векторного канала нет, но BM25
+            # работает. Пустой список — честный ответ «вектор не дал ничего»,
+            # в отличие от исключения, которое убьёт весь поиск.
+            raise EmbeddingError("векторный канал недоступен: векторы не построены")
         qv = np.asarray(embed_texts([query])[0], dtype=np.float64)
         qv /= np.linalg.norm(qv) + 1e-12
         sims = self._vecs @ qv

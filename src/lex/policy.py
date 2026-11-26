@@ -148,7 +148,15 @@ class PolicyVerdict:
 
     def step_detail(self) -> str:
         if self.kind == "out_of_scope":
-            return f"ВНЕ КОМПЕТЕНЦИИ: база не покрывает «{self.business_line or 'эту тему'}»"
+            if self.business_line:
+                return f"ВНЕ КОМПЕТЕНЦИИ: база не покрывает «{self.business_line}»"
+            # Тема не опознана. Врать «эту тему» нельзя: называем то, что база
+            # реально покрывает, либо честно говорим, что направление не определено.
+            lines = ", ".join(BUSINESS_LINES[x]["title"] for x in self.lines_available
+                              if x in BUSINESS_LINES) if self.lines_available else ""
+            if lines:
+                return f"ВНЕ КОМПЕТЕНЦИИ: направление не определено · база покрывает: {lines}"
+            return "ВНЕ КОМПЕТЕНЦИИ: направление не определено"
         if self.kind == "need_clarify":
             return "направление не определено — нужно уточнение"
         line = self.business_line or "—"

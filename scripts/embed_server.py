@@ -20,7 +20,11 @@ from typing import Any
 
 # CPU-инференс: torch должен видеть только CPU, иначе sentence-transformers
 # полезет искать CUDA и упадёт на отсутствии библиотек.
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+#
+# Потоков 2, а не 4: этот сервер живёт на рабочей машине рядом с терминалами
+# агентов, и 4 потока bge-m3 выедали ~3 ядра из 16 в простое. На индексации
+# 150 чанков разница в секундах, в фоне — в отзывчивости всей машины.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import numpy as np

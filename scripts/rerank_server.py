@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import numpy as np

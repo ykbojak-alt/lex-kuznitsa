@@ -32,6 +32,11 @@
     lastAsOf: '',
     lastTicket: null,
     ticketCards: {},
+    ticketDetailCache: {},
+    ticketDraftCache: {},
+    caseCache: null,
+    stats: null,
+    similar: [],
     paused: false
   };
 
@@ -430,7 +435,10 @@
 
   function loadTickets() {
     if (state.mock) return Promise.resolve(global.MockLex.tickets());
-    return fetch('api/tickets').then(function (r) { return r.json(); }).catch(function () { return []; });
+    // §22.3: входящие — это GET /api/inbox, а не общий список тикетов.
+    return fetch('api/inbox').then(function (r) { return r.json(); })
+      .then(function (j) { return Array.isArray(j.letters) ? j.letters : []; })
+      .catch(function () { return []; });
   }
 
   function sortTickets(list) {
@@ -545,7 +553,14 @@
     back.addEventListener('click', renderTicketsScreen);
     host.appendChild(back);
 
-    var t = state.mock ? global.MockLex.ticket(id) : null;
+    if (!state.mock && !state.ticketDetailCache[id]) {
+      host.appendChild(el('p', 'section-sub', 'Загружаем письмо…'));
+      fetch('api/inbox/' + encodeURIComponent(id)).then(function (r) { return r.json(); })
+        .then(function (letter) { state.ticketDetailCache[id] = letter; renderTicketDetail(id); })
+        .catch(function () { host.appendChild(el('p', 'section-sub', 'Письмо не найдено.')); });
+      return;
+    }
+    var t = state.mock ? global.MockLex.ticket(id) : state.ticketDetailCache[id];
     if (!t) { host.appendChild(el('p', 'section-sub', 'Письмо не найдено.')); return; }
 
     var em = ticketEmail(t);
@@ -612,8 +627,11 @@
       var take = el('button', 'btn btn--primary', 'Взять в работу');
       take.type = 'button';
       take.addEventListener('click', function () {
-        if (state.mock) global.MockLex.assignTicket(id, 'И. Петрова');
-        renderTicketDetail(id);
+        if (state.mock) { global.MockLex.assignTicket(id, 'И. Петрова'); renderTicketDetail(id); return; }
+        fetch('api/tickets/' + encodeURIComponent(id) + '/assign', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignee: 'И. Петрова' })
+        }).then(function () { delete state.ticketDetailCache[id]; renderTicketDetail(id); });
       });
       actions.appendChild(take);
     }
@@ -634,18 +652,29 @@
       submit.addEventListener('click', function () {
         var text = ta.value.trim();
         if (!text) { ta.focus(); return; }
-        if (state.mock) { global.MockLex.answerTicket(id); }
-        updateTicketCards(id);
-        renderTicketDetail(id);
+        if (state.mock) { global.MockLex.answerTicket(id); updateTicketCards(id); renderTicketDetail(id); return; }
+        // §22.3: ответ через /api/inbox/{id}/reply; сервер сразу отдаёт черновик кейса.
+        fetch('api/inbox/' + encodeURIComponent(id) + '/reply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body: text, resolved_by: 'quality' })
+        }).then(function (r) { return r.json(); })
+          .then(function (res) {
+            state.ticketDraftCache[id] = res;
+            delete state.ticketDetailCache[id];
+            updateTicketCards(id);
+            renderTicketDetail(id);
+          });
       });
       row.appendChild(submit);
 
       var close = el('button', 'btn', 'Закрыть без ответа');
       close.type = 'button';
       close.addEventListener('click', function () {
-        if (state.mock) global.MockLex.closeTicket(id, ta.value.trim());
-        updateTicketCards(id);
-        renderTicketDetail(id);
+        if (state.mock) { global.MockLex.closeTicket(id, ta.value.trim()); updateTicketCards(id); renderTicketDetail(id); return; }
+        fetch('api/tickets/' + encodeURIComponent(id) + '/close', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: ta.value.trim() })
+        }).then(function () { delete state.ticketDetailCache[id]; updateTicketCards(id); renderTicketDetail(id); });
       });
       row.appendChild(close);
       host.appendChild(row);
@@ -1619,10 +1648,15 @@
      видна всегда и не мелким шрифтом — это защита от обвинения в обмане. */
   function ticketEmail(t) {
     if (t && t.email) return t.email;
-    var subject = '[LEX] Вопрос без ответа в базе: ' + String((t && t.question) || '').slice(0, 60);
+    /* Живой escalate (§15.3) отдаёт только ticket/iterations/reason/searched/
+       next/eta — ни вопроса, ни письма. Тема «Вопрос без ответа в базе: » без
+       текста вопроса выглядит как потерянное письмо, поэтому берём последний
+       заданный вопрос. */
+    var q = String((t && (t.question || t.topic)) || state.lastQuestion || '');
+    var subject = '[LEX] Вопрос без ответа в базе:' + (q ? ' ' + q.slice(0, 60) : ' без формулировки');
     return {
       to: 'quality@example.invalid',
-      from: (t && t.asker && t.asker.role_id ? t.asker.role_id : 'employee') + '@example.invalid',
+      from: (t && t.asker && t.asker.role_id ? t.asker.role_id : (state.roleId || 'employee')) + '@example.invalid',
       subject: subject,
       sent_at: (t && t.created_at) || '2026-11-26T11:20:00Z',
       delivery: 'simulated'
@@ -1646,11 +1680,16 @@
     box.appendChild(head);
 
     var meta = el('dl', 'lettercard__meta');
+    /* Живой escalate не присылает ни question, ни email: поля собираются из
+       того, что есть. Пустая строка «Тема» в карточке — не «нет данных», а
+       потерянный вопрос, поэтому подставляем последний заданный. */
+    var eta = data.eta || (data.sla_due ? 'до ' + fmtDate(String(data.sla_due).slice(0, 10)) : '');
     var rows = [
       ['Кому', em.to],
       ['Тема', em.subject],
       ['Номер', (data.ticket || '') + (data.sla_due ? ' · ответ до ' + fmtDate(String(data.sla_due).slice(0, 10)) : '')]
     ];
+    if (eta) rows.push(['Срок ответа', eta]);
     for (var r = 0; r < rows.length; r++) {
       meta.appendChild(el('dt', null, rows[r][0]));
       var dd = el('dd', null, rows[r][1]);
@@ -1679,6 +1718,9 @@
     if (status === 'open' || status === 'assigned') {
       if (data.reason) box.appendChild(el('p', 'ticketcard__reason', 'Почему: ' + data.reason));
       if (data.assignee) box.appendChild(el('p', 'ticketcard__line', 'Взял в работу: ' + data.assignee));
+      /* §15.3: «что дальше» приходит в поле next — это обещание сотруднику,
+         без него карточка оставляет человека в неведении. */
+      if (data.next) box.appendChild(el('p', 'ticketcard__line', 'Что дальше: ' + data.next));
     } else if (status === 'closed' || status === 'answered') {
       box.appendChild(el('p', 'ticketcard__line', 'Ваш вопрос решён'
         + (data.case_id ? ' · добавлено в базу как кейс ' + data.case_id : '')));
@@ -1897,7 +1939,7 @@
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       renderTicketCard(ctx.host, {
         ticket: d.ticket, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason,
-        sla_due: d.sla_due, question: d.question, email: d.email
+        sla_due: d.sla_due, question: d.question, email: d.email, next: d.next
       }, {});
       state.lastTicket = d.ticket;
       consoleView.setStatus('письмо отправлено: ' + d.ticket + ' · ждёт службу качества', 'warn');

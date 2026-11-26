@@ -5,8 +5,13 @@
 
 ``max_tokens ≥ 1024`` — не прихоть: модель на этом слоте сначала пишет блок
 ``reasoning`` (видно в ``usage.reasoning_tokens``), и при меньшем лимите весь
-бюджет уходит туда, а ``content`` приходит пустым. Проверено на живой слот
-26.11.2026: 104 токена рассуждения на вопрос «работает?».
+бюджет уходит туда, а ``content`` приходит пустым.
+
+**Замер 26.11.2026 на corpus-real, 20 вызовов тяжёлого промпта:** при
+``max_tokens=1024`` пять ответов пришли пустыми, все пять — с
+``finish_reason=length`` (рассуждение съело бюджет). При ``max_tokens=4096``
+пустых ноль. Поэтому базовый лимит — 4096, а не 1024: 1024 хватало на
+короткие вопросы и падало на длинном контексте, а демо гоняет именно длинный.
 """
 
 from __future__ import annotations
@@ -18,15 +23,40 @@ import time
 import urllib.error
 import urllib.request
 
+from . import llm_debug
+
 MIN_MAX_TOKENS = 1024
+# Базовый лимит ответа. 1024 — нижняя граница, при которой слот вообще
+# способен ответить; но на длинном контексте этого не хватает (замер: 25%
+# пустых), поэтому по умолчанию 4096. Порог в конфиге: на другом слоте
+# цифра будет иной.
+DEFAULT_MAX_TOKENS = int(os.environ.get("LEX_LLM_BASE_TOKENS", "4096"))
 DEFAULT_TIMEOUT = 180.0
 
-# Пустой content при непустом reasoning — исчерпанный бюджет, а не сбой связи.
-# Один повтор с удвоенным лимитом спасает прогон; больше — рискуем ждать
-# долго и зря. Пороги в конфиге, потому что у слота может быть свой потолок.
-EMPTY_RETRIES = int(os.environ.get("LEX_LLM_EMPTY_RETRIES", "1"))
-EMPTY_BACKOFF_MULT = int(os.environ.get("LEX_LLM_BACKOFF_MULT", "2"))
-EMPTY_MAX_TOKENS = int(os.environ.get("LEX_LLM_MAX_TOKENS", "4096"))
+# «Пустой content» в живом прогоне — не редкость, а закономерность слота:
+# модель пишет блок рассуждения, и при малом лимите ответ не начинается.
+# Два повтора с крупным шагом лимита снимают почти все случаи; третий —
+# уже ожидание вместо ответа, поэтому нет.
+EMPTY_RETRIES = int(os.environ.get("LEX_LLM_EMPTY_RETRIES", "2"))
+# Бюджеты попыток: 1024 -> 4096 -> 8192. Рост вчетверо, а не вдвое: на
+# диагностике видно, что reasoning занимает тысячи токенов, и шаг «1024 →
+# 2048 → 4096» всё равно упирается в тот же потолок.
+EMPTY_MAX_TOKENS = int(os.environ.get("LEX_LLM_MAX_TOKENS", "8192"))
+
+# Троттлинг апстрима (OpenRouter 429 внутри NexusLink-502) — вторая причина
+# провалов, и она НЕ лечится размером лимита. Диагностика 26.11.2026: при
+# 20 вызовах подряд с 16-го сыплется «all candidates exhausted … HTTP 429»,
+# а фактических пустых content — 0. Значит нужна пауза, а не бюджет.
+RATE_RETRIES = int(os.environ.get("LEX_LLM_RATE_RETRIES", "3"))
+RATE_BASE_PAUSE = float(os.environ.get("LEX_LLM_RATE_PAUSE", "3.0"))
+# Опознаём троттлинг по тексту ошибки: NexusLink заворачивает 429 апстрима в
+# 502 и теряет код, поэтому кода мало — нужна подпись.
+_RATE_MARKERS = ("429", "ratelimit", "rate limit", "too many requests",
+                 "candidates exhausted", "quota")
+RETRY_BUDGETS = tuple(
+    int(x) for x in (os.environ.get("LEX_LLM_RETRY_BUDGETS") or "4096,8192").split(",")
+    if x.strip()
+)
 
 # ------------------------------------------------------------ §21: два тона
 #
@@ -101,35 +131,97 @@ def configured() -> bool:
 def chat(
     messages: list[dict],
     *,
-    max_tokens: int = MIN_MAX_TOKENS,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float = 0.2,
     timeout: float = DEFAULT_TIMEOUT,
-    retries_on_empty: int = EMPTY_RETRIES,
+    retries_on_empty: int | None = None,
 ) -> str:
-    """Один вызов ``/chat/completions``. Возвращает текст ответа.
+    """Вызов ``/chat/completions`` с лестницей бюджетов. Возвращает текст.
 
-    Пустой ``content`` при непустом ``reasoning`` — не сбой сети, а исчерпанный
-    бюджет: модель ушла в рассуждение и не успела ответить. Это лечится
-    повтором с бОльшим лимитом, а не отказом сотруднику. Без повтора любой
-    прогон, где слот «задумался», превращается в error-кадр — проверено на
-    живом прогоне 26.11.2026.
+    Провайдер на этом слоте пишет блок ``reasoning`` до ``content``. При
+    малом ``max_tokens`` рассуждение съедает весь лимит: ``finish_reason =
+    length``, ``content`` пуст. Это не сбой сети — это исчерпанный бюджет, и
+    лечится он бОльшим лимитом, а не отказом сотруднику.
+
+    Поэтому пустой ответ — не ошибка сразу, а повод повторить с лимитом из
+    ``RETRY_BUDGETS`` (4096, 8192). Каждая попытка пишется в
+    ``var/llm-debug.jsonl`` — по этому журналу считается распределение, а не
+    «иногда падает».
     """
     if not configured():
         raise LLMError(
             "NexusLink не настроен: нужны NEXUS_LINK_BASE_URL и NEXUSLINK_KEY "
             "(см. .env и docs/DEPLOY-NEXUSLINK.md)"
         )
-    budget = max(MIN_MAX_TOKENS, int(max_tokens))
-    attempt = 0
-    while True:
-        payload, body = _post_chat(messages, budget, temperature, timeout)
+    retries = EMPTY_RETRIES if retries_on_empty is None else retries_on_empty
+    base = max(MIN_MAX_TOKENS, int(max_tokens))
+    budgets = [base]
+    for b in RETRY_BUDGETS[:retries]:
+        if b > budgets[-1]:
+            budgets.append(b)
+
+    last: tuple[dict, dict] | None = None
+    for attempt, budget in enumerate(budgets):
+        t0 = time.monotonic()
+        try:
+            payload, body = _post_chat(messages, budget, temperature, timeout)
+        except LLMError as exc:
+            llm_debug.record(
+                model=model_name(), max_tokens=budget, finish_reason="",
+                content="", reasoning="",
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
+                attempt=attempt, retried=attempt > 0, error=str(exc),
+            )
+            if not is_transient(exc):
+                raise
+            # Троттлинг или разрыв связи с апстримом: пауза растёт линейно
+            # (3 с, 6 с, 9 с). Бюджет не меняем — он тут ни при чём.
+            if _throttle_wait(attempt + 1):
+                continue
+            raise
         content = _content_of(payload, body)
+        reasoning = _reasoning_of(payload)
+        llm_debug.record(
+            model=model_name(), max_tokens=budget,
+            finish_reason=_finish_reason(payload), content=content,
+            reasoning=reasoning,
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+            attempt=attempt, retried=attempt > 0,
+        )
         if content:
             return content
-        if attempt >= retries_on_empty:
-            _raise_empty(payload, body)
-        attempt += 1
-        budget = min(budget * EMPTY_BACKOFF_MULT, EMPTY_MAX_TOKENS)
+        last = (payload, body)
+
+    assert last is not None
+    _raise_empty(*last)
+
+
+def is_throttled(exc: Exception) -> bool:
+    """429 апстрима, завёрнутый NexusLink в 502 — по подписи, а не по коду."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _RATE_MARKERS)
+
+
+# Разрыв установленного соединения. В стрессе 26.11.2026 первый из десяти
+# прогонов дал `[WinError 10054] Удалённый хост принудительно разорвал
+# соединение` — соединение с апстримом оборвалось само, запрос не дошёл.
+# Повтор здесь законен: это не отказ провайдера, а сеть.
+_TRANSPORT_MARKERS = ("10054", "10053", "connection reset", "connection aborted",
+                      "connection refused", "timed out", "время ожидания")
+
+
+def is_transient(exc: Exception) -> bool:
+    """Повторяемое ли это: троттлинг или обрыв связи."""
+    text = str(exc).lower()
+    return is_throttled(exc) or any(m in text for m in _TRANSPORT_MARKERS)
+
+
+def _throttle_wait(attempt: int) -> bool:
+    """Пауза перед повтором. False — попытки исчерпаны, ждать нечего."""
+    if attempt > RATE_RETRIES:
+        return False
+    time.sleep(RATE_BASE_PAUSE * attempt)
+    return True
 
 
 def _post_chat(messages: list[dict], max_tokens: int, temperature: float,
@@ -168,22 +260,37 @@ def _post_chat(messages: list[dict], max_tokens: int, temperature: float,
     return payload, body
 
 
+def _first_choice(payload: dict) -> dict:
+    choices = payload.get("choices") or [{}]
+    return choices[0] if isinstance(choices[0], dict) else {}
+
+
 def _content_of(payload: dict, body: dict) -> str:
-    message = (payload.get("choices") or [{}])[0].get("message") or {}
+    message = _first_choice(payload).get("message") or {}
     return (message.get("content") or "").strip()
+
+
+def _reasoning_of(payload: dict) -> str:
+    """Блок рассуждения. Провайдер кладёт его и в message, и в choice."""
+    message = _first_choice(payload).get("message") or {}
+    return (message.get("reasoning") or _first_choice(payload).get("reasoning") or "").strip()
+
+
+def _finish_reason(payload: dict) -> str:
+    return str(_first_choice(payload).get("finish_reason") or "")
 
 
 def _raise_empty(payload: dict, body: dict) -> None:
     usage = payload.get("usage") or {}
-    message = (payload.get("choices") or [{}])[0].get("message") or {}
-    reasoning = (message.get("reasoning") or "").strip()
     hint = (
-        f" (reasoning_tokens={usage.get('reasoning_tokens')}, "
-        f"reasoning_chars={len(reasoning)}, max_tokens={body['max_tokens']})"
+        f" (finish_reason={_finish_reason(payload) or '?'}, "
+        f"reasoning_tokens={usage.get('reasoning_tokens')}, "
+        f"reasoning_chars={len(_reasoning_of(payload))}, "
+        f"max_tokens={body.get('max_tokens')})"
     )
     raise LLMError(
-        "NexusLink вернул пустой content — обычно ответ ушёл целиком в блок "
-        f"reasoning; поднимите max_tokens{hint}"
+        "NexusLink вернул пустой content на всех попытках — рассуждение "
+        f"съедает бюджет; нужен другой слот или потолок выше{hint}"
     )
 
 
