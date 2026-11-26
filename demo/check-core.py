@@ -39,9 +39,70 @@ from lex.tickets import get_ticket_store
 CORPUS = ROOT / "sample-corpus"
 PASS: list[str] = []
 FAIL: list[str] = []
+EXPECTED_FAIL: list[str] = []
+UNEXPECTED_PASS: list[str] = []
+
+# Сквозные проверки зовут модель. Если провайдер мёртв (слот в блэклисте,
+# кончились кредиты, сеть), падают не они, а СРЕДА — и красный итог читается
+# как «сломали код». Поэтому один дешёвый вызов в начале прогона: жив —
+# гоняем как обычно; мёртв — сквозные помечаются EXPECTED-FAIL с причиной.
+# Проверка снимается сама, как только провайдер ответит: XPASS покажет, что
+# слот ожил и пометку пора снять.
+LLM_DOWN = ""
 
 
-def check(name: str, ok: bool, detail: str = "") -> None:
+def _probe_llm() -> str:
+    """Пустая строка — модель отвечает; иначе — почему не отвечает."""
+    try:
+        from api import config  # noqa: F401  — load_dotenv, иначе llm не видит ключ
+        from lex import llm
+    except Exception as exc:  # noqa: BLE001 — проба не должна ронять прогон
+        return f"lex.llm не импортируется: {type(exc).__name__}"
+    if not llm.configured():
+        return "модель не сконфигурирована (NEXUS_LINK_BASE_URL/NEXUSLINK_KEY)"
+    try:
+        llm.chat([{"role": "user", "content": "ок"}], max_tokens=5)
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc).replace("\n", " ")
+        return f"{type(exc).__name__}: {text[:140]}"
+    return ""
+
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
+def check(name: str, ok: bool, detail: str = "", *, xfail: bool = False,
+          needs_llm: bool = False) -> None:
+    """Проверка с необязательным «ожидаю красного».
+
+    ``xfail=True`` — баг известен и сейчас чинится кем-то другим. Такой
+    прогон не должен обнулять общий итог: он помечается EXPECTED-FAIL, а не
+    FAIL. Но если такой тест вдруг ЗЕЛЁНЫЙ — это не успех, а устаревшая
+    пометка: кто-то починил баг, и метку пора снять. Таких считаем отдельно
+    (UNEXPECTED-PASS), чтобы пометка не жила дольше самого бага.
+
+    ``needs_llm=True`` — проверка не может пройти без живой модели. Если
+    проба в начале прогона показала, что провайдер не отвечает, результат
+    не считается провалом кода: он уходит в EXPECTED-FAIL с причиной.
+    """
+    if needs_llm and LLM_DOWN:
+        EXPECTED_FAIL.append(f"{name} (среда: модель недоступна)")
+        print(f"XFAIL {name} — среда: {LLM_DOWN}" + (f" · {detail}" if detail else ""))
+        return
+    if xfail:
+        if ok:
+            UNEXPECTED_PASS.append(name)
+            mark = "XPASS"
+            print(f"{mark} {name}" + (f" — {detail}" if detail else "")
+                  + " · баг починен? снимите xfail")
+        else:
+            EXPECTED_FAIL.append(name)
+            print(f"XFAIL {name}" + (f" — {detail}" if detail else ""))
+        return
     (PASS if ok else FAIL).append(name)
     mark = "OK  " if ok else "FAIL"
     print(f"{mark} {name}" + (f" — {detail}" if detail else ""))
@@ -326,14 +387,16 @@ def check_flow(corpus) -> None:
     final = next((s for s in out if s.kind in ("answer", "refusal", "clarify")), None)
     check("DoD сквозной: 11 шагов, policy второй",
           len(steps) == 11 and getattr(steps[1], "key", "") == "policy",
-          f"{len(steps)} шагов, второй — {getattr(steps[1], 'key', '?')}")
+          f"{len(steps)} шагов, второй — {getattr(steps[1], 'key', '?')}",
+          needs_llm=True)
     answer = final.data if final and final.kind == "answer" else None
     " ".join(c.quote for c in (answer.citations if answer else []))
     r1 = [c for c in (answer.citations if answer else [])
           if c.doc_id == "ТЗ-ЭКЗ-СР01-Р1" and "трёх рабочих дней" in c.quote]
     check("DoD сквозной: цитата «трёх рабочих дней» (Р1 от 2026-01-15)",
           bool(r1) and r1[0].revision == 1 and r1[0].effective == "2026-01-15",
-          f"цитат {len(answer.citations) if answer else 0}, Р1 найдена={bool(r1)}")
+          f"цитат {len(answer.citations) if answer else 0}, Р1 найдена={bool(r1)}",
+          needs_llm=True)
 
     out = asyncio.run(_run("Какой срок согласования заявки на закупку?",
                            as_of=date(2025, 12, 1)))
@@ -341,7 +404,8 @@ def check_flow(corpus) -> None:
     refusal = next((s.data for s in out if s.kind == "refusal"), None)
     check("DoD сквозной: --as-of 2025-12-01 -> no_edition_in_force",
           refusal is not None and refusal.kind == "no_edition_in_force",
-          f"шаги {len([k for k in kinds if k == 'step'])}")
+          f"шаги {len([k for k in kinds if k == 'step'])}",
+          needs_llm=True)
 
     out = asyncio.run(_run("Какая ставка НДС в России?", as_of=date(2026, 3, 1)))
     refusal = next((s.data for s in out if s.kind == "refusal"), None)
@@ -362,7 +426,7 @@ def check_flow(corpus) -> None:
         if not any(s.kind in ("answer", "refusal", "clarify") for s in out):
             bad.append(f"{q[:40]}: ни ответа, ни отказа")
     check("DoD пять вопросов корпуса — без падений", not bad,
-          "; ".join(bad)[:160] or "5/5 отработаны")
+          "; ".join(bad)[:160] or "5/5 отработаны", needs_llm=True)
 
 
 def check_case_visibility() -> None:
@@ -630,7 +694,8 @@ def check_subject_gate() -> None:
     final = next((s.kind for s in out if s.kind in ("answer", "refusal", "clarify",
                                                     "escalate")), "—")
     check("§12.8 гейт: предмет найден — ответ", final == "answer",
-          getattr(retrieve, "detail", "")[:90] or "retrieve не дошёл")
+          getattr(retrieve, "detail", "")[:90] or "retrieve не дошёл",
+          needs_llm=True)
 
     # 2. Нормы нет — каскад обрывается на retrieve и уходит в заявку.
     # Вопрос берёт реальный корпус: в регламентах нет срока хранения
@@ -803,16 +868,20 @@ def check_crit3_train() -> None:
           any(c.id == case.id for c in paraphrase),
           f"найдено {len(paraphrase)}")
 
-    # 3. Ролевая изоляция: кейс с автором-ролью it не виден lawyer.
+    # 3. Ролевая изоляция: кейс отдела ИБ не виден технической дирекции.
+    #
+    # Пары должны быть из РАЗНЫХ отделов корпуса. ``lawyer``/``it`` здесь не
+    # годятся: по §23 v1.16 это псевдонимы ``technical``, и кейс роли ``it``
+    # роли ``lawyer`` виден ЗАКОННО — это один отдел под двумя старыми именами.
     own = store.add(question="Как продлить лицензию на ПО?",
                     answer_in_practice="Заявление за 30 дней до истечения.",
-                    author_role="it", outcome="resolved")
+                    author_role="ib", outcome="resolved")
     check("критерий 3: кейс другой роли не виден",
           not any(c.id == own.id for c in store.search(
-              "Как продлить лицензию на ПО?", role_id="lawyer", top=10))
+              "Как продлить лицензию на ПО?", role_id="technical", top=10))
           and any(c.id == own.id for c in store.search(
-              "Как продлить лицензию на ПО?", role_id="it", top=10)),
-          f"кейс {own.id} (it)")
+              "Как продлить лицензию на ПО?", role_id="ib", top=10)),
+          f"кейс {own.id} (ib)")
 
     # 4. Метрики обучения: approved_cases_count, cases_from_tickets,
     #    avg_ticket_to_case_hours. Считаем ту же функцию, что и /api/stats.
@@ -892,6 +961,68 @@ def check_journal_metrics() -> None:
     other = api_core._step_record({"key": "cases", "ms": 3, "detail": "найдено 2 кейса"})
     check("журнал: у шага без метрик полей нет",
           "subject_coverage" not in other and "top_cosine" not in other, "")
+
+
+def check_tokens_and_line() -> None:
+    """N-4: расход токенов в кадре done и направление в журнале.
+
+    Две разные вещи, обе про «данные доходят до аналитики»:
+
+    * кадр ``done`` обязан нести ``tokens`` с неотрицательными полями, а
+      счётчик — обнуляться между вопросами (иначе расход копится за сессию и
+      цифра врёт);
+    * журнал обязан писать ``business_line`` из шага policy. Клиент это поле
+      почти никогда не передаёт, и раньше аналитика показывала «общее» на
+      всех вопросах.
+    """
+    from api import core as api_core
+    from lex import llm
+
+    # --- счётчик токенов (без сети: подменяем накопитель напрямую) ---
+    llm._tokens_reset()
+    base = llm.tokens_total()
+    check("токены: счётчик начинается с нуля",
+          base == {"prompt": 0, "completion": 0, "total": 0, "calls": 0}, str(base))
+    llm._tokens_add({"usage": {"prompt_tokens": 100, "completion_tokens": 50}})
+    one = llm.tokens_total()
+    check("токены: расход считается из usage провайдера",
+          one["prompt"] == 100 and one["completion"] == 50 and one["total"] == 150
+          and one["calls"] == 1, str(one))
+    llm._tokens_add({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+    two = llm.tokens_total()
+    check("токены: второй вызов суммируется внутри вопроса",
+          two["prompt"] == 110 and two["calls"] == 2, str(two))
+    llm._tokens_reset()
+    check("токены: сброс обнуляет, а не уменьшает",
+          llm.tokens_total()["total"] == 0, str(llm.tokens_total()))
+
+    # --- business_line: разбор из detail шага policy ---
+    # Ровно та строка, которую ядро пишет, когда направление не определено.
+    empty_line = "в компетенции: да · направление: —"
+    got = api_core._line_from_policy_detail(empty_line)
+    check("направление: прочерк не становится направлением",
+          got == "", repr(got))
+    named = api_core._line_from_policy_detail(
+        "в компетенции: да · направление: проектная деятельность")
+    check("направление: настоящее направление разбирается",
+          named == "проектная деятельность", repr(named))
+    check("направление: «не определено» не пишется",
+          api_core._line_from_policy_detail(
+              "в компетенции: нет · направление не определено") == "", "")
+
+    # --- done-кадр: поле tokens присутствует и согласовано ---
+    from api import sse
+
+    frame = sse.done(120, "local", "q-test",
+                     {"prompt": 10, "completion": 5, "total": 15, "calls": 1})
+    data = json.loads(frame.split("data: ", 1)[1].strip())
+    check("токены: кадр done несёт все четыре поля",
+          isinstance(data.get("tokens"), dict)
+          and set(data["tokens"]) == {"prompt", "completion", "total", "calls"},
+          str(data.get("tokens")))
+    no_tok = sse.done(120, "local", "q-test", None)
+    check("токены: без вызовов модели блок tokens не выдумывается",
+          "tokens" not in json.loads(no_tok.split("data: ", 1)[1].strip()), "")
 
 
 def check_role_aliases() -> None:
@@ -1058,7 +1189,7 @@ def check_p0_leaks() -> None:
                     answer = ev
         check("P0-LEAK: ответ director несёт detail_id",
               bool(answer and answer.get("detail_id")),
-              str((answer or {}).get("detail_id")))
+              str((answer or {}).get("detail_id")), needs_llm=True)
 
         did = (answer or {}).get("detail_id") or ""
         no_role = client.post("/api/expand",
@@ -1071,14 +1202,15 @@ def check_p0_leaks() -> None:
             "role_id": "technical", "session_id": "s-leak-tech",
         })
         check("P0-LEAK: деталь director не читается ролью technical",
-              foreign.status_code == 404, f"{foreign.status_code}")
+              foreign.status_code == 404, f"{foreign.status_code}", needs_llm=True)
 
         other_session = client.post("/api/expand", json={
             "detail_id": did, "section": "all",
             "role_id": "director", "session_id": "s-leak-other",
         })
         check("P0-LEAK: деталь director не читается чужой сессией той же роли",
-              other_session.status_code == 404, f"{other_session.status_code}")
+              other_session.status_code == 404, f"{other_session.status_code}",
+              needs_llm=True)
 
         own = client.post("/api/expand", json={
             "detail_id": did, "section": "all",
@@ -1086,7 +1218,7 @@ def check_p0_leaks() -> None:
         })
         check("P0-LEAK: владелец получает свою деталь",
               own.status_code == 200 and "detailed" in own.json(),
-              f"{own.status_code}")
+              f"{own.status_code}", needs_llm=True)
 
         # Владелец переживает псевдоним: lawyer -> technical (тот же отдел),
         # но НЕ получает деталь, выданную роли director.
@@ -1095,7 +1227,7 @@ def check_p0_leaks() -> None:
             "role_id": "lawyer", "session_id": "s-leak-boss",
         })
         check("P0-LEAK: псевдоним lawyer не открывает деталь director",
-              alias_den.status_code == 404, f"{alias_den.status_code}")
+              alias_den.status_code == 404, f"{alias_den.status_code}", needs_llm=True)
     finally:
         api_config.CORPUS_DIR = old_corpus
         api_config.CASES_PATH = old_cases
@@ -1283,10 +1415,105 @@ def check_verify_zero() -> None:
           answer is not None, ",".join(s.kind for s in out))
 
 
+def check_role_denial_reason() -> None:
+    """F-2 / §23 v1.17: «нет прав» не выдаётся за «нет документа в базе».
+
+    Владелец (дословно): «Вопрос по документу чужого отдела под ролью
+    technical даёт „в корпусе нет документа по теме“ — это ложь, документ
+    есть, роль его не видит. Должно быть: „ответ есть в документе КД-ПС-02,
+    но он вне вашего подразделения“. Шаг permissions должен это показать.»
+
+    Что чинилось:
+      1. Каскад обрывался на retrieve до permissions — шаг границы чтения
+         не выводился вовсе.
+      2. Заявку наполнял `dialogue._why_unresolved`, который о ролевом
+         фильтре не знает и писал «в корпусе нет документа».
+      3. Сам отказ не различал «скрыто» и «нет нормы ни у кого».
+
+    Тест краснеет ровно на каждом из трёх: без правки в retrieve шага
+    permissions в потоке нет; без передачи причины в after_search заявка
+    получает текст диалога; без проверки покрытия скрытого документа любой
+    вопрос превращается в «вам не положено».
+    """
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+
+    # 1. КД-ПС-02 (Дирекция ИБ) — чужая для technical, ответ по существу там.
+    out = asyncio.run(_run(
+        "Кто подбирает партнёра или субподрядчика на пресейле?",
+        role="technical", corpus_root=real, session="s-rdr-tech"))
+    keys = [s.data.key for s in out if s.kind == "step"]
+    esc = next((s.data for s in out if s.kind == "escalate"), None)
+    reason = str((esc or {}).get("reason") or "")
+    check("F-2: отказ называет документ с ответом (КД-ПС-02)",
+          "КД-ПС-02" in reason, reason[:110])
+    check("F-2: отказ говорит «вне вашего подразделения», а не «нет в корпусе»",
+          "вне вашего подразделения" in reason
+          and "в корпусе нет документа" not in reason, reason[:110])
+    check("F-2: шаг permissions вывода при ролевом отказе есть",
+          "permissions" in keys, keys)
+    perms = next((s.data for s in out if s.kind == "step"
+                  and s.data.key == "permissions"), None)
+    check("F-2: permissions показывает «вне подразделения: 3»",
+          perms is not None and "вне подразделения: 3" in perms.detail,
+          getattr(perms, "detail", "")[:90])
+
+    # 2. Обратная ошибка недопустима: если документа с ответом нет НИ У КОГО,
+    # отказ обязан остаться обычным «нет нормы», а не «вам не положено».
+    # Проверяем на уровне решения о причине — без модели и без сети, поэтому
+    # тест держит инвариант, а не удачу поиска на конкретной формулировке.
+    orch = Orchestrator(RunOptions(
+        question="Сколько дней отпуска у главного инженера проекта?",
+        role_id="technical", no_llm=True, corpus_root=real,
+        cases_path=Path(tempfile.mkdtemp()) / "c.jsonl"))
+    orch._hidden_docs = ["КД-ПД-03", "КД-ПД-04", "КД-ПС-02"]
+    orch._hidden_texts = {
+        "КД-ПД-03": ["Порядок формирования бюджета проекта."],
+        "КД-ПД-04": ["Сроки приёмки выполненных работ."],
+        "КД-ПС-02": ["Порядок подбора субподрядчика на пресейле."],
+    }
+    plain = orch._role_denied_reason({"allowed": [], "doc_hits": [], "no_norm": True})
+    check("F-2: скрытые документы не по теме — ролевой отказ не сочиняется",
+          plain == "", plain[:90])
+
+    # Та же структура, но скрытый документ покрывает предмет — отказ обязан
+    # стать ролевым. Без этого условия первый же «нет нормы» подменялся бы
+    # «вам не положено», то есть чинился бы один враньём другим.
+    orch.opts = RunOptions(
+        question="Кто подбирает партнёра или субподрядчика на пресейле?",
+        role_id="technical", no_llm=True, corpus_root=real,
+        cases_path=Path(tempfile.mkdtemp()) / "c.jsonl")
+    orch._hidden_texts = {"КД-ПС-02": [
+        "9.1. Подбор Партнера или Субподрядчика на пресейле начинается "
+        "при необходимости привлечения к выполнению работ Партнера "
+        "или Субподрядчика."]}
+    denied = orch._role_denied_reason({"allowed": [], "doc_hits": [], "no_norm": True})
+    check("F-2: покрытый скрытый документ даёт ролевой отказ",
+          "КД-ПС-02" in denied and "вне вашего подразделения" in denied,
+          denied[:90])
+
+    # 3. Политика и роли не должны сами по себе подменять причину: у директора
+    # тот же вопрос обязан дать ответ (иначе «вне подразделения» — враньё).
+    out = asyncio.run(_run(
+        "Кто подбирает партнёра или субподрядчика на пресейле?",
+        role="director", corpus_root=real, session="s-rdr-boss"))
+    check("F-2: director на тот же вопрос получает ответ",
+          any(s.kind == "answer" for s in out),
+          ",".join(s.kind for s in out if s.kind != "step"))
+
+
 def main() -> int:
+    global LLM_DOWN
     corpus = load_corpus(CORPUS)
     print(f"корпус: документов {len(corpus.documents)}, чанков {len(corpus.chunks)}, "
           f"правил {len(corpus.rules)}\n")
+    LLM_DOWN = _probe_llm()
+    if LLM_DOWN:
+        print(f"внимание: модель не отвечает — сквозные проверки уйдут в "
+              f"EXPECTED-FAIL. Причина: {LLM_DOWN}\n")
+    else:
+        print("модель отвечает\n")
     check_steps()
     check_policy(corpus)
     check_barriers()
@@ -1302,11 +1529,19 @@ def main() -> int:
     check_loop_criterion3()
     check_crit3_train()
     check_journal_metrics()
+    check_tokens_and_line()
     check_role_aliases()
     check_p0_leaks()
     check_unstable_compose()
     check_verify_zero()
-    print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed")
+    check_role_denial_reason()
+    print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed, "
+          f"{len(EXPECTED_FAIL)} expected-fail, {len(UNEXPECTED_PASS)} xpass")
+    if EXPECTED_FAIL:
+        print("ожидаемо красное (чинится не здесь): " + ", ".join(EXPECTED_FAIL))
+    if UNEXPECTED_PASS:
+        print("помечено xfail, но уже зелено — снимите пометку: "
+              + ", ".join(UNEXPECTED_PASS))
     if FAIL:
         print("провал: " + ", ".join(FAIL))
         return 1

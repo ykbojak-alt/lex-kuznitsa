@@ -479,11 +479,15 @@ class Orchestrator:
                 return
             if outcome is _STOP:
                 # Стадия остановила каскад, но у неё есть что показать:
-                # event лежит в state["stop_step"].
-                stop_ev = state.pop("stop_step", None)
-                if stop_ev is not None:
-                    self._timeline[stop_ev.key] = _now_ms(t_stage)
-                    yield Signal("step", stop_ev)
+                # события лежат в state["stop_steps"] (в старых путях —
+                # state["stop_step"]).
+                stop_evs = state.pop("stop_steps", None)
+                single = state.pop("stop_step", None)
+                if not stop_evs:
+                    stop_evs = [single] if single is not None else []
+                for ev in stop_evs:
+                    self._timeline[ev.key] = _now_ms(t_stage)
+                    yield Signal("step", ev)
                 state["final"] = ("done", None)
                 return
             if isinstance(outcome, Signal):
@@ -541,11 +545,16 @@ class Orchestrator:
         """§15: уточнить ещё или эскалировать — решает модуль диалога."""
         refusal = state.get("escalate_pending")
         kind = getattr(refusal, "kind", "not_in_corpus")
+        # Причина ролевого отказа известна только оркестратору (он владеет
+        # списком скрытых документов). Без передачи диалог соберёт своё
+        # «в корпусе нет документа по теме» — ровно та ложь, что закрывается.
+        denied = self._role_denied_reason(state)
         return self.dialogue.after_search(
             self._session_id(),
             self.opts.question,
             self.opts.role_id,
             searched=self._search_summary(state),
+            why_unresolved=denied or None,
             kind=kind,
             business_line=state.get("line"),
         )
@@ -768,16 +777,32 @@ class Orchestrator:
             # честного «нормы нет». Останавливаемся сразу — дальше искать
             # нечего.
             state["no_norm"] = True
+            # §23 v1.17: если причина в том, что документ с ответом отсеян
+            # ролевым фильтром, говорить «в регламентах нет нормы» нельзя —
+            # норма есть, её не видно роли. Причина подменяется здесь же, до
+            # создания заявки: служба качества должна получить правду.
+            denied = self._role_denied_reason(state)
+            role_denied = bool(denied)
+            if denied:
+                detail += " · вне подразделения"
+            else:
+                denied = ("В регламентах нет нормы по этому вопросу: "
+                          f"не найдены слова {', '.join(missing[:4])}")
             state["escalate_pending"] = RefusalData(
-                reason=("В регламентах нет нормы по этому вопросу: "
-                        f"не найдены слова {', '.join(missing[:4])}"),
+                reason=denied,
                 sources=[getattr(h.chunk, "doc_id", "") for h in ranked[:3]],
                 kind="not_in_corpus",
                 searched=self._searched(state),
             )
-            # _STOP обрывает каскад, но событие шага всё равно надо отдать:
-            # жюри и UI видят, ПОЧЕМУ остановились.
-            state["stop_step"] = _step(n, "retrieve", detail, self._t0, color="amber", total=self._total())
+            # _STOP обрывает каскад, но события шагов всё равно надо отдать:
+            # жюри и UI видят, ПОЧЕМУ остановились. Шаг permissions при
+            # ролевом отказе обязателен — это он показывает границу чтения.
+            stop = [_step(n, "retrieve", detail, self._t0, color="amber",
+                          total=self._total())]
+            if role_denied:
+                stop.append(self._stage_permissions(n + 1, state))
+            state["stop_steps"] = stop
+            state["stop_step"] = stop[0]
             return _STOP
         return _step(n, "retrieve", detail, self._t0, total=self._total())
 
@@ -1244,15 +1269,22 @@ class Orchestrator:
             return hits, 0
         allowed: list = []
         hidden_docs: set[str] = set()
+        # Тексты скрытых документов нужны отказу: без них нельзя отличить
+        # «норма в чужом документе» от «нормы нет нигде».
+        hidden_texts: dict[str, list[str]] = {}
         for h in hits:
             doc = {"department": getattr(h.chunk, "department", "")}
             if warning_for_doc(doc, role) is None:
                 allowed.append(h)
             else:
-                hidden_docs.add(str(getattr(h.chunk, "doc_id", "")))
+                doc_id = str(getattr(h.chunk, "doc_id", ""))
+                hidden_docs.add(doc_id)
+                hidden_texts.setdefault(doc_id, []).append(h.chunk.text)
         # Считаем ДОКУМЕНТЫ, а не фрагменты: шаг permissions показывает
         # «доступно N из M», и единицы измерения должны совпадать, иначе
         # «2 из 4 · вне подразделения 14» читается как ошибка.
+        self._hidden_docs = sorted(hidden_docs)
+        self._hidden_texts = hidden_texts
         return allowed, len(hidden_docs)
 
     def role_def(self) -> dict | None:
@@ -1417,18 +1449,82 @@ class Orchestrator:
 
         Текст для человека: что проверено и чего не хватило. Служба качества
         должна с первого чтения понять, куда смотреть.
+
+        §23 v1.17: «не в базе» и «вам не положено» — РАЗНЫЕ вещи, и человек
+        обязан видеть разницу. Пока ролевой фильтр молчал о скрытом, вопрос
+        про КД-ПС-02 под ролью `technical` получал «в корпусе нет документа
+        по теме», хотя документ есть и ответ в нём. Это ложь, и хуже —
+        сотрудник шёл в службу качества за нормой, которую ему и не дадут.
         """
         verdict = state.get("policy")
         if verdict is not None and getattr(verdict, "reason", ""):
-            return str(verdict.reason)
+            # Права — раньше темы: «вне компетенции» может стоять в policy, но
+            # если ответ реально существует и скрыт отделом, это не «не наша
+            # тема», а «не ваши документы».
+            hidden = self._role_denied_reason(state)
+            return hidden or str(verdict.reason)
         line = state.get("line") or ""
+        policy_reason = self._role_denied_reason(state, line=line)
+        if policy_reason:
+            return policy_reason
         frames = len(state.get("allowed") or [])
-        len(state.get("doc_hits") or [])
         if frames == 0:
             where = f" в направлении «{line}»" if line else ""
             return f"в корпусе нет документа{where}, покрывающего вопрос"
         return (f"найдено {frames} фрагментов, но ни одно утверждение не подтверждается "
                 f"цитатой из базы")
+
+    def _role_denied_reason(self, state: dict, line: str = "") -> str:
+        """«Ответ есть, но не в вашем отделе» — если фильтр действительно резал.
+
+        Условия честного ответа: (1) между поиском и ролью что-то скрыто,
+        (2) после фильтра релевантных фрагментов не осталось, (3) в скрытом
+        документе тема вопроса действительно есть. Без третьего условия
+        подмена была бы обратной ложью: «вам не положено» на вопрос, где
+        документа с ответом не существует ни у кого.
+
+        Порог — тот же SUBJECT_MIN_COVERAGE, что и у гейта предмета: вопрос
+        либо покрыт документом, либо нет. Замер на corpus-real:
+
+            «Кто подбирает партнёра…» → КД-ПС-02 (ИБ) 1.00, КД-ПД-04 0.50
+            «Срок хранения бух. документов» → КД-ПД-01 (тех.) 1.00
+
+        то есть ровно тот документ, который фильтр и отрезал.
+        """
+        hidden = list(getattr(self, "_hidden_docs", []) or [])
+        if not hidden:
+            return ""
+        # Пригодного не осталось: либо permissions не нашёл ни одного документа,
+        # либо гейт предмета срезал выдачу. Одного непустого `doc_hits` мало —
+        # после rerank там лежат видимые, но нерелевантные фрагменты, и именно
+        # на этом «в корпусе нет документа» подменяло ролевой отказ.
+        # `no_norm` означает, что retrieve уже признал: среди ВИДИМЫХ нет
+        # ничего по теме — тогда вопрос и переносим на скрытое.
+        if state.get("no_norm"):
+            pass
+        elif state.get("allowed") or state.get("doc_hits"):
+            return ""
+        texts_by_doc = getattr(self, "_hidden_texts", {}) or {}
+        covering = [
+            doc for doc in hidden
+            if texts_by_doc.get(doc)
+            and subject_coverage(self.opts.question, texts_by_doc[doc])[0]
+            >= SUBJECT_MIN_COVERAGE
+        ]
+        if not covering:
+            # Тема не наша — это «нет нормы», а не «нет прав». Обычный отказ
+            # должен остаться обычным отказом.
+            return ""
+        role = self.role_def() or {}
+        deps = [str(x) for x in (role.get("departments") or []) if x]
+        shown = ", ".join(covering[:3])
+        more = f" и ещё {len(covering) - 3}" if len(covering) > 3 else ""
+        tail = f" (вне подразделения: {len(hidden)})"
+        if deps:
+            tail += f" · ваши отделы: {', '.join(deps)}"
+        _ = line  # линия вопроса в тексте не нужна: причина — права, не поиск
+        return (f"ответ содержится в документе {shown}{more}, "
+                f"но он вне вашего подразделения{tail}")
 
     def _searched(self, state: dict) -> dict:
         """§12.3: отказ говорит, что искали."""
