@@ -1208,6 +1208,123 @@ html[data-theme="dark"] .form__warn { background: #3a2c14; color: #e8c98a; }
   .modal__toc { border-right: 0; border-bottom: 1px solid var(--border-soft); max-height: 120px; }
 }
 
+/* ------------------------------------------------------------ §18 заявки */
+
+.tickets__table { margin-top: 10px; }
+
+.tickets__row { cursor: pointer; }
+.tickets__row:hover { background: var(--panel-hover); }
+.tickets__row:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+
+.tickets__id { font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+.tickets__iters { display: block; margin-top: 3px; font-size: 11px; color: var(--text-3); }
+
+.tstatus {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tstatus--danger { border-color: var(--danger); color: var(--danger); }
+.tstatus--amber { border-color: var(--s-amber); color: var(--s-amber); }
+.tstatus--ok { border-color: var(--success); color: var(--success); }
+.tstatus--muted { border-color: var(--border-soft); color: var(--text-3); }
+
+.sla { font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
+.sla--breached { color: var(--danger); font-weight: 600; }
+
+.ticket-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+.ticket-answer {
+  width: 100%;
+  max-width: 620px;
+  font: 400 13.5px/1.5 var(--font-sans);
+  color: var(--text);
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.ticket-clar { margin: 0 0 10px; padding-left: 20px; font-size: 13px; }
+.ticket-clar li { margin-bottom: 4px; }
+.ticket-clar__asked { color: var(--text); }
+.ticket-clar__answered { display: block; color: var(--text-2); }
+
+/* черновик кейса */
+.draftcard {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.draftcard__status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.draftcard__result { }
+
+.sug { border-radius: var(--radius); padding: 9px 11px; display: grid; gap: 5px; }
+.sug--missing { border: 1px solid var(--s-amber); background: #fef6e7; }
+.sug--conflict { border: 1px solid var(--danger); background: #fdf2f2; }
+
+html[data-theme="dark"] .sug--missing { background: #3a2c14; }
+html[data-theme="dark"] .sug--conflict { background: #2c1a1c; }
+
+.sug__title { margin: 0; font-weight: 700; font-size: 12.5px; }
+.sug--missing .sug__title { color: #7a4b00; }
+.sug--conflict .sug__title { color: var(--danger); }
+html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
+
+.sug__item { margin: 0; font-size: 12.5px; color: var(--text); }
+.sug__note { color: var(--text-2); }
+.sug__link { margin-left: 8px; font-size: 12.5px; }
+.sug__ack { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+
+.draftcard__done { display: grid; gap: 8px; justify-items: start; }
+
+/* карточка тикета в чате */
+.ticketcard {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--s-amber);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 11px 13px;
+  margin: 0 0 14px;
+  display: grid;
+  gap: 5px;
+}
+
+.ticketcard__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ticketcard__badge {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 11px;
+}
+.ticketcard__badge--danger { border-color: var(--danger); color: var(--danger); }
+.ticketcard__badge--amber { border-color: var(--s-amber); color: var(--s-amber); }
+.ticketcard__badge--ok { border-color: var(--success); color: var(--success); }
+.ticketcard__badge--muted { border-color: var(--border-soft); color: var(--text-3); }
+
+.ticketcard__id { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+.ticketcard__by { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.ticketcard__line { margin: 0; font-size: 13px; }
+.ticketcard__reason { margin: 0; font-size: 12.5px; color: var(--text-2); }
+
+/* отказ «вне компетенции» — спокойнее, чем «нет в базе» */
+.refusal--scope {
+  border-color: var(--border);
+  border-left-color: var(--border);
+  background: var(--panel);
+}
+.refusal--scope .refusal__title { color: var(--text); }
+
 /* ------------------------------------------------------------ анимации */
 
 @keyframes fadein {

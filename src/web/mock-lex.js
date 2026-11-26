@@ -360,8 +360,8 @@
     var forced = (global.LEX_MOCK_SCENARIO || '');
     if (forced) return forced;
     var q = String(question || '');
-    if (/ндс|налог на добавленн|ставк[аи] ндс/i.test(q)) return 'refusal-nocorpus';
-    if (/друг\w* компан|как обычно|в практике рынка/i.test(q)) return 'refusal-nocorpus';
+    if (/ндс|налог на добавленн|ставк[аи] ндс|бухгалтер/i.test(q)) return 'refusal-outofscope';
+    if (/друг\w* компан|как обычно|в практике рынка|единственн\w* поставщик/i.test(q)) return 'escalate';
     if (asOf && asOf < '2026-02-01') return 'refusal-date';
     if (roleId === 'it' && /закупк|согласован|договор/i.test(q)) return 'refusal-access';
     var hasDate = answers && answers.as_of;
@@ -429,14 +429,16 @@
       else if (scenario === 'refusal-date') guard(handlers.onRefusal)(clone(REFUSAL_DATE));
       else if (scenario === 'refusal-access') guard(handlers.onRefusal)(clone(REFUSAL_ACCESS));
       else if (scenario === 'escalate') {
-        /* §15.3: вместо verify последним идёт escalate. */
+        /* §18: агент сам создаёт тикет — сотрудник видит только номер. */
+        var tk = createTicket(question, roleId, 'закупки');
         guard(handlers.onEscalate)({
-          ticket: 'esc-0003',
-          iterations: 2,
-          reason: 'В базе знаний нет порядка согласования с единственным поставщиком',
+          ticket: tk.id,
+          iterations: tk.clarifications.length,
+          reason: tk.why_unresolved,
           searched: { documents: 27, cases: 4 },
           next: 'Заявка передана в службу качества. Ответ появится в базе как кейс.',
           eta: 'до 2 рабочих дней',
+          sla_due: tk.sla_due,
           question: question
         });
         return; // поток закрывается на эскалации, done не приходит

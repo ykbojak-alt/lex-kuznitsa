@@ -234,12 +234,15 @@ def evaluate(
             )
         docs = scoped.get(line, line_counts.get(line, 0))
         if docs < POLICY_MIN_LINES:
+            # Нет документов направления в корпусе — это «не покрыто», а не
+            # «нет доступа»: права тут ни при чём, материала просто нет. Для
+            # сотрудника разница важная: «пополните базу» vs «вам не положено».
             return PolicyVerdict(
                 in_scope=True, business_line=line, score=round(score, 3),
                 coverage=round(coverage, 3), lines_available=known, matched_terms=hits,
-                kind="no_access",
-                reason=f"По направлению «{line}» у роли {role_id} нет ни одного доступного документа",
-                detail="Доступные направления: " + ", ".join(allowed_lines or ["—"]),
+                kind="out_of_scope",
+                reason=f"Направление «{line}» в базе знаний не покрыто: документов нет",
+                detail="База покрывает: " + ", ".join(known or ["—"]),
             )
         return PolicyVerdict(
             in_scope=True, business_line=line, score=round(score, 3),

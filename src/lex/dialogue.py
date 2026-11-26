@@ -51,6 +51,15 @@ MIN_CLARIFY_ITERATIONS = 2
 MAX_CLARIFY_ITERATIONS = 3
 DEFAULT_TTL_SECONDS = 30 * 60
 
+#: Основы слов, по которым вопрос считается «процессным» даже без совпадений
+#: со словарём корпуса: такие вопросы уточнить полезно, поэтому «вне базы» их
+#: не считаем (§15.1: если не уверен — уточняй, это безопаснее).
+GENERIC_QUESTION_STEMS = {
+    "срок", "поряд", "проце", "регла", "правил", "докум", "заяв", "догов",
+    "заказ", "сделк", "оплат", "постав", "клиент", "сотруд", "сколь",
+    "систем", "отдел", "требован",
+}
+
 #: Ответы, которые считаются «пропуском» (контракт §10: «не знаю» или отсутствие ключа).
 SKIP_ANSWERS = {
     "не знаю", "незнаю", "неизвестно", "не определено", "не определил",
@@ -245,6 +254,9 @@ class Session:
     clarification_iterations: int = 0
     clarifications: list[dict[str, Any]] = field(default_factory=list)
     searches: list[dict[str, Any]] = field(default_factory=list)
+    # Параметры, закрытые умолчанием. Их нельзя считать «названными
+    # сотрудником»: по умолчанию спросить про них ещё раз можно.
+    defaulted: list[str] = field(default_factory=list)
     escalation: dict[str, Any] | None = None
     exhausted: bool = False
     created_at: float = 0.0
@@ -262,6 +274,7 @@ class Session:
             "clarification_iterations": self.clarification_iterations,
             "clarifications": list(self.clarifications),
             "searches": list(self.searches),
+            "defaulted": list(self.defaulted),
             "escalation": self.escalation,
             "exhausted": self.exhausted,
             "created_at": self.created_at,
@@ -284,6 +297,7 @@ class Session:
             ),
             clarifications=list(data.get("clarifications") or []),
             searches=list(data.get("searches") or []),
+            defaulted=list(data.get("defaulted") or []),
             escalation=data.get("escalation"),
             exhausted=bool(data.get("exhausted")),
             created_at=float(data.get("created_at") or 0.0),
@@ -823,6 +837,14 @@ class Dialogue:
                 self._apply_answers(session, answers)
 
         params, matched_rules = self._collect(session, q, role, as_of, params_in)
+
+        if self.out_of_base(q):
+            # §15.1: вопрос вне базы — уточнять нечего. Идём в поиск, а если
+            # и там пусто — эскалация (after_search).
+            if session is not None:
+                self.store.save(session)
+            return None
+
         missing = self._missing(params, role, q, matched_rules)
 
         if not missing:
@@ -906,7 +928,9 @@ class Dialogue:
             # потом — вид регламента. Это и есть 2-я и 3-я итерации (§15).
             if iterations < MIN_CLARIFY_ITERATIONS:
                 fallback = self._fallback_question(session.question)
-            elif iterations < MAX_CLARIFY_ITERATIONS and not params.get("doc_type"):
+            elif (iterations < MAX_CLARIFY_ITERATIONS
+                  and not (params.get("doc_type")
+                           and "doc_type" not in session.defaulted)):
                 fallback = self._fallback_doc_type()
             else:
                 fallback = None
@@ -978,8 +1002,18 @@ class Dialogue:
         }
 
     def out_of_base(self, question: str | None) -> bool:
-        """§15.1: вопрос не про базу — уточнять бессмысленно, эскалируем сразу."""
-        return not self.knowledge.in_corpus(question or "")
+        """§15.1: вопрос не про базу — уточнять бессмысленно, эскалируем сразу.
+
+        Вне базы — это когда в вопросе нет ни слова из корпуса. Общие
+        процессные слова («срок», «заявка») вопрос в базу возвращают: там
+        уточнение полезно, и §15.1 велит сомневаться в сторону уточнения.
+        """
+        if not self.knowledge.in_corpus(question or ""):
+            words = {w[:5] for w in _norm(question).split()}
+            if words & GENERIC_QUESTION_STEMS:
+                return False
+            return True
+        return False
 
     def _fallback_question(self, question: str | None) -> Question:
         """Последний вопрос, когда параметры собраны, а ответа всё нет."""
@@ -1142,13 +1176,13 @@ class Dialogue:
         else:
             first = questions[0]
             label = PARAM_LABELS.get(first.key, first.key)
-            detail = f"Нужна {label}: {first.reason}"
+            detail = f"Нужно уточнить: {label} — {first.reason}"
             extra = [PARAM_LABELS.get(q.key, q.key) for q in questions[1:]]
             if extra:
                 detail += " · ещё: " + ", ".join(extra)
         return {
             "n": n,
-            "total": total,
+            "total": max(total, n),
             "key": "clarify",
             "title": "Уточнение",
             "detail": detail,
@@ -1317,6 +1351,8 @@ class Dialogue:
             if key == "department" and not role:
                 value = "не определено"
             self._add_assumption(session, key, value)
+            if key not in session.defaulted:
+                session.defaulted.append(key)
             if key == "as_of":
                 session.params["as_of"] = value
             elif key in ("department", "amount", "doc_type", "rule_key"):

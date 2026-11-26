@@ -63,8 +63,12 @@
     no_edition_in_force: 'нет действующей редакции',
     no_access: 'нет прав доступа',
     not_in_corpus: 'нет в базе знаний',
+    out_of_scope: 'вне базы знаний',
     conflict_unresolved: 'конфликт не разрешён'
   };
+
+  var TICKET_STATUS_LABEL = { open: 'открыт', assigned: 'в работе', answered: 'отвечен', closed: 'закрыт' };
+  var TICKET_STATUS_TONE = { open: 'danger', assigned: 'amber', answered: 'ok', closed: 'muted' };
 
   /* ------------------------------------------------------------------ консоль */
 
@@ -178,6 +182,7 @@
       renderTabs();
       updateHint();
       renderRolesScreen();
+      refreshTicketNav();
     };
   }
   function makeLinePicker(id) {
@@ -213,6 +218,7 @@
     roles: ['Роли', 'Права доступа: роль определяет, какие отделы и направления видит агент.'],
     lines: ['Бизнес-направления', 'Регламенты привязаны к направлению, а не только к отделу.'],
     cases: ['Кейсы', 'Наблюдения из практики. Не отменяют регламент, но видны в поиске с меньшим приоритетом.'],
+    tickets: ['Заявки в службу качества', 'Агент создаёт тикет сам, когда ответа в базе нет. Доступно службе качества и руководителю.'],
     stats: ['Аналитика', 'По журналу запросов: отказы, латентность, где не хватает документов.']
   };
 
@@ -232,6 +238,7 @@
     if (name === 'roles') renderRolesScreen();
     if (name === 'lines') renderLinesScreen();
     if (name === 'cases') renderCasesScreen();
+    if (name === 'tickets') renderTicketsScreen();
     if (name === 'stats') renderStatsScreen();
     $('feed').scrollTop = 0;
   }
@@ -327,8 +334,393 @@
     }
   }
 
-  function renderStatsScreen() {
-    var host = $('screen-stats');
+  /* ------------------------------------------------------------------ экран «Заявки» (§18) */
+
+  function ticketsAllowed() {
+    return state.roleId === 'quality' || state.roleId === 'director';
+  }
+
+  function refreshTicketNav() {
+    var nav = $('navTickets');
+    if (nav) nav.hidden = !ticketsAllowed();
+    // если открыт экран заявок, а роль больше не даёт доступа — вернуть в чат
+    if (!ticketsAllowed() && doc.getElementById('screen-tickets').classList.contains('is-active')) {
+      goScreen('chat');
+    }
+  }
+
+  function loadTickets() {
+    if (state.mock) return Promise.resolve(global.MockLex.tickets());
+    return fetch('api/tickets').then(function (r) { return r.json(); }).catch(function () { return []; });
+  }
+
+  function sortTickets(list) {
+    var order = { open: 0, assigned: 1, answered: 2, closed: 3 };
+    return list.slice().sort(function (a, b) {
+      var d = (order[a.status] || 9) - (order[b.status] || 9);
+      if (d !== 0) return d;
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    });
+  }
+
+  function slaBadge(t) {
+    if (!t.sla_due) return null;
+    var now = Date.now();
+    var due = Date.parse(t.sla_due);
+    var breached = t.status !== 'closed' && due < now;
+    var span = el('span', 'sla' + (breached ? ' sla--breached' : ''),
+      (breached ? 'просрочен: ' : 'срок до ') + fmtDate(String(t.sla_due).slice(0, 10)));
+    return span;
+  }
+
+  function renderTicketsScreen() {
+    var host = $('screen-tickets');
+    clear(host);
+    host.appendChild(el('h2', 'section-title', 'Заявки в службу качества'));
+    host.appendChild(el('p', 'section-sub',
+      'Тикеты создаёт агент сам, когда ответа в базе нет. Служба качества берёт в работу и отвечает; после ответа агент предлагает черновик кейса.'));
+
+    if (!ticketsAllowed()) {
+      host.appendChild(el('p', 'section-sub', 'Экран доступен ролям «Отдел качества» и «Руководитель».'));
+      return;
+    }
+
+    var wrap = el('div', 'tickets');
+    host.appendChild(wrap);
+
+    loadTickets().then(function (list) {
+      clear(wrap);
+      if (!list.length) { wrap.appendChild(el('p', 'section-sub', 'Заявок нет.')); return; }
+
+      var table = el('table', 'wikitable tickets__table');
+      var head = el('tr');
+      ['Заявка', 'Вопрос', 'Направление', 'Статус', 'Кто взял', 'Срок'].forEach(function (h) {
+        head.appendChild(el('th', null, h));
+      });
+      table.appendChild(head);
+
+      sortTickets(list).forEach(function (t) {
+        var tr = el('tr', 'tickets__row');
+        tr.tabIndex = 0;
+        tr.setAttribute('role', 'button');
+        tr.setAttribute('aria-label', 'Открыть заявку ' + t.id);
+
+        var tdId = el('td', null, t.id);
+        tdId.className = 'tickets__id';
+        tr.appendChild(tdId);
+        tr.appendChild(el('td', null, t.question));
+
+        var line = t.asker && t.asker.business_line ? t.asker.business_line : '—';
+        tr.appendChild(el('td', null, line));
+
+        var tdSt = el('td');
+        tdSt.appendChild(el('span', 'tstatus tstatus--' + (TICKET_STATUS_TONE[t.status] || 'muted'),
+          TICKET_STATUS_LABEL[t.status] || t.status));
+        if (t.clarifications && t.clarifications.length) {
+          tdSt.appendChild(el('span', 'tickets__iters', 'уточнений: ' + t.clarifications.length));
+        }
+        tr.appendChild(tdSt);
+
+        tr.appendChild(el('td', null, t.assignee || '—'));
+
+        var tdSla = el('td');
+        var sb = slaBadge(t);
+        if (sb) tdSla.appendChild(sb);
+        tr.appendChild(tdSla);
+
+        function openIt() { renderTicketDetail(t.id); }
+        tr.addEventListener('click', openIt);
+        tr.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIt(); } });
+        table.appendChild(tr);
+      });
+      wrap.appendChild(table);
+    });
+  }
+
+  function renderTicketDetail(id) {
+    var host = $('screen-tickets');
+    clear(host);
+
+    var back = el('button', 'linkish', '← к списку заявок');
+    back.type = 'button';
+    back.addEventListener('click', renderTicketsScreen);
+    host.appendChild(back);
+
+    var t = state.mock ? global.MockLex.ticket(id) : null;
+    if (!t) { host.appendChild(el('p', 'section-sub', 'Заявка не найдена.')); return; }
+
+    host.appendChild(el('h2', 'section-title', 'Заявка ' + t.id));
+
+    var status = el('p', 'tikcket-detail__status');
+    status.appendChild(el('span', 'tstatus tstatus--' + (TICKET_STATUS_TONE[t.status] || 'muted'),
+      TICKET_STATUS_LABEL[t.status] || t.status));
+    status.appendChild(el('span', 'tickets__iters', t.created_by === 'agent'
+      ? 'создан агентом автоматически' : 'создан ' + t.created_by));
+    if (t.assignee) status.appendChild(el('span', 'tickets__iters', 'в работе: ' + t.assignee));
+    var sb = slaBadge(t);
+    if (sb) status.appendChild(sb);
+    host.appendChild(status);
+
+    /* Вопрос сотрудника */
+    host.appendChild(el('h3', 'detail-h', 'Вопрос сотрудника'));
+    host.appendChild(el('p', null, t.question));
+    if (t.asker) {
+      host.appendChild(el('p', 'ticketcard__reason',
+        'Роль: ' + roleTitle(t.asker.role_id) + ' · направление: ' + (t.asker.business_line || '—')));
+    }
+
+    /* Что спросили (итерации) */
+    if (t.clarifications && t.clarifications.length) {
+      host.appendChild(el('h3', 'detail-h', 'Что спросили у сотрудника'));
+      var cl = el('ol', 'ticket-clar');
+      t.clarifications.forEach(function (it) {
+        var li = el('li');
+        li.appendChild(el('span', 'ticket-clar__asked', 'Итерация ' + it.iteration + ': ' + it.asked.join('; ')));
+        li.appendChild(el('span', 'ticket-clar__answered', '→ ' + (it.answers || []).join('; ')));
+        cl.appendChild(li);
+      });
+      host.appendChild(cl);
+    }
+
+    /* Что искали */
+    if (t.searched) {
+      host.appendChild(el('h3', 'detail-h', 'Что искали'));
+      var bits = [];
+      if (t.searched.documents != null) bits.push('документов: ' + t.searched.documents);
+      if (t.searched.cases != null) bits.push('кейсов: ' + t.searched.cases);
+      if (t.searched.accessible != null) bits.push('доступно: ' + t.searched.accessible);
+      if (t.searched.top && t.searched.top.length) bits.push('топ: ' + t.searched.top.join(', '));
+      host.appendChild(el('p', null, bits.join(' · ')));
+    }
+
+    /* Почему не решилось — обязательное поле */
+    host.appendChild(el('h3', 'detail-h', 'Почему не решилось'));
+    host.appendChild(el('p', 'ticketcard__reason', t.why_unresolved || '—'));
+
+    /* Действия службы качества */
+    var actions = el('div', 'ticket-actions');
+
+    if (t.status === 'open') {
+      var take = el('button', 'btn btn--primary', 'Взять в работу');
+      take.type = 'button';
+      take.addEventListener('click', function () {
+        if (state.mock) global.MockLex.assignTicket(id, 'И. Петрова');
+        renderTicketDetail(id);
+      });
+      actions.appendChild(take);
+    }
+    host.appendChild(actions);
+
+    if (t.status !== 'closed') {
+      host.appendChild(el('h3', 'detail-h', 'Ответ службы качества'));
+      var ta = el('textarea', 'ticket-answer');
+      ta.rows = 4;
+      ta.setAttribute('aria-label', 'Ответ службы качества');
+      ta.placeholder = 'Ответ сотруднику: что делать по существу вопроса';
+      if (t.quality_answer) ta.value = t.quality_answer;
+      host.appendChild(ta);
+
+      var row = el('div', 'ticket-actions');
+      var submit = el('button', 'btn btn--primary', 'Ответить');
+      submit.type = 'button';
+      submit.addEventListener('click', function () {
+        var text = ta.value.trim();
+        if (!text) { ta.focus(); return; }
+        if (state.mock) { global.MockLex.answerTicket(id); }
+        renderTicketDetail(id);
+      });
+      row.appendChild(submit);
+
+      var close = el('button', 'btn', 'Закрыть без ответа');
+      close.type = 'button';
+      close.addEventListener('click', function () {
+        if (state.mock) global.MockLex.closeTicket(id, ta.value.trim());
+        renderTicketDetail(id);
+      });
+      row.appendChild(close);
+      host.appendChild(row);
+    }
+
+    if (t.status === 'closed' && t.close_reason) {
+      host.appendChild(el('p', 'ticketcard__reason', 'Закрыт: ' + t.close_reason));
+    }
+    if (t.quality_answer) {
+      host.appendChild(el('h3', 'detail-h', 'Дан ответ'));
+      host.appendChild(el('p', 'detail-quote', t.quality_answer));
+    }
+
+    /* §16: после ответа — карточка черновика кейса */
+    var draft = state.mock ? global.MockLex.draft(id) : null;
+    if (draft && (t.status === 'answered' || t.status === 'closed') && draft.status !== 'resolved') {
+      host.appendChild(renderDraftCard(id, draft));
+    }
+    if (draft && draft.status === 'resolved') {
+      host.appendChild(el('p', 'form__ok', 'Кейс добавлен в базу. На этот вопрос теперь отвечают.'));
+    }
+  }
+
+  /* §16.2–16.3: карточка черновика кейса с suggestions и подтверждением. */
+  function renderDraftCard(ticketId, draftData) {
+    var d = draftData.draft || {};
+    var sug = draftData.suggestions || { missing: [], conflicts: [] };
+    var card = el('section', 'draftcard');
+    card.appendChild(el('h3', 'detail-h', 'Черновик кейса — предлагает агент'));
+    card.appendChild(el('p', 'formcard__hint',
+      'Агент не пишет в базу сам: проверьте и подтвердите. Правки сохраняются в кейс.'));
+
+    var values = {
+      question: d.question || '',
+      answer_in_practice: d.answer_in_practice || '',
+      business_line: d.business_line || '',
+      tags: (d.tags || []).join(', '),
+      linked_docs: (d.linked_docs || []).join(', '),
+      outcome: d.outcome || 'resolved'
+    };
+
+    var inputs = {};
+
+    function field(key, label, opts) {
+      var row = el('div', 'form__row');
+      var lab = el('label', 'form__label', label);
+      lab.setAttribute('for', 'dr-' + key);
+      row.appendChild(lab);
+      var input;
+      if (opts && opts.select) {
+        input = doc.createElement('select');
+        opts.select.forEach(function (o) {
+          var op = doc.createElement('option');
+          op.value = o;
+          op.textContent = o;
+          input.appendChild(op);
+        });
+        input.value = values[key];
+      } else if (opts && opts.area) {
+        input = doc.createElement('textarea');
+        input.rows = 3;
+        input.value = values[key];
+      } else {
+        input = doc.createElement('input');
+        input.type = 'text';
+        input.value = values[key];
+      }
+      input.id = 'dr-' + key;
+      input.className = 'form__input';
+      input.addEventListener('input', function () { values[key] = input.value; updateState(); });
+      input.addEventListener('change', function () { values[key] = input.value; updateState(); });
+      row.appendChild(input);
+      inputs[key] = input;
+      card.appendChild(row);
+    }
+
+    field('question', 'Вопрос кейса');
+    field('answer_in_practice', 'Ответ (практика)', { area: true });
+    field('business_line', 'Направление');
+    field('tags', 'Теги (через запятую)');
+    field('linked_docs', 'Ссылки на документы (через запятую)');
+    field('outcome', 'Итог', { select: ['resolved', 'escalated', 'rejected', 'open'] });
+
+    /* SUGGESTIONS */
+    if (sug.missing && sug.missing.length) {
+      var mBox = el('div', 'sug sug--missing');
+      mBox.appendChild(el('p', 'sug__title', 'Чего не хватает'));
+      sug.missing.forEach(function (m) {
+        var li = el('p', 'sug__item');
+        li.appendChild(el('strong', null, m.field + ': '));
+        li.appendChild(doc.createTextNode(m.why || ''));
+        if (m.note) li.appendChild(el('span', 'sug__note', ' — ' + m.note));
+        mBox.appendChild(li);
+      });
+      card.appendChild(mBox);
+    }
+
+    if (sug.conflicts && sug.conflicts.length) {
+      var cBox = el('div', 'sug sug--conflict');
+      cBox.appendChild(el('p', 'sug__title', 'С чем расходится'));
+      sug.conflicts.forEach(function (c) {
+        var li = el('p', 'sug__item');
+        li.appendChild(el('strong', null, c.with + ': '));
+        li.appendChild(doc.createTextNode(c.why || ''));
+        var link = el('button', 'linkish sug__link', 'открыть документ');
+        link.type = 'button';
+        link.addEventListener('click', function () { openDocument(c.with, c.with); });
+        li.appendChild(link);
+        cBox.appendChild(li);
+      });
+      card.appendChild(cBox);
+    }
+
+    var hasWarnings = (sug.conflicts || []).length > 0;
+    var ack = null;
+    if (hasWarnings) {
+      var ackRow = el('label', 'sug__ack');
+      ack = doc.createElement('input');
+      ack.type = 'checkbox';
+      ack.id = 'dr-ack';
+      ack.addEventListener('change', updateState);
+      ackRow.appendChild(ack);
+      ackRow.appendChild(el('span', null, 'Понимаю расхождение, всё равно добавить'));
+      card.appendChild(ackRow);
+    }
+
+    var statusRow = el('div', 'draftcard__status');
+    var addBtn = el('button', 'btn btn--primary', 'Добавить в базу');
+    addBtn.type = 'button';
+    addBtn.disabled = true;
+    statusRow.appendChild(addBtn);
+    var msg = el('span', 'form__err');
+    statusRow.appendChild(msg);
+    card.appendChild(statusRow);
+
+    var result = el('div', 'draftcard__result');
+    card.appendChild(result);
+
+    function updateState() {
+      var filled = values.question.trim() && values.answer_in_practice.trim();
+      var ackOk = !hasWarnings || (ack && ack.checked);
+      addBtn.disabled = !(filled && ackOk);
+    }
+    updateState();
+
+    addBtn.addEventListener('click', function () {
+      var caseObj = {
+        question: values.question.trim(),
+        answer_in_practice: values.answer_in_practice.trim(),
+        business_line: values.business_line.trim(),
+        tags: values.tags.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        linked_docs: values.linked_docs.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        outcome: values.outcome,
+        author_role: 'quality',
+        author_name: 'служба качества',
+        content_type: 'text',
+        source: 'escalation',
+        escalation_id: ticketId
+      };
+      var res = state.mock
+        ? global.MockLex.confirmDraft(ticketId, caseObj, ack ? ack.checked : false)
+        : { ok: true, case_id: 'case-????', affected: 'отправлено' };
+
+      clear(result);
+      if (res.ok) {
+        var okRow = el('div', 'draftcard__done');
+        okRow.appendChild(el('p', 'form__ok',
+          'Кейс ' + res.case_id + ' в базе. На этот вопрос теперь отвечают.'));
+        if (res.affected) okRow.appendChild(el('p', 'formcard__hint', res.affected));
+        var backBtn = el('button', 'btn', 'Вернуться к списку');
+        backBtn.type = 'button';
+        backBtn.addEventListener('click', function () { renderTicketsScreen(); refreshTicketNav(); });
+        okRow.appendChild(backBtn);
+        result.appendChild(okRow);
+        addBtn.disabled = true;
+      } else {
+        msg.textContent = res.error || 'не удалось добавить';
+        msg.className = 'form__err form__err--show';
+      }
+    });
+
+    return card;
+  }
+
+  function renderStatsScreen() {    var host = $('screen-stats');
     clear(host);
     host.appendChild(el('h2', 'section-title', 'Аналитика'));
     host.appendChild(el('p', 'section-sub',
@@ -963,33 +1355,36 @@
     return wrap;
   }
 
-  /* ------------------------------------------------------------------ отказ (§12.3) */
-
+  /* §12.3 / §17.4: отказ — нормальный результат, не ошибка.
+     Два разных текста: вне компетенции (§17) и нет в базе (§12.3). */
   function renderRefusal(host, data) {
     clear(host);
-    var box = el('div', 'refusal');
+    var outOfScope = data.kind === 'out_of_scope';
+    var box = el('div', outOfScope ? 'refusal refusal--scope' : 'refusal');
     var head = el('div', 'refusal__head');
-    head.appendChild(el('span', 'refusal__title', 'В базе знаний ответа нет'));
+    head.appendChild(el('span', 'refusal__title',
+      outOfScope ? 'Вопрос вне базы знаний организации' : 'В базе знаний ответа нет'));
     head.appendChild(el('span', 'refusal__kind', REFUSAL_KIND_LABEL[data.kind] || data.kind || ''));
     box.appendChild(head);
     box.appendChild(el('p', 'refusal__reason', data.reason || ''));
 
+    if (data.detail) box.appendChild(el('p', 'refusal__reason', data.detail));
+
+    /* Что искали — только для not_in_corpus: при out_of_scope поиска не было (§17.4). */
     if (data.searched) {
       var s = data.searched;
-      var searched = el('p', 'refusal__reason');
       var bits = [];
       if (s.documents != null) bits.push('документов: ' + s.documents);
       if (s.cases != null) bits.push('кейсов: ' + s.cases);
       if (s.business_lines && s.business_lines.length) bits.push('направлений: ' + s.business_lines.join(', '));
-      searched.textContent = 'Что искали — ' + bits.join(' · ');
+      var searched = el('p', 'refusal__reason', 'Что искали — ' + bits.join(' · '));
       box.appendChild(searched);
+    } else if (outOfScope) {
+      box.appendChild(el('p', 'refusal__reason',
+        'Поиск не выполнялся: вопрос не относится к предметной области базы знаний, поэтому тикет в службу качества не создаётся.'));
     }
 
-    if (data.hint) {
-      var hint = el('p', 'refusal__reason');
-      hint.appendChild(el('span', null, 'Подсказка: ' + data.hint));
-      box.appendChild(hint);
-    }
+    if (data.hint) box.appendChild(el('p', 'refusal__reason', 'Подсказка: ' + data.hint));
 
     if (data.sources && data.sources.length) {
       var srcs = el('div', 'refusal__sources');
@@ -999,6 +1394,41 @@
     }
     host.appendChild(box);
     scrollFeed();
+  }
+
+  /* §18.4: карточка тикета в чате — меняет состояние. */
+  function renderTicketCard(host, data, ctx) {
+    var box = el('div', 'ticketcard');
+    var status = data.status || 'open';
+    var head = el('div', 'ticketcard__head');
+    head.appendChild(el('span', 'ticketcard__badge ticketcard__badge--' + (TICKET_STATUS_TONE[status] || 'muted'),
+      TICKET_STATUS_LABEL[status] || status));
+    head.appendChild(el('span', 'ticketcard__id', data.ticket || ''));
+    head.appendChild(el('span', 'ticketcard__by', 'создан агентом автоматически'));
+    box.appendChild(head);
+
+    if (status === 'open' || status === 'assigned') {
+      box.appendChild(el('p', 'ticketcard__line', 'Вопрос передан в службу качества.'));
+      if (data.searched) {
+        var bits = [];
+        if (data.searched.documents != null) bits.push(data.searched.documents + ' документов');
+        if (data.searched.cases != null) bits.push(data.searched.cases + ' кейсов');
+        box.appendChild(el('p', 'ticketcard__line', 'Что проверили: ' + bits.join(', ')
+          + (data.eta ? ' · срок: ' + data.eta : '')));
+      }
+      if (data.assignee) box.appendChild(el('p', 'ticketcard__line', 'Взял в работу: ' + data.assignee));
+      if (data.reason) box.appendChild(el('p', 'ticketcard__reason', 'Почему: ' + data.reason));
+    } else if (status === 'closed' || status === 'answered') {
+      box.appendChild(el('p', 'ticketcard__line', 'Ваш вопрос решён'
+        + (data.case_id ? ' · добавлено в базу как кейс ' + data.case_id : '')));
+      if (ctx && ctx.onGetAnswer) {
+        var btn = el('button', 'btn btn--primary', 'Получить ответ');
+        btn.type = 'button';
+        btn.addEventListener('click', ctx.onGetAnswer);
+        box.appendChild(btn);
+      }
+    }
+    host.appendChild(box);
   }
 
   /* ------------------------------------------------------------------ уточнение (§10) */
@@ -1155,7 +1585,17 @@
     if (ev.type === 'refusal') {
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       renderRefusal(ctx.host, d);
-      consoleView.setStatus('отказ: ' + (REFUSAL_KIND_LABEL[d.kind] || d.kind || 'нет ответа'), 'idle');
+      consoleView.setStatus(d.kind === 'out_of_scope' ? 'вопрос вне компетенции базы' : 'отказ: ' + (REFUSAL_KIND_LABEL[d.kind] || d.kind || 'нет ответа'), 'idle');
+      return;
+    }
+
+    if (ev.type === 'escalate') {
+      if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
+      renderTicketCard(ctx.host, {
+        ticket: d.ticket, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason
+      }, {});
+      state.lastTicket = d.ticket;
+      consoleView.setStatus('тикет создан: ' + d.ticket + ' · ждёт службу качества', 'warn');
       return;
     }
 

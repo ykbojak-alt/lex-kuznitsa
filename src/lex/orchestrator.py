@@ -166,6 +166,7 @@ class Orchestrator:
         self._t0 = time.monotonic()
         self._timeline: dict[str, int] = {}
         self._dlg: Dialogue | None = None
+        self._auto_session: str = ""
 
     @property
     def dialogue(self) -> Dialogue:
@@ -197,10 +198,13 @@ class Orchestrator:
     # --------------------------------------------------------------- каскад
 
     async def run(self) -> AsyncIterator[Signal]:
-        """Генерирует сигналы по порядку. Завершение — answer/refusal/clarify + done.
+        """Генерирует сигналы по порядку. Завершение — answer/refusal/clarify/escalate + done.
 
         §10: если параметров задачи не хватает, шаг clarify идёт ВМЕСТО
         decompose, и поток закрывается без done.
+        §15: если поиск не дал ответа, диалог уточняет ещё (2-3 итерации),
+        а на исчерпании — эскалация в службу качества: последним шагом,
+        вместо verify.
         """
         state: dict = {}
         yield Signal("step", self._stage_accept(1, state))
@@ -209,6 +213,39 @@ class Orchestrator:
             yield Signal("step", self._clarify_step(2, state))
             yield clarify
             return                      # §10: после clarify поток закрывается
+        async for sig in self._run_stages(state):
+            yield sig
+        if state.get("escalate_pending"):
+            # §15: поиск не дал ответа. Либо ещё одна итерация уточнения,
+            # либо — эскалация в службу качества.
+            decision = self._escalation_decision(state)
+            if decision.questions:
+                state["clarify_questions"] = decision.questions
+                yield Signal("step", self._clarify_step(len(STEP_ORDER) + 1, state))
+                yield Signal("clarify", ClarifyData(
+                    session_id=self._session_id(),
+                    questions=[ClarifyQuestion(**q.to_dict()) for q in decision.questions],
+                    partial=self._search_summary(state),
+                    can_skip=True,
+                ))
+                return                  # §10: ждём ответа, поток закрывается без done
+            ticket = decision.escalate or {}
+            # §15.3: эскалация — последним шагом, вместо verify.
+            yield Signal("step", self._escalate_step(len(STEP_ORDER), ticket))
+            yield Signal("escalate", self.dialogue.escalate_event(ticket))
+            yield Signal("done", self._done())
+            return
+        final = state.get("final")
+        if final is not None:
+            yield Signal(final[0], final[1])
+        yield Signal("done", self._done())
+
+    async def _run_stages(self, state: dict) -> AsyncIterator[Signal]:
+        """Каскад decompose → verify.
+
+        Финальное событие не отдаёт сразу, а кладёт в state["final"]:
+        решение «отказ или эскалация» принимает run().
+        """
         stages = [
             ("decompose", self._stage_decompose),
             ("inspect", self._stage_inspect),
@@ -229,26 +266,81 @@ class Orchestrator:
                     outcome = await outcome
             except Exception as exc:  # ошибка стадии не должна терять контекст
                 yield Signal("error", ErrorData(message=str(exc), stage=key))
-                yield Signal("done", self._done())
+                state["final"] = ("done", None)
                 return
             if outcome is _STOP:
-                yield Signal("done", self._done())
+                state["final"] = ("done", None)
                 return
             if isinstance(outcome, Signal):
                 # Стадия сама решила, что на этом каскад заканчивается
                 # (clarify / ранний отказ).
                 yield outcome
                 if outcome.kind in ("clarify", "refusal"):
-                    yield Signal("done", self._done())
+                    state["final"] = (outcome.kind, outcome.data)
                     return
             elif isinstance(outcome, StepEvent):
                 self._timeline[key] = _now_ms(t_stage)
                 yield Signal("step", outcome)
                 if "final" in state:
                     final = state.pop("final")
-                    yield Signal(final[0], final[1])
-                    yield Signal("done", self._done())
+                    kind, payload = final
+                    if kind == "refusal" and self._should_escalate(payload, state):
+                        # §15: «не нашлось» — это сигнал к эскалации.
+                        state["escalate_pending"] = payload
+                        return
+                    state["final"] = final
                     return
+
+    # ------------------------------------------------- §15: эскалация
+
+    def _should_escalate(self, payload: object, state: dict) -> bool:
+        """§15: отказ «не нашлось» — повод для эскалации, а не для сдачи."""
+        kind = getattr(payload, "kind", "")
+        return kind in ("not_in_corpus", "no_access")
+
+    def _search_summary(self, state: dict) -> dict:
+        """Что именно искали — это обязательная часть заявки (§15.2)."""
+        hits = state.get("doc_hits") or []
+        allowed = state.get("allowed") or []
+        return {
+            "documents": len(self.corpus.documents),
+            "cases": len(self.cases.cases),
+            "accessible": len(allowed),
+            "top": [getattr(h.chunk, "doc_id", "") for h in hits][:5],
+        }
+
+    def _session_id(self) -> str:
+        """Сессия диалога. Без неё клиент не сможет продолжить уточнения."""
+        if self.opts.session_id:
+            return self.opts.session_id
+        if not self._auto_session:
+            self._auto_session = f"s-auto-{uuid.uuid4().hex[:8]}"
+        return self._auto_session
+
+    def _escalation_decision(self, state: dict):
+        """§15: уточнить ещё или эскалировать — решает модуль диалога."""
+        refusal = state.get("escalate_pending")
+        kind = getattr(refusal, "kind", "not_in_corpus")
+        return self.dialogue.after_search(
+            self._session_id(),
+            self.opts.question,
+            self.opts.role_id,
+            searched=self._search_summary(state),
+            kind=kind,
+            business_line=state.get("line"),
+        )
+
+    def _escalate_step(self, n: int, ticket: dict) -> StepEvent:
+        """§15.3: шаг эскалации — цвет orange, последний, вместо verify."""
+        reason = str(ticket.get("why_unresolved") or "")
+        iterations = int(ticket.get("iterations") or 0)
+        detail = f"заявка {ticket.get('id') or '?'}: {reason}"
+        if iterations:
+            detail += f" · уточнений: {iterations}"
+        return StepEvent.model_construct(
+            n=n, total=len(STEP_ORDER), key="escalate", title="Эскалация",
+            detail=detail, ms=_now_ms(self._t0), color="orange",
+        )
 
     # ---------------------------------------------------------------- шаги
 

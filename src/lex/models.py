@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 # единственная, которая вмещает оба требования.
 StepKey = Literal[
     "accept",
+    "policy",
     "decompose",
     "inspect",
     "retrieve",
@@ -32,6 +33,7 @@ StepKey = Literal[
 
 STEP_ORDER: tuple[str, ...] = (
     "accept",
+    "policy",
     "decompose",
     "inspect",
     "retrieve",
@@ -45,6 +47,7 @@ STEP_ORDER: tuple[str, ...] = (
 
 STEP_TITLES: dict[str, str] = {
     "accept": "Запрос принят",
+    "policy": "Проверка компетенции",
     "decompose": "Разбор вопроса",
     "inspect": "Разбор источников",
     "retrieve": "Поиск",
@@ -58,6 +61,7 @@ STEP_TITLES: dict[str, str] = {
 
 STEP_COLORS: dict[str, str] = {
     "accept": "slate",
+    "policy": "pink",
     "decompose": "violet",
     "inspect": "indigo",
     "retrieve": "cyan",
@@ -74,6 +78,9 @@ RefusalKind = Literal[
     "no_access",
     "not_in_corpus",
     "conflict_unresolved",
+    # §17: не искали вовсе — вопрос не про базу организации. Отличать от
+    # not_in_corpus: там тема наша, а ответа нет.
+    "out_of_scope",
 ]
 
 # Контракт §9: разная форма БД заказчика — текст, картинки, сканы.
