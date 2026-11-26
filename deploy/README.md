@@ -16,3 +16,19 @@
 `journalctl -u lex-stand -n 50 --no-pager`.
 **Откат:** `ssh <хост> 'systemctl disable --now lex-stand'`, затем `git revert`
 нужного коммита и повторный прогон скрипта. `.env` и `var/` откат не трогает.
+
+**Требования к хосту.** Минимум 4 ГБ RAM и **swap не меньше 4 ГБ** — два
+локальных модельных сервиса (`bge-m3` + `bge-reranker-base`) в пике занимают
+~3 ГиБ, и без swap ядро убивает процесс посреди запроса. Рекомендуется 8 ГБ
+RAM. Замеры, порог OOM и минимальные лимиты юнитов —
+[`../docs/DEPLOY-RESOURCES.md`](../docs/DEPLOY-RESOURCES.md).
+
+**Проверка здоровья стенда (три команды, 5 секунд):**
+
+```bash
+ssh <хост> 'systemctl is-active lex-stand lex-embed lex-rerank; free -m; swapon --show'
+```
+
+Ожидаемое: три `active`, `Swap` не меньше 4 ГБ, в `swapon` — один файл на 4 ГБ.
+Сторож `lex-watchdog.timer` зовёт `/api/health` каждые 2 минуты; лог —
+`/var/log/lex-watchdog.log`.

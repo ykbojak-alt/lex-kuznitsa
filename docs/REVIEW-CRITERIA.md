@@ -35,3 +35,10 @@
 - **Критерий 1:** ядро grounding+refusal+ticket есть, но доказуемость «нет внешних знаний» ограничена эвристикой и состоянием embed-сервиса; контур тикетов нужно унифицировать для демо.
 - **Критерий 2:** базовый clarify/after_search реализован; для приёмки важны негативные кейсы на пропуск уточнения и единый путь эскалации.
 - **Критерий 3:** петля «вопрос→ответ качества→кейс/CR» частично реализована; полного «дообучения регламента» нет — это управляемый human-in-the-loop процесс, что надо явно проговорить на демо.
+
+## Опорные точки в коде
+
+- Grounding/verify: `src/lex/grounding.py`, `src/lex/orchestrator.py:_stage_verify/_open_ticket`.
+- Clarify/escalate: `src/lex/dialogue.py:needs_clarification/after_search/escalate`, `src/lex/orchestrator.py:_stage_clarify/_escalation_decision`.
+- Кейсы/CR/тикеты: `src/lex/cases.py`, `src/lex/changes.py`, `src/lex/tickets.py`, `src/api/tickets.py`, `src/api/changes.py`, `src/api/app.py`.
+- Ограничение: при падении embed grounding ставит `similarity_checked=False` и не блокирует ответ по similarity — это нужно показывать честно, не как «100% без галлюцинаций».

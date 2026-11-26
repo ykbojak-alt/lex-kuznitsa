@@ -27,7 +27,7 @@
 Стек: Python 3.11+, FastAPI + uvicorn. Порт разработки — **8874**, на sage-pl — за Caddy (`:4437`).
 
 **Примеры сняты с живого стенда 26.11.2026** (внешний `https://2.27.5.234.nip.io:4437`,
-корпус `corpus-real` — 4 документа, 154 чанка, модель `claude-opus-4-6`): role_id,
+корпус `corpus-real` — 4 документа, 154 чанка): role_id,
 состав ролей, тексты вопросов, цитаты и номера заявок — реальные. Примеры с
 `ТЗ-ЭКЗ-*`, направлением «закупки» и «27 документами» — из синтетического
 `sample-corpus`: они показывают форму ответа, а не данные заказчика.
@@ -45,7 +45,7 @@ src/
     rerank.py          # реранкер (:8082)
     access.py          # роли и фильтр прав                        [ACE]
     editions.py        # логика действующей редакции
-    orchestrator.py    # 8 шагов, эмиссия событий
+    orchestrator.py    # 9 шагов на corpus-real (11 полных), эмиссия событий
     llm.py             # клиент NexusLink (sage-pl), профили
     journal.py         # журнал JSONL + агрегаты                   [ACE]
     models.py          # pydantic-схемы (общие для API и ядра)
@@ -67,11 +67,11 @@ src/
 
 ### `GET /api/health`
 ```json
-{"status":"ok","version":"1.0.0",
- "llm":{"slot":"claude-sonnet-5","base":"…","reachable":true},
+{"status":"ok","version":"1.14.0",
+ "llm":{"slot":"claude-opus-4-6","base":"…","reachable":true},
  "embed":{"model":"bge-m3","dim":1024,"reachable":true},
  "rerank":{"model":"bge-reranker-base","reachable":true},
- "corpus":{"documents":27,"chunks":412}}
+ "corpus":{"documents":4,"chunks":154}}
 ```
 `reachable` — результат живой проверки, не константа.
 
@@ -131,9 +131,11 @@ src/
 Порядок фиксирован (`src/lex/models.py: STEP_ORDER`). Каждый `step` — отдельная
 запись; UI рисует строку в Console Lex.
 
-**Ответ по регламенту — 11 шагов.** Условные шаги (`clarify`, `inspect` для
-сканов, `escalate`) появляются только когда нужны, поэтому `total` в событии —
-это `len(STEP_ORDER)`, а фактических строк в потоке может быть меньше.
+**Ответ по регламенту — 9 шагов на `corpus-real`, 11 полных.** Условные шаги
+(`clarify`, `inspect` для сканов, `escalate`) появляются только когда нужны,
+поэтому `total` в событии — это `len(STEP_ORDER)` (11), а фактических строк в
+потоке на корпусе заказчика 9: шаги `resolve` и `conflict` пропускаются, когда
+в манифесте нет `conflict_rules` (`src/lex/orchestrator.py:392-404`).
 
 | # | `key` | Заголовок в UI | Что в `detail` |
 |---|---|---|---|
@@ -229,7 +231,10 @@ data: {"message":"…","stage":"retrieve"}
 
 ## 5. Модель
 
-NexusLink на sage-pl, слот `NEXUS_LINK_MODEL` (сейчас `claude-sonnet-5`).
+NexusLink на sage-pl, слот `NEXUS_LINK_MODEL`. **Слот на стенде меняется**:
+27.11.2026 ночью читался как `claude-sonnet-4-7`, через час — как `claude-opus-4-6`
+(`GET /api/health` → `llm.slot`). Перед записью — сверять слот и перепрогнать
+контрольные вопросы: тайминги и доли отказов зависят от слота.
 Переменные — из `.env` (не в коде!): `NEXUSLINK_KEY`, `NEXUS_LINK_BASE_URL`,
 `NEXUS_LINK_MODEL`. Эндпоинт `POST /v1/chat/completions`, `max_tokens ≥ 1024`
 (иначе ответ приходит только блоком `thinking`).
