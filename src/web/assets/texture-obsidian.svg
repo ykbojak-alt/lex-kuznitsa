@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 128" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  <defs>
+    <pattern id="obsidian-facets" width="160" height="128" patternUnits="userSpaceOnUse">
+      <g fill="none" stroke="currentColor" stroke-width=".7" stroke-linejoin="round">
+        <path d="M0 0 40 32 80 0 120 32 160 0M0 64 40 32 80 64 120 32 160 64M0 128 40 96 80 128 120 96 160 128M0 64 40 96 80 64 120 96 160 64"/>
+        <path d="M40 32v64m40-96v64m40-32v64"/>
+      </g>
+      <path d="m40 32 40-32v64l-40 32Zm80 0 40 32v64l-40-32Z" fill="currentColor" fill-opacity=".18"/>
+    </pattern>
+  </defs>
+  <rect width="160" height="128" fill="url(#obsidian-facets)" opacity=".04"/>
+</svg>

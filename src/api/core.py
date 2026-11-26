@@ -2,7 +2,7 @@
 
 Здесь НЕТ логики RAG: только поиск модулей ядра и приведение их ответов к форме,
 которую ждёт SSE. Пока ядро не написано (FORGE), используется заглушка —
-она отдаёт все 8 шагов и честный ответ-плейсхолдер, чтобы контракт SSE можно
+она отдаёт все шаги и честный ответ-плейсхолдер, чтобы контракт SSE можно
 было проверить end-to-end.
 
 Ожидаемый интерфейс ядра (согласовать с FORGE):
@@ -14,6 +14,7 @@
     lex.journal.append(entry: dict) -> None
     lex.journal.read(limit: int, role_id: str | None) -> list[dict]
     lex.journal.aggregate() -> dict    (форма §2 /api/analytics)
+    lex.cases.* -> см. api/cases.py
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ def core_modules() -> dict[str, Any]:
         "corpus": _try("lex.corpus"),
         "access": _try("lex.access"),
         "journal": _try("lex.journal"),
+        "cases": _try("lex.cases"),
     }
 
 
@@ -67,6 +69,20 @@ def manifest() -> dict:
 def manifest_documents() -> list[dict]:
     docs = manifest().get("documents") or []
     return [d for d in docs if isinstance(d, dict)]
+
+
+def content_type_mix() -> dict[str, int]:
+    """Сколько в корпусе источников каждого типа (§9). Нет поля — значит text."""
+    mix = {"text": 0, "image": 0, "scan": 0, "mixed": 0}
+    for d in manifest_documents():
+        ct = str(d.get("content_type") or "text")
+        mix[ct if ct in mix else "text"] += 1
+    return mix
+
+
+def has_nontext() -> bool:
+    mix = content_type_mix()
+    return any(mix[k] for k in ("image", "scan", "mixed"))
 
 
 def corpus_stats() -> dict:
@@ -247,10 +263,14 @@ STUB_STEP_DELAY = float(os.environ.get("LEX_STUB_STEP_DELAY", "0.12"))
 
 def _stub_detail(key: str, question: str, role_id: str, as_of: str | None) -> str:
     n = len(manifest_documents())
+    mix = content_type_mix()
     return {
         "accept": f"роль {role_id}, дата отсчёта {as_of or 'сегодня'}",
         "decompose": "1 подвопрос: " + question[:80],
-        "retrieve": f"BM25 0 · вектор 0 → топ 0 (корпус {n} док.)",
+        "inspect": (f"текст {mix['text']} · картинки {mix['image']} · "
+                    f"сканы {mix['scan']} · смешанные {mix['mixed']}"),
+        "retrieve": f"документов {n}, кейсов 0 · вектор 0 → топ 0",
+        "cases": "найдено 0 кейсов, из них по теме 0",
         "permissions": f"доступно 0 из {n}, отброшено {n}",
         "resolve": "0 редакций, действующей нет",
         "conflict": "конфликтов: 0",
@@ -259,16 +279,17 @@ def _stub_detail(key: str, question: str, role_id: str, as_of: str | None) -> st
     }.get(key, "")
 
 
-async def _stub_stream(question: str, role_id: str, as_of: str | None) -> AsyncIterator[CoreEvent]:
-    """Заглушка: 8 шагов в фиксированном порядке, затем честный ответ-плейсхолдер."""
-    for i, key in enumerate(step_keys(), start=1):
+async def _stub_stream(question: str, role_id: str, as_of: str | None,
+                       keys: list[str]) -> AsyncIterator[CoreEvent]:
+    """Заглушка: все шаги плана по порядку, затем честный ответ-плейсхолдер."""
+    for i, key in enumerate(keys, start=1):
         await asyncio.sleep(STUB_STEP_DELAY)
         yield ("step", {"n": i, "key": key,
                         "detail": _stub_detail(key, question, role_id, as_of),
                         "ms": int(STUB_STEP_DELAY * 1000)})
     yield ("answer", {
         "text": "Ядро LEX (src/lex) ещё не подключено — это ответ HTTP-слоя-заглушки. "
-                "SSE-контракт при этом соблюдён: 8 шагов, затем answer, затем done.",
+                "SSE-контракт при этом соблюдён: шаги, затем answer, затем done.",
         "citations": [],
         "refused": False,
         "stub": True,
@@ -284,17 +305,18 @@ def _core_stream(question: str, role_id: str, as_of: str | None) -> AsyncIterato
 
 
 async def stream_answer(question: str, role_id: str, as_of: str | None) -> AsyncIterator[str]:
-    """Единая точка: поток кадров SSE по §3 с гарантией завершения.
+    """Единая точка: поток кадров SSE с гарантией завершения.
 
     Инварианты, которые держит именно этот слой:
-      * ровно 8 step в фиксированном порядке (пропущенные дополняются);
+      * шаги идут в фиксированном порядке плана (пропущенные дополняются);
       * ровно одно answer ИЛИ refusal;
       * затем всегда done; при ошибке — event: error вместо answer/refusal.
     """
     started = time.perf_counter()
     journal_id = "q-" + uuid.uuid4().hex[:10]
     inference_path = "nexus-link" if config.NEXUS_LINK_BASE_URL else "local"
-    keys = step_keys()
+    include_inspect = has_nontext()
+    keys = step_keys(include_inspect)
     emitted = 0
     terminal_sent = False
     failed = False
@@ -311,18 +333,22 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
         "as_of": as_of,
     }
 
-    def fill_missing() -> list[str]:
+    def fill_until(upto: int) -> list[str]:
         nonlocal emitted
         out = []
         ms = int((time.perf_counter() - started) * 1000)
-        for idx in range(emitted, len(keys)):
-            out.append(sse.step(idx + 1, keys[idx], "шаг не сообщён ядром", ms))
-        emitted = len(keys)
+        for idx in range(emitted, upto):
+            out.append(sse.step(idx + 1, keys[idx], "шаг не сообщён ядром", ms,
+                                include_inspect))
+        emitted = max(emitted, upto)
         return out
+
+    def fill_rest() -> list[str]:
+        return fill_until(len(keys))
 
     try:
         source = (_core_stream(question, role_id, as_of) if core_ready()
-                  else _stub_stream(question, role_id, as_of))
+                  else _stub_stream(question, role_id, as_of, keys))
         async for event, data in source:
             if event == "step":
                 key = str(data.get("key", ""))
@@ -331,14 +357,14 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
                 n = keys.index(key) + 1
                 if n <= emitted:
                     continue  # повтор/перестановка: порядок фиксирован контрактом
-                for extra in fill_missing():
+                for extra in fill_until(n - 1):
                     yield extra
                 emitted = n
                 ms = int(data.get("ms", 0) or 0)
                 entry["steps"].append({"key": key, "ms": ms})
-                yield sse.step(n, key, str(data.get("detail", "")), ms)
+                yield sse.step(n, key, str(data.get("detail", "")), ms, include_inspect)
             elif event == "answer":
-                for extra in fill_missing():
+                for extra in fill_rest():
                     yield extra
                 entry["refused"] = bool(data.get("refused", False))
                 entry["doc_ids"] = sorted({
@@ -347,10 +373,11 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
                 })
                 yield sse.answer(str(data.get("text", "")),
                                  list(data.get("citations") or []),
-                                 bool(data.get("refused", False)))
+                                 bool(data.get("refused", False)),
+                                 list(data.get("assumptions") or []) or None)
                 terminal_sent = True
             elif event == "refusal":
-                for extra in fill_missing():
+                for extra in fill_rest():
                     yield extra
                 entry["refused"] = True
                 entry["doc_ids"] = list(data.get("sources") or [])
@@ -363,7 +390,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None) -> Async
             elif event == "error":
                 raise RuntimeError(str(data.get("message", "ошибка ядра")))
         if not terminal_sent:
-            for extra in fill_missing():
+            for extra in fill_rest():
                 yield extra
             entry["refused"] = True
             entry["refusal_kind"] = "not_in_corpus"

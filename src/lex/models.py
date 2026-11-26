@@ -11,11 +11,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Порядок фиксирован контрактом §3 — это не «примерно», а закон.
+# Порядок фиксирован контрактом §3 + §8 (v1.1) + §9 (v1.1) — это не «примерно»,
+# а закон. v1.1 добавила два шага: `cases` (после retrieve) и `inspect`
+# (перед retrieve), поэтому total = 10, а не 9: §8 говорит «total становится 9»
+# до того, как §9 добавила inspect, и сам же §8 требует порядок
+# accept → decompose → retrieve → cases → …. Фактическая очерёдность ниже —
+# единственная, которая вмещает оба требования.
 StepKey = Literal[
     "accept",
     "decompose",
+    "inspect",
     "retrieve",
+    "cases",
     "permissions",
     "resolve",
     "conflict",
@@ -23,10 +30,12 @@ StepKey = Literal[
     "verify",
 ]
 
-STEP_ORDER: tuple[StepKey, ...] = (
+STEP_ORDER: tuple[str, ...] = (
     "accept",
     "decompose",
+    "inspect",
     "retrieve",
+    "cases",
     "permissions",
     "resolve",
     "conflict",
@@ -37,7 +46,9 @@ STEP_ORDER: tuple[StepKey, ...] = (
 STEP_TITLES: dict[str, str] = {
     "accept": "Запрос принят",
     "decompose": "Разбор вопроса",
+    "inspect": "Разбор источников",
     "retrieve": "Поиск",
+    "cases": "Поиск по кейсам",
     "permissions": "Проверка прав",
     "resolve": "Действующая редакция",
     "conflict": "Сопоставление",
@@ -48,7 +59,9 @@ STEP_TITLES: dict[str, str] = {
 STEP_COLORS: dict[str, str] = {
     "accept": "slate",
     "decompose": "violet",
+    "inspect": "indigo",
     "retrieve": "cyan",
+    "cases": "teal",
     "permissions": "amber",
     "resolve": "blue",
     "conflict": "rose",
@@ -62,6 +75,12 @@ RefusalKind = Literal[
     "not_in_corpus",
     "conflict_unresolved",
 ]
+
+# Контракт §9: разная форма БД заказчика — текст, картинки, сканы.
+ContentType = Literal["text", "image", "scan", "mixed"]
+
+# Контракт §8: исход практического кейса.
+CaseOutcome = Literal["resolved", "escalated", "rejected", "open"]
 
 
 class StepEvent(BaseModel):
@@ -82,12 +101,25 @@ class Citation(BaseModel):
     revision: int | None = None
     effective: str | None = None
     quote: str
+    # §9: цитата из нетекстового источника несёт тип, страницу, уверенность
+    # распознавания и ссылку на превью — иначе «показать источник» не работает.
+    content_type: ContentType | None = None
+    page: int | None = None
+    preview_url: str | None = None
+    ocr_confidence: float | None = None
+    # §8: пометки о происхождении — кейс или нормативный документ.
+    source_kind: Literal["doc", "case"] | None = None
+    case_id: str | None = None
+    low_confidence: bool = False
 
 
 class AnswerData(BaseModel):
     text: str
     citations: list[Citation] = Field(default_factory=list)
     refused: bool = False
+    # §8: кейс противоречит регламенту либо регламент не покрывает.
+    practice_only: bool = False
+    notes: list[str] = Field(default_factory=list)
 
 
 class RefusalData(BaseModel):
@@ -166,6 +198,10 @@ class DocumentMeta(BaseModel):
     sha256: str = ""
     words: int = 0
     sections: list[str] = Field(default_factory=list)
+    # §9: у каждого элемента корпуса есть тип содержимого.
+    content_type: ContentType = "text"
+    ocr_confidence: float | None = None
+    ocr_status: str = ""
 
 
 class Chunk(BaseModel):
@@ -182,6 +218,12 @@ class Chunk(BaseModel):
     revision: int | None = None
     effective: str | None = None
     position: int = 0
+    # §8/§9: различаем документ и кейс, текст и скан.
+    kind: Literal["doc", "case"] = "doc"
+    content_type: ContentType = "text"
+    page: int | None = None
+    ocr_confidence: float | None = None
+    source_file: str = ""
 
 
 class CorpusStats(BaseModel):

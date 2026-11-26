@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>LEX — ассистент по документам</title>
+<link rel="stylesheet" href="lex.css">
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <main class="pane pane--chat" aria-label="LEX, чат с ассистентом">
+
+    <header class="bar chat-head">
+      <div class="brand">
+        <svg class="brand__mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 2.6 21 12l-9 9.4L3 12l9-9.4Z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M12 7.2 16.6 12 12 16.8 7.4 12 12 7.2Z" fill="currentColor" opacity=".55"/>
+        </svg>
+        <span class="brand__name">LEX</span>
+        <span class="brand__sub">ассистент по документам</span>
+      </div>
+      <div class="head-right">
+        <span class="chip" id="modeChip" title="режим работы">…</span>
+        <span class="chip chip--role" id="roleChip" hidden></span>
+      </div>
+    </header>
+
+    <section class="bar rolebar" aria-labelledby="roleLegend">
+      <span class="rolebar__label" id="roleLegend">Роль <em>обязательно</em></span>
+      <div class="roles" role="radiogroup" aria-labelledby="roleLegend" id="roles"></div>
+    </section>
+
+    <section class="feed" id="feed" role="log" aria-live="polite" aria-label="Лента диалога">
+      <article class="intro" id="intro">
+        <h1 class="intro__title">Спросите по документам</h1>
+        <p class="intro__lead">Ответ приходит с цитатами из действующей редакции. Если ответить нельзя — LEX объясняет причину отказа.</p>
+        <ul class="intro__list">
+          <li>Выберите роль: от неё зависят права доступа к документам.</li>
+          <li>Задайте вопрос. Дата «на какую дату» необязательна.</li>
+          <li>Шаги агента идут справа, в Console Lex — человеческим языком.</li>
+        </ul>
+      </article>
+    </section>
+
+    <form class="bar composer" id="composer" autocomplete="off">
+      <label class="sr-only" for="question">Вопрос по документам</label>
+      <textarea id="question" rows="2" placeholder="Например: какой срок согласования заявки на закупку?"
+                aria-describedby="sendHint"></textarea>
+      <div class="composer__row">
+        <label class="asof" for="asOf">
+          <span>на какую дату</span>
+          <input id="asOf" type="date" aria-label="Действующая редакция на дату">
+        </label>
+        <span class="hint" id="sendHint">выберите роль — права доступа обязательны</span>
+        <button class="send" id="send" type="submit" aria-label="Отправить вопрос">Спросить</button>
+      </div>
+    </form>
+
+  </main>
+
+  <aside class="pane pane--console" aria-label="Console Lex, шаги агента">
+    <header class="bar console-head">
+      <span class="console-title">Console Lex</span>
+      <span class="console-meta" id="consoleMeta">0 шагов · 0.0 с</span>
+    </header>
+    <div class="console-body" id="consoleBody" role="log" aria-label="Шаги обработки запроса"></div>
+    <footer class="bar console-foot">
+      <span class="console-status" id="consoleStatus">ожидание запроса</span>
+      <button class="ghost" id="consoleClear" type="button" aria-label="Очистить консоль">очистить</button>
+    </footer>
+  </aside>
+
+</div>
+
+<noscript>Для работы LEX нужен JavaScript.</noscript>
+
+<script src="console-view.js"></script>
+<script src="mock-lex.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
