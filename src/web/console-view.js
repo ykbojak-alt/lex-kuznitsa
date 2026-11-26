@@ -18,6 +18,7 @@
      color в событии не используется: цвета мапит UI сам, как требует §3. */
   var STEP_META = {
     accept: { title: 'Запрос принят' },
+    policy: { title: 'Проверка компетенции' },
     decompose: { title: 'Разбор вопроса' },
     clarify: { title: 'Уточнение' },
     inspect: { title: 'Разбор источников' },
@@ -27,7 +28,8 @@
     resolve: { title: 'Действующая редакция' },
     conflict: { title: 'Сопоставление' },
     compose: { title: 'Сборка ответа' },
-    verify: { title: 'Самопроверка' }
+    verify: { title: 'Самопроверка' },
+    escalate: { title: 'Передано в службу качества' }
   };
 
   function el(tag, cls, text) {

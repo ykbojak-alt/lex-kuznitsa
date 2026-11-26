@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 120" color="#202122" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="empty-title">
+  <title id="empty-title">Ничего не найдено</title>
+  <path d="M30 15h46l15 15v50H30z"/>
+  <path d="M76 15v15h15M40 42h31M40 51h22M40 60h17" stroke="#54595d"/>
+  <path d="M40 69h11" stroke="#3366cc"/>
+  <circle cx="99" cy="75" r="17" fill="#fff"/>
+  <path d="m111 87 16 16" stroke="#202122" stroke-width="1.6"/>
+  <path d="M93 75h12M99 69v12" stroke="#a2a9b1"/>
+  <path d="M26 101h61" stroke="#a2a9b1"/>
+</svg>

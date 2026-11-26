@@ -28,6 +28,10 @@ def _dialogue(tmp: Path) -> Dialogue:
 def main() -> int:
     tmp = ROOT / "var"
     tmp.mkdir(parents=True, exist_ok=True)
+    # Сессии из прошлого прогона делают проверку ложноположительной: счётчик
+    # кругов уже исчерпан, и тест 3 падает. Чистим только свои файлы.
+    for stale in ("sessions-check.jsonl", "sessions-check-skip.jsonl"):
+        (tmp / stale).unlink(missing_ok=True)
     dlg = _dialogue(tmp)
     ok = True
 

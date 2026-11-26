@@ -31,10 +31,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Iterable
 
-from . import editions, llm, rerank
+from . import detail, editions, llm, rerank
 from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
+from .forms import get_form
 from .grounding import GroundingReport, check_grounding
 from .index import EmbeddingError, SearchIndex, embed_texts, get_index
 from .media import inspect_corpus, render_page
@@ -362,11 +363,14 @@ class Orchestrator:
         as_of = self.opts.as_of
         allowed = state.get("allowed") or []
         # §12: если в вопросе есть правило и на дату нет действующей редакции —
-        # это no_edition_in_force, а не «не найдено».
-        keys = self._rule_keys(allowed)
+        # это no_edition_in_force, а не «не найдено». Отказывает только правило,
+        # которое относится к вопросу (см. _rules_with_focus).
+        with_focus = self._rules_with_focus(allowed)
+        keys = [k for k, _ in with_focus]
+        focused = {k for k, on_topic in with_focus if on_topic}
         resolutions = editions.resolve_many(self.corpus, keys, as_of)
         state["resolutions"] = resolutions
-        expired = [r for r in resolutions if not r.ok]
+        expired = [r for r in resolutions if not r.ok and r.rule.key in focused]
         if expired and keys:
             rule = expired[0].rule
             first = rule.first_effective or (rule.revisions[0].effective if rule.revisions else "?")
@@ -390,9 +394,10 @@ class Orchestrator:
         case_hits = state.get("case_hits") or []
         notes: list[str] = []
         conflicts = 0
-        for ch in case_hits:
-            linked = set(getattr(ch.chunk, "linked_docs", []) or [])
-            rule_key = getattr(ch.chunk, "rule_key", "")
+        # В case_hits лежат объекты Case (не чанки) — у кейса есть .id/.rule_key
+        # напрямую.
+        for case in case_hits:
+            rule_key = getattr(case, "rule_key", "")
             if not rule_key:
                 continue
             res = next((r for r in (state.get("resolutions") or []) if r.rule.key == rule_key), None)
@@ -400,7 +405,7 @@ class Orchestrator:
                 conflicts += 1
                 notes.append(
                     f"по регламенту {res.rule.key} действует «{res.in_force.value}», "
-                    f"в практике был случай {ch.chunk.doc_id}"
+                    f"в практике был случай ({case.id})"
                 )
         state["conflict_notes"] = notes
         if conflicts:
@@ -450,11 +455,14 @@ class Orchestrator:
             ))
             return _step(n, "verify", report.detail(), self._t0, color="amber")
 
-        # Барьер 3: усекаем до покрытых частей.
-        if report.external:
+        # Барьер 3: усекаем до покрытых частей — и отдаём усечённый ответ.
+        # Раньше здесь стоял return без state["final"], и каскад завершался
+        # молчанием: 10 шагов, ноль ответа. Усечение — это всё ещё ответ,
+        # просто короче, поэтому дальше идёт обычная сборка AnswerData.
+        truncated = report.external
+        if truncated:
             state["answer_text"] = report.covered_text()
-            state["truncated"] = report.external
-            return _step(n, "verify", report.detail(), self._t0, color="amber")
+            text = state["answer_text"]
 
         citations = self._citations(frames, text)
         notes: list[str] = []
@@ -468,17 +476,33 @@ class Orchestrator:
         if practice_only:
             notes.append("по практике, регламент не покрывает")
 
-        state["final"] = ("answer", AnswerData(
-            text=state.get("answer_text") or "",
-            citations=citations,
-            refused=False,
-            practice_only=practice_only,
-            notes=notes,
-            session_id=self.opts.session_id,
-            grounding={"total": report.total, "covered": report.covered,
-                       "external": report.external, "threshold": report.threshold},
-        ))
-        return _step(n, "verify", report.detail(), self._t0)
+        # §13.1: первый ответ — выжимка; развёрнутое — по запросу, из тех же
+        # фрагментов. Барьер §12 проверен выше, на полном тексте.
+        full_text = state.get("answer_text") or ""
+        short = detail.shorten(full_text)
+        detail_id = self._remember_detail(frames, full_text, citations, state)
+        form_notes = self._form_notes(state)
+
+        state["final"] = (
+            "answer",
+            AnswerData(
+                text=full_text,
+                short=short,
+                has_details=bool(frames),
+                detail_id=detail_id,
+                citations=citations,
+                refused=False,
+                practice_only=practice_only,
+                notes=notes + form_notes
+                + ([] if not truncated else [f"{truncated} утверждений отброшено (нет цитаты)"]),
+                forms=state.get("matched_forms") or [],
+                session_id=self.opts.session_id,
+                grounding={"total": report.total, "covered": report.covered,
+                           "external": report.external, "threshold": report.threshold},
+            ),
+        )
+        return _step(n, "verify", report.detail(), self._t0,
+                     color="amber" if truncated else None)
 
     # ------------------------------------------------------------- помощники
 
@@ -575,16 +599,38 @@ class Orchestrator:
         return allowed, dropped
 
     def _rule_keys(self, hits: list) -> list[str]:
-        keys: list[str] = []
+        return [k for k, _ in self._rules_with_focus(hits)]
+
+    def _rules_with_focus(self, hits: list) -> list[tuple[str, bool]]:
+        """Правила с признаком «это про вопрос».
+
+        Найденный документ сам по себе не значит, что его правило относится к
+        вопросу: на вопрос про срок (SR-01) поиск исправно приносит и порог
+        одобрения (SR-03). Если отказывать по любому найденному правилу, вопрос
+        получит отказ из-за документа, про который его не спрашивали. Поэтому
+        «фокусным» правило считается, только когда совпадает с вопросом по
+        ключу, названию поля или теме правила.
+        """
+        question = self.opts.question.lower()
+        out: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+
+        for rule_key, rule in self.corpus.rules.items():
+            if rule_key.lower() in question:
+                out.append((rule_key, True))
+                seen.add(rule_key)
+                continue
+            probes = [p for p in (rule.field, rule.short, rule.topic) if p]
+            if any(p.lower() in question for p in probes):
+                out.append((rule_key, True))
+                seen.add(rule_key)
+
         for h in hits:
             k = getattr(h.chunk, "rule_key", "")
-            if k and k not in keys:
-                keys.append(k)
-        # Если правило названо в вопросе — оно главнее найденного по совпадению.
-        for rule_key in self.corpus.rules:
-            if rule_key.lower() in self.opts.question.lower() and rule_key not in keys:
-                keys.insert(0, rule_key)
-        return keys
+            if k and k not in seen:
+                out.append((k, False))
+                seen.add(k)
+        return out
 
     def _build_frames(self, doc_hits: list, case_hits: list) -> list[Frame]:
         frames: list[Frame] = []
@@ -683,6 +729,102 @@ class Orchestrator:
             "cases": len(self.cases.cases),
             "business_lines": [state["line"]] if state.get("line") else [],
         }
+
+    # ------------------------------------------------- §13: раскрытие и формы
+
+    def _remember_detail(self, frames: list[Frame], full_text: str,
+                         citations: list[Citation], state: dict) -> str:
+        """Сохраняет развёрнутую версию под ``detail_id`` — её отдаст expand().
+
+        Хранится только то, что уже было в контексте: фрагменты + полный текст
+        ответа. Никаких новых знаний раскрытие не добавляет (§13.1).
+        """
+        detail_id = f"d-{uuid.uuid4().hex[:6]}"
+        sections = detail.sections_from_chunks([f for f in frames])
+        tables = []
+        for rule_key in {f.rule_key for f in frames if f.rule_key}:
+            rule = self.corpus.rules.get(rule_key)
+            table = detail.revisions_table(rule)
+            if table is not None:
+                tables.append(table.to_dict())
+        _DETAILS[detail_id] = {
+            "short": detail.shorten(full_text),
+            "detailed": full_text,
+            "sections": [s.to_dict() for s in sections],
+            "tables": tables,
+            "citations": [c.model_dump() for c in citations],
+            "frames": [f.render() for f in frames],
+            "state": {"as_of": state.get("as_of_label")},
+        }
+        return detail_id
+
+    def _form_notes(self, state: dict) -> list[str]:
+        """§13.3: карточка формы — если в найденных документах есть форма."""
+        try:
+            from .forms import load_forms
+        except Exception:
+            return []
+        try:
+            available = load_forms(self.opts.corpus_root)
+        except Exception:
+            return []
+        if not available:
+            return []
+        doc_ids = {getattr(h.chunk, "doc_id", "") for h in (state.get("allowed") or [])}
+        state["matched_forms"] = [
+            {"form_id": f.form_id, "title": f.title, "doc_id": f.doc_id,
+             "fields": len(f.fields), "format": f.format}
+            for f in available if f.doc_id in doc_ids
+        ]
+        if not state["matched_forms"]:
+            # Формы есть, но не по этому документу — не навязываем.
+            state["matched_forms"] = []
+        return [f"есть форма: {m['title']} ({m['form_id']})" for m in state["matched_forms"]]
+
+
+# ------------------------------------------------------------------ раскрытие
+
+_DETAILS: dict[str, dict] = {}
+
+
+def expand(detail_id: str, section: str = "all") -> dict | None:
+    """Развёрнутая версия ответа (§13.1). None — такого detail_id нет.
+
+    Строится из сохранённых фрагментов, поэтому новых знаний не несёт;
+    заправшиваемый раздел (``exceptions``/``procedure``/``roles``) фильтрует
+    секции, а не добавляет текст.
+    """
+    stored = _DETAILS.get(detail_id)
+    if stored is None:
+        return None
+    from .detail import DetailSection, pick_section
+
+    sections = [DetailSection(**s) for s in stored.get("sections", [])]
+    chosen = pick_section(sections, section) if section and section != "all" else sections
+    out = dict(stored)
+    out["sections"] = [s.to_dict() for s in chosen]
+    out["section_requested"] = section
+    return out
+
+
+def available_forms(corpus_root: str | Path) -> list[dict]:
+    """Список форм для ``GET /api/forms`` (§13.3)."""
+    from .forms import load_forms
+
+    return [f.to_dict() for f in load_forms(corpus_root)]
+
+
+def download_form_path(corpus_root: str | Path, form_id: str) -> Path | None:
+    """Путь к бланку формы. Бланк — markdown-описание полей, если файла нет."""
+    form = get_form(corpus_root, form_id)
+    if form is None:
+        return None
+    base = Path(corpus_root) / "forms"
+    for name in (f"{form_id}.md", f"{form_id}.docx", f"{form_id}.pdf"):
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 _STOP = object()

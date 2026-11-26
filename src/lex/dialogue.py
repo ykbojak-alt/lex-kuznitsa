@@ -44,6 +44,11 @@ QuestionKind = Literal["date", "choice", "text", "doc_id"]
 
 MAX_QUESTIONS_PER_ROUND = 3
 MAX_CLARIFY_ROUNDS = 2
+# §15 (v1.7): уточняющих итераций должно быть 2..3. Меньше двух — рано
+# сдаваться (сотрудник не успел уточнить), больше трёх — допрос. Дальше
+# не уточнение, а эскалация в службу качества.
+MIN_CLARIFY_ITERATIONS = 2
+MAX_CLARIFY_ITERATIONS = 3
 DEFAULT_TTL_SECONDS = 30 * 60
 
 #: Ответы, которые считаются «пропуском» (контракт §10: «не знаю» или отсутствие ключа).
@@ -161,6 +166,15 @@ def extract_amount(text: str | None) -> str | None:
     return None
 
 
+def _stems_of(text: str | None) -> set[str]:
+    """Основы слов (первые 4 буквы) — для сравнения словоформ."""
+    out: set[str] = set()
+    for word in _norm(text).split():
+        if len(word) >= 4:
+            out.add(word[:4])
+    return out
+
+
 def match_department(text: str | None, departments: Sequence[str]) -> str | None:
     """Ищет название подразделения в тексте (сначала самые длинные)."""
     hay = _norm(text)
@@ -226,6 +240,12 @@ class Session:
     history: list[dict[str, Any]] = field(default_factory=list)
     assumptions: list[dict[str, Any]] = field(default_factory=list)
     rounds: int = 0
+    # §15 (v1.7): сколько уточняющих итераций прошло (2..3), что спрашивали
+    # и что ответили, что искали, и заявка в службу качества, если она есть.
+    clarification_iterations: int = 0
+    clarifications: list[dict[str, Any]] = field(default_factory=list)
+    searches: list[dict[str, Any]] = field(default_factory=list)
+    escalation: dict[str, Any] | None = None
     exhausted: bool = False
     created_at: float = 0.0
     last_active: float = 0.0
@@ -239,6 +259,10 @@ class Session:
             "history": list(self.history),
             "assumptions": list(self.assumptions),
             "rounds": self.rounds,
+            "clarification_iterations": self.clarification_iterations,
+            "clarifications": list(self.clarifications),
+            "searches": list(self.searches),
+            "escalation": self.escalation,
             "exhausted": self.exhausted,
             "created_at": self.created_at,
             "last_active": self.last_active,
@@ -254,6 +278,13 @@ class Session:
             history=list(data.get("history") or []),
             assumptions=list(data.get("assumptions") or []),
             rounds=int(data.get("rounds") or 0),
+            clarification_iterations=int(
+                data.get("clarification_iterations")
+                or data.get("rounds") or 0
+            ),
+            clarifications=list(data.get("clarifications") or []),
+            searches=list(data.get("searches") or []),
+            escalation=data.get("escalation"),
             exhausted=bool(data.get("exhausted")),
             created_at=float(data.get("created_at") or 0.0),
             last_active=float(data.get("last_active") or 0.0),
@@ -278,6 +309,17 @@ def default_sessions_path() -> Path:
     root = Path(__file__).resolve().parents[2]
     base = Path(var_dir) if var_dir else (root / "var")
     return base / "sessions.jsonl"
+
+
+@dataclass
+class Decision:
+    """Что делать после неудачного поиска (§15): ещё итерация или эскалация."""
+
+    questions: list[Question] | None = None
+    escalate: dict[str, Any] | None = None
+    iterations: int = 0
+    out_of_base: bool = False
+    reason: str = ""
 
 
 class SessionStore:
@@ -458,6 +500,8 @@ class CorpusKnowledge:
         self.rules: dict[str, RuleInfo] = {}
         self.departments: list[str] = []
         self.topics: list[str] = []
+        self.doc_ids: list[str] = []
+        self.vocabulary: set[str] = set()
         self._build()
 
     @staticmethod
@@ -483,6 +527,8 @@ class CorpusKnowledge:
             if topic and topic not in topics:
                 topics.append(topic)
         self.topics = topics
+        self.doc_ids = [str(d.get("doc_id") or "") for d in docs
+                        if isinstance(d, dict) and d.get("doc_id")]
 
         depts: list[str] = []
         for doc in docs:
@@ -518,6 +564,21 @@ class CorpusKnowledge:
                 rule_field=str(raw.get("field") or ""),
                 revisions=revisions,
             )
+
+        # Словарь корпуса: слова, по которым вопрос хоть как-то связан с базой.
+        # Если пересечения нет — вопрос «вне базы» (§15.1): уточнять нечего.
+        vocab: set[str] = set()
+        for topic in self.topics:
+            vocab |= _stems_of(topic)
+        for rule in self.rules.values():
+            for phrase in (rule.short, rule.topic, rule.rule_field):
+                vocab |= _stems_of(phrase)
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            for value in (doc.get("kind"), doc.get("subtype"), doc.get("system")):
+                vocab |= _stems_of(value)
+        self.vocabulary = vocab
 
     @staticmethod
     def _topic_of(title: str | None) -> str:
@@ -588,6 +649,21 @@ class CorpusKnowledge:
             return []
         top = max(scores.values())
         return sorted(key for key, score in scores.items() if score == top)
+
+    def in_corpus(self, question: str) -> bool:
+        """Связан ли вопрос с корпусом хоть как-нибудь (§15.1).
+
+        Пустое пересечение со словарём корпуса = вопрос вне базы: про НДС,
+        ставку, командировку в этой организации регламентов нет, и уточнять
+        бесполезно — сразу эскалация.
+        """
+        hay = _norm(question)
+        if not hay:
+            return False
+        for doc_id in self.doc_ids:
+            if doc_id.lower() in hay:
+                return True
+        return bool(_stems_of(question) & self.vocabulary)
 
     def match_topic(self, question: str) -> str | None:
         """Тема документа (вид регламента), если она названа в вопросе."""
@@ -746,31 +822,7 @@ class Dialogue:
             if answers:
                 self._apply_answers(session, answers)
 
-        params = dict(session.params) if session else {}
-        params.update({k: v for k, v in (params_in or {}).items() if v})
-        if as_of:
-            params["as_of"] = as_of
-        if role:
-            params.setdefault("role_id", role)
-
-        # То, что сказано прямо в вопросе, — самая сильная подсказка.
-        found_date = extract_date(q)
-        if found_date:
-            params["as_of"] = found_date
-        found_amount = extract_amount(q)
-        if found_amount:
-            params["amount"] = found_amount
-        found_department = match_department(q, self.knowledge.departments)
-        if found_department:
-            params["department"] = found_department
-
-        matched_rules = self.knowledge.match_rules(q)
-        if len(matched_rules) == 1:
-            params.setdefault("rule_key", matched_rules[0])
-        topic = self.knowledge.match_topic(q)
-        if topic:
-            params.setdefault("doc_type", topic)
-
+        params, matched_rules = self._collect(session, q, role, as_of, params_in)
         missing = self._missing(params, role, q, matched_rules)
 
         if not missing:
@@ -779,8 +831,8 @@ class Dialogue:
                 self.store.save(session)
             return None
 
-        if session is not None and session.rounds >= self.max_rounds:
-            # Круги исчерпаны: дальше не спрашиваем, закрываем умолчаниями.
+        if session is not None and session.clarification_iterations >= MAX_CLARIFY_ITERATIONS:
+            # §15: итерации исчерпаны — дальше не уточняем, а эскалируем.
             session.exhausted = True
             self._close_missing(session, params, role)
             self.store.save(session)
@@ -788,16 +840,211 @@ class Dialogue:
 
         questions = self._build_questions(missing, params, role, q, matched_rules)
         if session is not None:
-            session.rounds += 1
-            session.history.append({
-                "role": "agent",
-                "kind": "clarify",
-                "round": session.rounds,
-                "questions": [item.to_dict() for item in questions],
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            })
+            self._record_clarification(session, questions)
             self.store.save(session)
         return questions
+
+    # ---------------------------------------------------------- §15 (v1.7)
+
+    def after_search(
+        self,
+        session_id: str,
+        question: str | None = None,
+        role: str | None = None,
+        *,
+        searched: dict[str, Any] | None = None,
+        why_unresolved: str | None = None,
+        kind: str | None = None,
+        business_line: str | None = None,
+    ) -> Decision:
+        """§15: поиск не дал ответа — уточнить ещё или эскалировать.
+
+        Правила (в порядке проверки):
+          * вопрос вне базы (уточнять нечего) — эскалация сразу;
+          * итераций уже MAX (3) — эскалация;
+          * параметры собраны, но итераций меньше MIN (2) — ещё одна итерация
+            (уточняем предмет), иначе эскалация;
+          * иначе — ещё одна итерация уточнения по недостающим параметрам.
+        """
+        session = self.store.get(session_id)
+        if session is None:
+            session = Session(session_id=session_id, role_id=role or "",
+                              question=question or "", created_at=time.time(),
+                              last_active=time.time())
+        if question:
+            session.question = question
+        if role:
+            session.role_id = role
+        if searched:
+            session.searches.append(dict(searched))
+        self.store.save(session)
+
+        iterations = session.clarification_iterations
+        kind = kind or "not_in_corpus"
+        why = why_unresolved or self._why_unresolved(
+            session.question, kind, searched, session)
+
+        def _escalate() -> Decision:
+            ticket = self.escalate(session_id, why, kind, searched=searched,
+                                   business_line=business_line)
+            return Decision(escalate=ticket, iterations=iterations, reason=why)
+
+        if self.out_of_base(session.question):
+            decision = _escalate()
+            decision.out_of_base = True
+            return decision
+
+        if iterations >= MAX_CLARIFY_ITERATIONS:
+            return _escalate()
+
+        params, matched_rules = self._collect(
+            session, session.question, role, None, None)
+        missing = self._missing(params, role, session.question, matched_rules)
+
+        if not missing:
+            if iterations >= MIN_CLARIFY_ITERATIONS:
+                return _escalate()
+            fallback = self._fallback_question(session.question)
+            self._record_clarification(session, [fallback])
+            self.store.save(session)
+            return Decision(questions=[fallback],
+                            iterations=session.clarification_iterations,
+                            reason=fallback.reason)
+
+        questions = self._build_questions(
+            missing, params, role, session.question, matched_rules)
+        self._record_clarification(session, questions)
+        self.store.save(session)
+        return Decision(questions=questions,
+                        iterations=session.clarification_iterations,
+                        reason=questions[0].reason if questions else "")
+
+    def escalate(
+        self,
+        session_id: str,
+        why_unresolved: str,
+        kind: str = "not_in_corpus",
+        *,
+        searched: dict[str, Any] | None = None,
+        business_line: str | None = None,
+    ) -> dict[str, Any]:
+        """§15.2: заявка в службу качества.
+
+        Заявка без «почему» бесполезна службе качества — поэтому why_unresolved
+        обязателен и попадает в заявку как есть.
+        """
+        session = self.store.get(session_id)
+        if session is None:
+            session = Session(session_id=session_id, created_at=time.time(),
+                              last_active=time.time())
+        last_search = searched or (session.searches[-1] if session.searches else {})
+        ticket: dict[str, Any] = {
+            "id": self._next_ticket_id(),
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "session_id": session_id,
+            "role_id": session.role_id,
+            "business_line": business_line or session.params.get("business_line") or "",
+            "question": session.question,
+            "clarifications": list(session.clarifications),
+            "searched": dict(last_search),
+            "why_unresolved": why_unresolved,
+            "kind": kind,
+            "status": "open",
+            "iterations": session.clarification_iterations,
+        }
+        session.escalation = ticket
+        self.store.save(session)
+        self._append_ticket(ticket)
+        return ticket
+
+    def escalate_event(self, ticket: dict[str, Any]) -> dict[str, Any]:
+        """Данные события escalate (контракт §15.3)."""
+        clarifications = ticket.get("clarifications") or []
+        return {
+            "ticket": str(ticket.get("id") or ""),
+            "iterations": int(ticket.get("iterations") or len(clarifications)),
+            "reason": str(ticket.get("why_unresolved") or ""),
+            "searched": dict(ticket.get("searched") or {}),
+            "next": ("Заявка передана в службу качества. "
+                     "Ответ появится в базе как кейс."),
+            "eta": "до 2 рабочих дней",
+        }
+
+    def out_of_base(self, question: str | None) -> bool:
+        """§15.1: вопрос не про базу — уточнять бессмысленно, эскалируем сразу."""
+        return not self.knowledge.in_corpus(question or "")
+
+    def _fallback_question(self, question: str | None) -> Question:
+        """Последний вопрос, когда параметры собраны, а ответа всё нет."""
+        return Question(
+            key="subject",
+            text="О каком заказе, договоре или поставщике идёт речь? (номер или предмет)",
+            reason=("параметры собраны, но подходящего документа не нашлось — "
+                    "уточню предмет, чтобы не искать кота в темноте"),
+            kind="text",
+        )
+
+    def _subject(self, question: str | None) -> str:
+        """Предмет вопроса без вопросительного слова — для «почему не решилось»."""
+        q = (question or "").strip().rstrip("?").strip()
+        low = _norm(q)
+        for word in ("какой", "какая", "какие", "каким", "как", "что", "сколько",
+                     "где", "кто", "почему"):
+            if low.startswith(word + " "):
+                return q[len(word):].strip() or q
+        return q
+
+    def _why_unresolved(
+        self,
+        question: str | None,
+        kind: str = "not_in_corpus",
+        searched: dict[str, Any] | None = None,
+        session: Session | None = None,
+    ) -> str:
+        """§15.2: почему не решилось — конкретно, а не «не найдено»."""
+        subject = self._subject(question)
+        if kind == "no_access":
+            role = (session.role_id if session else "") or "роль сотрудника"
+            return (f"по теме «{subject}» документы в корпусе есть, "
+                    f"но ни один не доступен роли «{role}»")
+        if kind == "no_edition_in_force":
+            return (f"на запрошенную дату не действует ни одна редакция "
+                    f"правила по теме «{subject}»")
+        top = (searched or {}).get("top") or []
+        if top:
+            nearest = ", ".join(str(item) for item in top[:3])
+            return (f"в корпусе нет документа по теме «{subject}» "
+                    f"(ближайшее по теме: {nearest}, ответа по теме в них нет)")
+        return f"в корпусе нет документа по теме «{subject}»"
+
+    # ---- заявки в службу качества ----
+
+    def _tickets_path(self) -> Path:
+        env = os.environ.get("LEX_ESCALATIONS_PATH")
+        if env:
+            return Path(env)
+        return self.store.path.parent / "escalations.jsonl"
+
+    def _next_ticket_id(self) -> str:
+        path = self._tickets_path()
+        count = 0
+        if path.exists():
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        count += 1
+            except OSError:
+                count = 0
+        return f"esc-{count + 1:04d}"
+
+    def _append_ticket(self, ticket: dict[str, Any]) -> None:
+        try:
+            path = self._tickets_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(ticket, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
 
     def apply_answers(
         self,
@@ -885,6 +1132,61 @@ class Dialogue:
 
     # ---- внутреннее ----
 
+    def _collect(
+        self,
+        session: Session | None,
+        q: str,
+        role: str | None,
+        as_of: str | None,
+        params_in: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Параметры задачи: из сессии + из ответа + из текста вопроса.
+
+        То, что сказано прямо в вопросе, — самая сильная подсказка.
+        """
+        params = dict(session.params) if session else {}
+        params.update({k: v for k, v in (params_in or {}).items() if v})
+        if as_of:
+            params["as_of"] = as_of
+        if role:
+            params.setdefault("role_id", role)
+        found_date = extract_date(q)
+        if found_date:
+            params["as_of"] = found_date
+        found_amount = extract_amount(q)
+        if found_amount:
+            params["amount"] = found_amount
+        found_department = match_department(q, self.knowledge.departments)
+        if found_department:
+            params["department"] = found_department
+        matched_rules = self.knowledge.match_rules(q)
+        if len(matched_rules) == 1:
+            params.setdefault("rule_key", matched_rules[0])
+        topic = self.knowledge.match_topic(q)
+        if topic:
+            params.setdefault("doc_type", topic)
+        return params, matched_rules
+
+    def _record_clarification(self, session: Session,
+                              questions: Sequence[Question]) -> None:
+        """§15: считаем итерацию и запоминаем, что спросили."""
+        session.clarification_iterations += 1
+        session.rounds = session.clarification_iterations
+        session.clarifications.append({
+            "iteration": session.clarification_iterations,
+            "asked": [q.text for q in questions],
+            "keys": [q.key for q in questions],
+            "answers": [],
+        })
+        session.history.append({
+            "role": "agent",
+            "kind": "clarify",
+            "round": session.clarification_iterations,
+            "iteration": session.clarification_iterations,
+            "questions": [item.to_dict() for item in questions],
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
     def _normalize_args(
         self,
         question: str | dict[str, Any] | None,
@@ -944,6 +1246,14 @@ class Dialogue:
                 "skipped": False,
                 "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
+            self._attach_answer(session, value)
+
+    def _attach_answer(self, session: Session, value: str) -> None:
+        """Ответ сотрудника — в заявку §15.2 (что спрашивали, что ответили)."""
+        for entry in reversed(session.clarifications):
+            if not entry.get("answers"):
+                entry["answers"].append(value)
+                return
 
     def _add_assumption(self, session: Session, key: str, value: str) -> None:
         note = PARAM_DEFAULTS.get(key, ("", "параметр не указан — применяю умолчание"))[1]

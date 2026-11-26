@@ -350,6 +350,54 @@
     host.appendChild(table);
     host.appendChild(el('p', 'section-sub',
       'Отказы по направлениям — критерий «соответствие задаче партнёра»: видно, где регламентов не хватает.'));
+
+    /* «Часто спрашивают»: канонический вопрос, частота, варианты, сигнал «регламента нет». */
+    host.appendChild(el('h2', 'section-title', 'Часто спрашивают'));
+    host.appendChild(el('p', 'section-sub',
+      'Похожие формулировки сводятся к каноническому вопросу. Высокая доля отказов — сигнал, что регламента нет. Нажмите на вопрос, чтобы подставить его в поле ввода.'));
+
+    var sims;
+    if (state.mock) {
+      sims = global.MockLex.similar();
+    } else {
+      sims = (state.similar || []);
+    }
+    if (!sims.length) {
+      host.appendChild(el('p', 'section-sub', 'В живом режиме список приходит из аналитики журнала.'));
+      return;
+    }
+
+    var stable = el('table', 'wikitable');
+    var sh = el('tr');
+    ['Вопрос', 'Спросили', 'Доля отказов', 'Формулировки'].forEach(function (h) { sh.appendChild(el('th', null, h)); });
+    stable.appendChild(sh);
+
+    for (var s = 0; s < sims.length; s++) {
+      var item = sims[s];
+      var tr2 = el('tr');
+      var tdq = el('td');
+      var qlink = el('button', 'linkish', item.question);
+      qlink.type = 'button';
+      qlink.addEventListener('click', (function (text) {
+        return function () {
+          goScreen('chat');
+          var box = $('question');
+          box.value = text;
+          box.focus();
+          box.setSelectionRange(text.length, text.length);
+        };
+      })(item.question));
+      tdq.appendChild(qlink);
+      if (item.refusal_rate >= 0.5) {
+        tdq.appendChild(el('span', 'sig-nodoc', item.note ? item.note : 'регламента нет'));
+      }
+      tr2.appendChild(tdq);
+      tr2.appendChild(el('td', 'num', '×' + item.count));
+      tr2.appendChild(el('td', 'num', Math.round((item.refusal_rate || 0) * 100) + '%'));
+      tr2.appendChild(el('td', null, (item.variants || []).join(' · ')));
+      stable.appendChild(tr2);
+    }
+    host.appendChild(stable);
   }
 
   /* ------------------------------------------------------------------ лента: вопрос */
@@ -397,40 +445,94 @@
     return box;
   }
 
-  /* ------------------------------------------------------------------ ответ с цитатами и сносками */
+  /* ------------------------------------------------------------------ ответ: §13.1 кратко, §13.5 кнопки */
 
-  function renderAnswer(host, data) {
-    clear(host);
-    var body = el('div', 'answer__lead');
-
-    // текст размечен сносками [1] — превращаем их в надстрочные ссылки
-    var text = String(data.text || '');
-    var parts = text.split(/(\[\d+\])/g);
-    var para = el('p');
+  /* Текст с сносками [n] -> надстрочные кликабельные ссылки. */
+  function fillWithNotes(target, text, turnId) {
+    var parts = String(text || '').split(/(\[\d+\])/g);
     for (var i = 0; i < parts.length; i++) {
       var m = /^\[(\d+)\]$/.exec(parts[i]);
       if (m) {
         var n = parseInt(m[1], 10);
         var fn = el('a', 'fn', '[' + n + ']');
-        fn.href = '#ref-' + n + '-' + (data._turnId || '0');
+        fn.href = '#ref-' + n + '-' + turnId;
         fn.setAttribute('role', 'doc-noteref');
         fn.setAttribute('aria-label', 'сноска ' + n + ': перейти к источнику');
         fn.addEventListener('click', (function (num) {
           return function (e) {
             e.preventDefault();
-            var target = doc.getElementById('ref-' + num + '-' + (data._turnId || '0'));
-            if (target) {
-              target.setAttribute('data-open', 'true');
-              target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-            }
+            var t = doc.getElementById('ref-' + num + '-' + turnId);
+            if (t) { t.setAttribute('data-open', 'true'); t.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
           };
         })(n));
-        para.appendChild(fn);
+        target.appendChild(fn);
       } else if (parts[i]) {
-        para.appendChild(doc.createTextNode(parts[i]));
+        target.appendChild(doc.createTextNode(parts[i]));
       }
     }
-    body.appendChild(para);
+  }
+
+  function renderAnswer(host, data) {
+    clear(host);
+    var turnId = data._turnId || '0';
+
+    /* §13.1: по умолчанию — короткая выжимка, крупно. Полный text — запасной путь. */
+    var shortText = data.short || data.text || '';
+    var box = el('div', 'answer-short');
+    var p = el('p');
+    fillWithNotes(p, shortText, turnId);
+    box.appendChild(p);
+    host.appendChild(box);
+
+    var hasDetails = data.has_details === true || (data.text && data.short && data.text !== data.short);
+    var actions = el('div', 'answer-actions');
+
+    if (hasDetails) {
+      var more = el('button', 'btn', 'Подробнее');
+      more.type = 'button';
+      more.setAttribute('aria-expanded', 'false');
+      var detailHost = el('div', 'answer-detail');
+      detailHost.hidden = true;
+      more.addEventListener('click', (function (btn, hostD, open) {
+        return function () {
+          var isOpen = btn.getAttribute('aria-expanded') === 'true';
+          if (!isOpen) {
+            if (!hostD.dataset.loaded) {
+              loadDetails(hostD, data, turnId);
+              hostD.dataset.loaded = '1';
+            }
+            hostD.hidden = false;
+            btn.textContent = 'Свернуть';
+            btn.setAttribute('aria-expanded', 'true');
+          } else {
+            hostD.hidden = true;
+            btn.textContent = 'Подробнее';
+            btn.setAttribute('aria-expanded', 'false');
+          }
+        };
+      })(more, detailHost, false));
+      actions.appendChild(more);
+
+      var firstCite = (data.citations && data.citations[0]) || null;
+      if (firstCite && firstCite.view_url) {
+        var openDoc = el('button', 'btn', 'Открыть документ');
+        openDoc.type = 'button';
+        openDoc.addEventListener('click', (function (c) {
+          return function () { openDocument(c.doc_id, c.view_url); };
+        })(firstCite));
+        actions.appendChild(openDoc);
+      }
+
+      host.appendChild(actions);
+      host.appendChild(detailHost);
+    } else if (data.text && !data.short) {
+      // Ответ без короткой формы: показываем текст как есть (обратная совместимость).
+      var full = el('div', 'answer__lead');
+      var fp = el('p');
+      fillWithNotes(fp, data.text, turnId);
+      full.appendChild(fp);
+      host.appendChild(full);
+    }
 
     if (data.assumptions && data.assumptions.length) {
       var asum = el('div', 'assumptions');
@@ -440,12 +542,320 @@
         line.appendChild(el('dd', null, data.assumptions[a].note || data.assumptions[a].value));
         asum.appendChild(line);
       }
-      body.appendChild(asum);
+      host.appendChild(asum);
     }
 
-    host.appendChild(body);
     host.appendChild(renderCitationList(data));
+
+    /* §13.3: карточка формы, если ответ её несёт. */
+    if (data.form_id) host.appendChild(renderFormCard(data.form_id));
+
     scrollFeed();
+  }
+
+  /* §13.1: развёрнутый ответ — разделы, таблицы, цитаты — прямо в ленте. */
+  function loadDetails(hostD, data, turnId) {
+    var detail = null;
+    if (state.mock) detail = global.MockLex.expand(data.detail_id);
+    if (!detail) {
+      // без /api/expand показываем полный текст, если он есть
+      if (data.text && data.text !== data.short) {
+        var lede = el('p');
+        fillWithNotes(lede, data.text, turnId);
+        hostD.appendChild(lede);
+      }
+      return;
+    }
+
+    if (detail.detailed) {
+      var d = el('p');
+      fillWithNotes(d, detail.detailed, turnId);
+      hostD.appendChild(d);
+    }
+
+    if (detail.sections && detail.sections.length) {
+      for (var i = 0; i < detail.sections.length; i++) {
+        var sec = detail.sections[i];
+        var h = el('h4', 'detail-h', sec.title);
+        hostD.appendChild(h);
+        if (sec.quote) hostD.appendChild(el('p', 'detail-quote', sec.quote));
+      }
+    }
+
+    if (detail.tables && detail.tables.length) {
+      for (var t = 0; t < detail.tables.length; t++) {
+        var tb = detail.tables[t];
+        var table = el('table', 'wikitable detail-table');
+        var cap = el('caption', null, tb.caption);
+        table.appendChild(cap);
+        for (var r = 0; r < tb.rows.length; r++) {
+          var tr = el('tr');
+          for (var c = 0; c < tb.rows[r].length; c++) {
+            var cell = el(r === 0 ? 'th' : 'td', null, tb.rows[r][c]);
+            tr.appendChild(cell);
+          }
+          table.appendChild(tr);
+        }
+        hostD.appendChild(table);
+      }
+    }
+    hostD.appendChild(el('p', 'detail-note',
+      'Развёрнутая версия построена из тех же фрагментов, что и выжимка: новых источников она не добавляет.'));
+  }
+
+  /* §13.2: читать документ — модальное окно с оглавлением слева и текстом справа. */
+  function openDocument(docId, viewUrl) {
+    var docData = null;
+    if (state.mock) docData = global.MockLex.doc(docId);
+    if (!docData) {
+      if (viewUrl && viewUrl.charAt(0) !== '#') { global.open(viewUrl, '_blank', 'noopener'); return; }
+      alert('Документ ' + docId + ' не найден в мок-режиме.');
+      return;
+    }
+
+    var backdrop = el('div', 'modal');
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-label', 'Документ: ' + docData.title);
+
+    var win = el('div', 'modal__win');
+    var head = el('div', 'modal__head');
+    head.appendChild(el('span', 'modal__title', docData.title + ' · Р' + docData.revision));
+    var close = el('button', 'btn', 'Закрыть');
+    close.type = 'button';
+    head.appendChild(close);
+    win.appendChild(head);
+
+    var body = el('div', 'modal__body');
+    var toc = el('nav', 'modal__toc');
+    toc.appendChild(el('p', 'modal__tocTitle', 'Оглавление'));
+    var text = el('div', 'modal__text');
+    text.appendChild(el('p', 'modal__meta',
+      'Документ ' + docData.doc_id + ' · редакция ' + docData.revision + ' от ' + fmtDate(docData.effective)
+      + ' · ' + docData.department + ' · направление: ' + docData.business_line));
+
+    for (var i = 0; i < docData.sections.length; i++) {
+      var s = docData.sections[i];
+      var anchor = 'dsec-' + i;
+      var li = el('button', 'linkish modal__tocItem', s.title);
+      li.type = 'button';
+      li.addEventListener('click', (function (id) {
+        return function () { var t = doc.getElementById(id); if (t) t.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
+      })(anchor));
+      toc.appendChild(li);
+
+      var h = el('h3', 'modal__h', s.title);
+      h.id = anchor;
+      text.appendChild(h);
+      text.appendChild(el('p', null, s.text));
+    }
+    if (docData.ocr_degraded) {
+      text.appendChild(el('span', 'warn-ocr', 'скан распознан неуверенно — сверьте с оригиналом'));
+    }
+
+    body.appendChild(toc);
+    body.appendChild(text);
+    win.appendChild(body);
+
+    var foot = el('div', 'modal__foot');
+    var dl = el('a', 'btn', 'Скачать');
+    dl.href = '#';
+    dl.setAttribute('role', 'button');
+    dl.addEventListener('click', function (e) {
+      e.preventDefault();
+      alert('Скачивание в мок-режиме недоступно: файл отдаёт GET /api/doc/{id}/download.');
+    });
+    foot.appendChild(dl);
+    win.appendChild(foot);
+
+    backdrop.appendChild(win);
+    doc.body.appendChild(backdrop);
+
+    function closeModal() { backdrop.remove(); doc.removeEventListener('keydown', onKey); }
+    function onKey(e) { if (e.key === 'Escape') closeModal(); }
+    close.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeModal(); });
+    doc.addEventListener('keydown', onKey);
+    close.focus();
+  }
+
+  /* §13.3–13.4: карточка формы и мини-форма с проверкой. */
+  function renderFormCard(formId) {
+    var form = state.mock ? global.MockLex.form(formId) : null;
+    var card = el('div', 'formcard');
+    var h = el('div', 'formcard__head');
+    h.appendChild(el('span', 'formcard__title', 'Есть форма: ' + (form ? form.title : formId)));
+    card.appendChild(h);
+    card.appendChild(el('p', 'formcard__hint', 'Бланк можно скачать и заполнить офлайн или заполнить здесь — агент сверит данные с регламентом.'));
+
+    var actions = el('div', 'formcard__actions');
+    var dl = el('button', 'btn', 'Скачать бланк');
+    dl.type = 'button';
+    dl.addEventListener('click', function () { alert('Скачивание: GET /api/forms/' + formId + '/download (в мок-режиме недоступно).'); });
+
+    var fill = el('button', 'btn btn--primary', 'Заполнить здесь');
+    fill.type = 'button';
+    fill.setAttribute('aria-expanded', 'false');
+
+    var host = el('div', 'formfield-host');
+    host.hidden = true;
+
+    fill.addEventListener('click', (function (btn, hostF) {
+      return function () {
+        var isOpen = btn.getAttribute('aria-expanded') === 'true';
+        if (!isOpen) {
+          if (!hostF.dataset.loaded) { buildForm(hostF, formId); hostF.dataset.loaded = '1'; }
+          hostF.hidden = false;
+          btn.textContent = 'Свернуть форму';
+          btn.setAttribute('aria-expanded', 'true');
+        } else {
+          hostF.hidden = true;
+          btn.textContent = 'Заполнить здесь';
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      };
+    })(fill, host));
+
+    actions.appendChild(dl);
+    actions.appendChild(fill);
+    card.appendChild(actions);
+    card.appendChild(host);
+    return card;
+  }
+
+  function buildForm(host, formId) {
+    var form = state.mock ? global.MockLex.form(formId) : null;
+    if (!form) { host.appendChild(el('p', 'formcard__hint', 'Описание формы приходит из /api/forms/' + formId)); return; }
+
+    var inputs = {};
+    var wrap = el('div', 'form');
+    var progress = el('div', 'form__progress');
+
+    for (var i = 0; i < form.fields.length; i++) {
+      var f = form.fields[i];
+      var row = el('div', 'form__row');
+      var label = el('label', 'form__label', f.label);
+      label.setAttribute('for', 'ff-' + f.key);
+      if (f.required) label.appendChild(el('span', 'form__req', '*'));
+      row.appendChild(label);
+
+      var input;
+      if (f.type === 'choice') {
+        input = doc.createElement('select');
+        var o0 = doc.createElement('option');
+        o0.value = '';
+        o0.textContent = 'выберите…';
+        input.appendChild(o0);
+        for (var o = 0; o < (f.options || []).length; o++) {
+          var op = doc.createElement('option');
+          op.value = f.options[o];
+          op.textContent = f.options[o];
+          input.appendChild(op);
+        }
+      } else {
+        input = doc.createElement('input');
+        input.type = f.type === 'date' ? 'date' : 'text';
+        if (f.type === 'money') input.inputMode = 'numeric';
+        if (f.example) input.placeholder = f.example;
+      }
+      input.id = 'ff-' + f.key;
+      input.className = 'form__input';
+      input.setAttribute('aria-describedby', 'fh-' + f.key + ' fe-' + f.key);
+      row.appendChild(input);
+
+      var hint = el('div', 'form__hint', f.hint || '');
+      hint.id = 'fh-' + f.key;
+      row.appendChild(hint);
+
+      var errBox = el('div', 'form__err');
+      errBox.id = 'fe-' + f.key;
+      row.appendChild(errBox);
+
+      inputs[f.key] = { field: f, el: input, err: errBox, hint: hint };
+
+      input.addEventListener('input', (function (ref, prog) {
+        return function () { liveValidate(ref, prog, inputs); };
+      })(inputs[f.key], progress));
+
+      wrap.appendChild(row);
+    }
+
+    function updateProgress() {
+      var filledCount = 0;
+      for (var k in inputs) {
+        if (inputs[k].el.value.trim()) filledCount++;
+      }
+      progress.textContent = filledCount + ' из ' + form.fields.length + ' полей';
+    }
+
+    wrap.appendChild(progress);
+
+    var check = el('button', 'btn btn--primary', 'Проверить');
+    check.type = 'button';
+
+    var resultBox = el('div', 'form__result');
+
+    check.addEventListener('click', function () {
+      var values = {};
+      for (var k in inputs) values[k] = inputs[k].el.value;
+      var res;
+      if (state.mock) res = global.MockLex.fillForm(formId, values);
+      else res = { ok: true, errors: [], warnings: [], progress: '' };
+
+      clear(resultBox);
+      // ошибки по полям
+      for (var e = 0; e < (res.errors || []).length; e++) {
+        var er = res.errors[e];
+        if (inputs[er.field]) {
+          inputs[er.field].err.textContent = er.message + (er.expected ? ' · ожидается: ' + er.expected : '');
+          inputs[er.field].err.className = 'form__err form__err--show';
+          inputs[er.field].el.classList.add('form__input--bad');
+        }
+      }
+      for (var w = 0; w < (res.warnings || []).length; w++) {
+        var wr = res.warnings[w];
+        var wn = el('p', 'form__warn', 'Внимание: ' + wr.message + (wr.doc_id ? ' (' + wr.doc_id + ')' : ''));
+        resultBox.appendChild(wn);
+      }
+      var summary = el('p', res.ok ? 'form__ok' : 'form__bad',
+        res.ok ? 'Проверки пройдены · ' + (res.progress || '') : 'Есть ошибки · ' + (res.progress || ''));
+      resultBox.insertBefore(summary, resultBox.firstChild);
+    });
+
+    var foot = el('div', 'form__foot');
+    foot.appendChild(check);
+    foot.appendChild(resultBox);
+    wrap.appendChild(foot);
+
+    host.appendChild(wrap);
+    updateProgress();
+  }
+
+  /* живая проверка одного поля — зелёная галочка или красный текст */
+  function liveValidate(ref, progress, allInputs) {
+    var f = ref.field;
+    var v = ref.el.value.trim();
+    var ok = true;
+    var msg = '';
+
+    if (!v) {
+      ok = !f.required;
+    } else if (f.key === 'number' && f.pattern && !(new RegExp(f.pattern)).test(v)) {
+      ok = false; msg = 'формат: ' + (f.hint || f.example || '');
+    } else if (f.type === 'money' && !v.replace(/[^\d]/g, '')) {
+      ok = false; msg = 'нужно число';
+    } else if (f.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      ok = false; msg = 'дата в формате ГГГГ-ММ-ДД';
+    }
+
+    ref.el.classList.toggle('form__input--good', ok && !!v);
+    ref.el.classList.toggle('form__input--bad', !ok);
+    ref.err.textContent = ok ? '' : msg;
+    ref.err.className = 'form__err' + (ok ? '' : ' form__err--show');
+
+    var filledCount = 0;
+    for (var k in allInputs) if (allInputs[k].el.value.trim()) filledCount++;
+    progress.textContent = filledCount + ' из ' + Object.keys(allInputs).length + ' полей';
   }
 
   function renderCitationList(data) {
@@ -495,8 +905,7 @@
           'источник распознан неуверенно (' + Math.round(c.ocr_confidence * 100) + '%) — сверьте с оригиналом'));
       }
 
-      if ((c.content_type === 'image' || c.content_type === 'scan' || c.content_type === 'mixed') && c.preview_url) {
-        var fig = el('figure', 'ref__preview');
+      if ((c.content_type === 'image' || c.content_type === 'scan' || c.content_type === 'mixed') && c.preview_url) {        var fig = el('figure', 'ref__preview');
         var img = doc.createElement('img');
         img.src = c.preview_url;
         img.alt = 'превью: ' + (c.title || c.doc_id || 'источник');
@@ -521,6 +930,32 @@
           headEl.setAttribute('aria-expanded', String(!open));
         };
       })(ref, head));
+
+      /* §13.2: у цитаты две ссылки — «Читать» и «Скачать». */
+      if (c.view_url || c.download_url) {
+        var links = el('div', 'ref__links');
+        if (c.view_url) {
+          var read = el('button', 'linkish', 'Читать');
+          read.type = 'button';
+          read.addEventListener('click', (function (cite) {
+            return function () { openDocument(cite.doc_id, cite.view_url); };
+          })(c));
+          links.appendChild(read);
+        }
+        if (c.download_url) {
+          var dlLink = el('a', 'linkish ref__dl', 'Скачать');
+          dlLink.href = c.download_url;
+          dlLink.setAttribute('download', '');
+          dlLink.addEventListener('click', function (e) {
+            if (String(this.getAttribute('href')).charAt(0) === '#') {
+              e.preventDefault();
+              alert('Скачивание в мок-режиме: файл отдаёт GET /api/doc/{id}/download.');
+            }
+          });
+          links.appendChild(dlLink);
+        }
+        content.appendChild(links);
+      }
 
       ref.appendChild(content);
       wrap.appendChild(ref);

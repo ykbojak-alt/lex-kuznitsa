@@ -115,6 +115,11 @@ class Citation(BaseModel):
 
 class AnswerData(BaseModel):
     text: str
+    # §13.1: первый ответ — выжимка (2-4 предложения, <=400 знаков), подробности
+    # по отдельному запросу через detail_id.
+    short: str = ""
+    has_details: bool = False
+    detail_id: str | None = None
     citations: list[Citation] = Field(default_factory=list)
     refused: bool = False
     # §8: кейс противоречит регламенту либо регламент не покрывает.
@@ -125,6 +130,8 @@ class AnswerData(BaseModel):
     session_id: str | None = None
     # §12: результат проверки покрытия — то же, что в шаге verify.
     grounding: dict | None = None
+    # §13.3: если в ответе есть форма — карточка «Есть форма: …».
+    forms: list[dict] = Field(default_factory=list)
 
 
 class ClarifyQuestion(BaseModel):

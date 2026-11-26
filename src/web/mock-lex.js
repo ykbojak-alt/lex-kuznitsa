@@ -12,8 +12,10 @@
 (function (global) {
   'use strict';
 
+  /* §17: 10 шагов — policy стоит вторым, до всякого поиска. */
   var ANSWER_STEPS = [
     { key: 'accept', title: 'Запрос принят', detail: 'роль: юрист · направление: закупки · дата отсчёта: 2026-06-15', ms: 11 },
+    { key: 'policy', title: 'Проверка компетенции', detail: 'в компетенции роли: да · направление: закупки · доступных документов 5', ms: 26 },
     { key: 'decompose', title: 'Разбор вопроса', detail: 'направление: закупки · 2 подвопроса: срок согласования; кто визирует', ms: 230 },
     { key: 'inspect', title: 'Разбор источников', detail: 'текст 24 · картинки 2 · сканы 1 (1 с плохим распознаванием) · направлений 1', ms: 34 },
     { key: 'retrieve', title: 'Поиск', detail: 'BM25 12 · вектор 10 → топ 5 · документов 5, кейсов 0', ms: 208 },
@@ -21,11 +23,17 @@
     { key: 'permissions', title: 'Проверка прав', detail: 'доступно 5 из 12, отброшено 7', ms: 9 },
     { key: 'resolve', title: 'Действующая редакция', detail: '3 редакции, действует Р2 от 2026-06-01', ms: 14 },
     { key: 'conflict', title: 'Сопоставление', detail: 'конфликтов: 0', ms: 11 },
-    { key: 'compose', title: 'Сборка ответа', detail: 'из 3 цитат', ms: 960 },
+    { key: 'compose', title: 'Сборка ответа', detail: 'краткая выжимка · 3 цитаты · есть форма', ms: 960 },
     { key: 'verify', title: 'Самопроверка', detail: 'утверждений 4 · покрыто цитатами 4 · внешних знаний 0', ms: 380 }
   ];
 
   var ANSWER = {
+    /* §13.1: короткая выжимка по умолчанию — 2-4 предложения, до 400 знаков. */
+    short: 'Срок согласования заявки на закупку — пять рабочих дней с момента регистрации в СЭД.[1] '
+      + 'Заявку визирует руководитель подразделения, затем согласует финансовый контролёр.[1][3]',
+    has_details: true,
+    detail_id: 'd-q0001',
+    /* Полный текст — для старого рендера и для «Подробнее» без бэкенда. */
     text: 'Срок согласования заявки на закупку — пять рабочих дней с момента регистрации заявки в СЭД.[1]\n'
       + 'Заявку визирует руководитель подразделения, затем согласует финансовый контролёр.[1][3]\n'
       + 'Изменения договора согласуются в том же порядке, что и сам договор.[2]',
@@ -38,7 +46,9 @@
         quote: 'Срок согласования заявки: пяти рабочих дней с даты регистрации.',
         content_type: 'text',
         business_line: 'закупки',
-        section: 'Порядок выполнения процедуры'
+        section: 'Порядок выполнения процедуры',
+        view_url: '#doc-ТЗ-ЭКЗ-СР01-Р2',
+        download_url: '#doc-ТЗ-ЭКЗ-СР01-Р2/download'
       },
       {
         doc_id: 'ТЗ-ЭКЗ-0007-Р2',
@@ -47,7 +57,9 @@
         effective: '2026-04-11',
         quote: 'Порядок согласования договорных изменений совпадает с порядком согласования договора.',
         content_type: 'text',
-        business_line: 'закупки'
+        business_line: 'закупки',
+        view_url: '#doc-ТЗ-ЭКЗ-0007-Р2',
+        download_url: '#doc-ТЗ-ЭКЗ-0007-Р2/download'
       },
       {
         doc_id: 'ТЗ-ЭКЗ-0001-Р1',
@@ -58,7 +70,9 @@
         content_type: 'scan',
         page: 2,
         ocr_confidence: 0.52,
-        business_line: 'качество'
+        business_line: 'качество',
+        view_url: '#doc-ТЗ-ЭКЗ-0001-Р1',
+        download_url: '#doc-ТЗ-ЭКЗ-0001-Р1/download'
       },
       {
         doc_id: 'ТЗ-ЭКЗ-0042',
@@ -69,14 +83,148 @@
         content_type: 'image',
         page: 1,
         ocr_confidence: 0.84,
-        business_line: 'закупки'
+        business_line: 'закупки',
+        view_url: '#doc-ТЗ-ЭКЗ-0042',
+        download_url: '#doc-ТЗ-ЭКЗ-0042/download'
       }
     ],
     refused: false,
-    assumptions: []
+    assumptions: [],
+    /* §13.3: в ответе есть форма — в ленте карточка. */
+    form_id: 'form-zayavka'
   };
 
+  /* §13.1: развёрнутая версия — по /api/expand, из тех же фрагментов. */
+  var EXPAND = {
+    'd-q0001': {
+      short: ANSWER.short,
+      detailed: 'Согласно редакции 2 регламента согласования заявок, вступившей в силу 1 июня 2026 года, '
+        + 'срок согласования заявки на закупку составляет пять рабочих дней. Срок отсчитывается с момента '
+        + 'регистрации заявки в СЭД. Редакция 1 (2026-01-15) устанавливала три рабочих дня, редакция 3 '
+        + '(вступает 2027-01-01) — семь.',
+      sections: [
+        { title: 'Порядок выполнения', quote: 'Заявка регистрируется в СЭД, визируется руководителем подразделения, затем согласуется финансовым контролёром.' },
+        { title: 'Исключения', quote: 'Закупки свыше 500 000 рублей согласуются в порядке, установленном для крупных закупок (ТЗ-ЭКЗ-СР01-Р3).' },
+        { title: 'Роли', quote: 'Руководитель подразделения — виза; финансовый контролёр — согласование бюджета.' }
+      ],
+      tables: [
+        {
+          caption: 'Сроки согласования по редакциям',
+          rows: [['Ред.', 'Дата вступления', 'Срок'], ['Р1', '2026-01-15', '3 рабочих дня'],
+            ['Р2', '2026-06-01', '5 рабочих дней'], ['Р3', '2027-01-01', '7 рабочих дней']]
+        }
+      ],
+      citations: ANSWER.citations
+    }
+  };
+
+  /* §13.3–13.4: форма и её описание. */
+  var FORM = {
+    form_id: 'form-zayavka',
+    title: 'Заявка на закупку',
+    doc_id: 'ТЗ-ЭКЗ-СР01-Р2',
+    format: 'docx',
+    business_line: 'закупки',
+    fields: [
+      { key: 'number', label: 'Номер заявки', type: 'text', required: true,
+        pattern: '^ЗК-\\d{4}-\\d{4}$', example: 'ЗК-2026-0042', hint: 'формат ЗК-ГГГГ-НННН' },
+      { key: 'amount', label: 'Сумма, ₽', type: 'money', required: true, min: 0 },
+      { key: 'deadline', label: 'Требуемый срок', type: 'date', required: true },
+      { key: 'department', label: 'Подразделение', type: 'choice', required: true,
+        options: ['Отдел качества', 'Юридический отдел', 'ИТ-служба', 'Производственный отдел'] }
+    ]
+  };
+
+  /* §13.4: проверка формы — правила, а не «на глаз модели». */
+  function fillForm(formId, values) {
+    var errors = [];
+    var warnings = [];
+    var filled = {};
+    var missing = [];
+    var fields = FORM.fields;
+
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      var raw = values[f.key];
+      var v = raw == null ? '' : String(raw).trim();
+
+      if (!v) {
+        if (f.required) {
+          errors.push({ field: f.key, message: 'поле обязательное',
+            expected: f.type === 'date' ? 'дата в формате ГГГГ-ММ-ДД' : 'значение' });
+          missing.push(f.key);
+        }
+        filled[f.key] = null;
+        continue;
+      }
+
+      if (f.key === 'number' && f.pattern && !(new RegExp(f.pattern)).test(v)) {
+        errors.push({ field: f.key, value: v,
+          message: 'номер не соответствует формату ЗК-ГГГГ-НННН', expected: f.example });
+      }
+      if (f.type === 'money') {
+        var digits = v.replace(/[^\d]/g, '');
+        if (!digits) {
+          errors.push({ field: f.key, value: v, message: 'сумма должна быть числом', expected: 'например 450000' });
+        } else {
+          var n = parseInt(digits, 10);
+          filled[f.key] = n;
+          if (n >= 450000 && n <= 550000) {
+            warnings.push({ field: f.key,
+              message: 'сумма близка к порогу 500 000 — согласование пойдёт по другому порядку',
+              doc_id: 'ТЗ-ЭКЗ-СР01-Р3' });
+          }
+          if (n > 1000000) {
+            warnings.push({ field: f.key, message: 'крупная закупка: срок согласования — семь рабочих дней',
+              doc_id: 'ТЗ-ЭКЗ-СР01-Р3' });
+          }
+          continue;
+        }
+      }
+      if (f.type === 'date') {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+          errors.push({ field: f.key, value: v, message: 'дата в формате ГГГГ-ММ-ДД', expected: '2026-07-01' });
+        }
+      }
+      if (f.type === 'choice' && f.options && f.options.indexOf(v) < 0) {
+        errors.push({ field: f.key, value: v, message: 'значение не из справочника',
+          expected: f.options.join(' | ') });
+      }
+      if (!(f.type === 'money' && filled[f.key] != null)) filled[f.key] = v;
+    }
+
+    var total = fields.length;
+    var okCount = fields.filter(function (f2) { return filled[f2.key] != null; }).length;
+
+    return {
+      ok: errors.length === 0,
+      errors: errors,
+      warnings: warnings,
+      filled: filled,
+      missing: missing,
+      progress: okCount + ' из ' + total + ' полей'
+    };
+  }
+
+  /* «Похожие вопросы» — по журналу; refusal_rate высокий = регламента нет. */
+  var SIMILAR = [
+    { question: 'Какой срок согласования заявки на закупку?', count: 14, variants: ['сколько дней согласуется закупка', 'срок визы заявки'], refusal_rate: 0 },
+    { question: 'Кто согласует изменения в договор?', count: 9, variants: ['порядок согласования изменений договора'], refusal_rate: 0 },
+    { question: 'Какая ставка НДС в России?', count: 6, variants: ['размер НДС'], refusal_rate: 1, note: 'регламента нет' },
+    { question: 'Как оформить претензию поставщику по браку?', count: 5, variants: ['сроки претензии', 'возврат бракованной партии'], refusal_rate: 0 },
+    { question: 'В каких случаях нужна лицензия на продукт?', count: 4, variants: ['лицензирование продукта X'], refusal_rate: 0.75, note: 'регламент не покрывает лицензирование' }
+  ];
+
   /* §12.6 — обязательный демо-кейс: модель знает ответ, базы знаний не хватает. */
+  var REFUSAL_OUT_OF_SCOPE = {
+    kind: 'out_of_scope',
+    reason: 'Вопрос не относится к базе знаний организации.',
+    detail: 'База покрывает: закупки, лицензирование, качество, хранение, персонал',
+    searched: null,
+    hint: 'Переформулируйте или обратитесь в службу качества',
+    sources: []
+  };
+
   var REFUSAL_NOT_IN_CORPUS = {
     reason: 'В базе знаний организации нет документа, регулирующего этот вопрос. '
       + 'Ставка НДС — общее налоговое знание, а не положение организации; LEX на такие '
@@ -122,30 +270,88 @@
   ];
 
   function clone(v) { return JSON.parse(JSON.stringify(v)); }
-  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /* §13.2: документ целиком для чтения — оглавление + разделы. */
+  var DOCS = {
+    'ТЗ-ЭКЗ-СР01-Р2': {
+      doc_id: 'ТЗ-ЭКЗ-СР01-Р2',
+      title: 'Правило согласования заявок на закупку',
+      revision: 2,
+      effective: '2026-06-01',
+      department: 'Юридический отдел',
+      business_line: 'закупки',
+      sections: [
+        { title: 'Назначение и область применения', text: 'Правило определяет порядок согласования заявок на закупку товаров и услуг для подразделений организации.' },
+        { title: 'Порядок выполнения процедуры', text: 'Заявка регистрируется в СЭД. Срок согласования заявки: пяти рабочих дней с даты регистрации. Заявку визирует руководитель подразделения, затем согласует финансовый контролёр на предмет соответствия бюджету.' },
+        { title: 'Исключения', text: 'Закупки свыше 500 000 рублей согласуются в порядке для крупных закупок: срок увеличивается до семи рабочих дней.' },
+        { title: 'Роли и ответственность', text: 'Руководитель подразделения отвечает за визу, финансовый контролёр — за согласование бюджета, секретариат — за регистрацию.' }
+      ]
+    },
+    'ТЗ-ЭКЗ-0007-Р2': {
+      doc_id: 'ТЗ-ЭКЗ-0007-Р2',
+      title: 'Регламент согласования договорных изменений',
+      revision: 2,
+      effective: '2026-04-11',
+      department: 'Производственный отдел',
+      business_line: 'закупки',
+      sections: [
+        { title: 'Порядок выполнения процедуры', text: 'Порядок согласования договорных изменений совпадает с порядком согласования договора.' },
+        { title: 'Ограничения и исключения', text: 'Изменения, затрагивающие цену более чем на 10%, требуют повторного согласования финансовым контролёром.' }
+      ]
+    },
+    'ТЗ-ЭКЗ-0001-Р1': {
+      doc_id: 'ТЗ-ЭКЗ-0001-Р1',
+      title: 'Регламент проверки качества входного контроля',
+      revision: 1,
+      effective: '2025-11-20',
+      department: 'Отдел качества',
+      business_line: 'качество',
+      ocr_degraded: true,
+      sections: [
+        { title: 'Порядок выполнения процедуры', text: 'Финансовый контролёр проверяет соответствие заявки бюджету подразделения. Партия проходит входной контроль по чек-листу.' }
+      ]
+    }
+  };
+
+  function docFor(docId) { return DOCS[docId] ? clone(DOCS[docId]) : null; }  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   function stepsFor(scenario) {
     var steps = clone(ANSWER_STEPS);
     if (scenario === 'refusal-nocorpus') {
-      steps[1].detail = 'направление: определить не удалось · 1 подвопрос';
-      steps[3].detail = 'BM25 0 · вектор 2 → топ 0 · документов 0, кейсов 0';
-      steps[4].detail = 'найдено 0 кейсов по теме';
-      steps[5].detail = 'доступно 5 из 12, отброшено 7';
-      steps[6].detail = 'не проверялась: нет найденных документов';
-      steps[7].detail = 'сравнивать нечего';
-      steps[8].detail = 'ответ не собран: нет ни одной цитаты';
-      steps[9].detail = 'утверждений 0 · покрыто 0 · отказ: не из базы знаний';
+      steps[1].detail = 'в компетенции: да · направление: определить не удалось · доступных документов 5';
+      steps[2].detail = 'направление: определить не удалось · 1 подвопрос';
+      steps[4].detail = 'BM25 0 · вектор 2 → топ 0 · документов 0, кейсов 0';
+      steps[5].detail = 'найдено 0 кейсов по теме';
+      steps[6].detail = 'доступно 5 из 12, отброшено 7';
+      steps[7].detail = 'не проверялась: нет найденных документов';
+      steps[8].detail = 'сравнивать нечего';
+      steps[9].detail = 'ответ не собран: нет ни одной цитаты';
+      steps[10].detail = 'утверждений 0 · покрыто 0 · отказ: не из базы знаний';
+    } else if (scenario === 'refusal-outofscope') {
+      steps[1].detail = 'ВНЕ КОМПЕТЕНЦИИ: база не покрывает «налоги» (база покрывает: закупки, лицензирование, качество, хранение, персонал)';
+      steps[2].detail = 'не выполнялся: вопрос вне базы';
+      steps[4].detail = 'не выполнялся: вопрос вне базы';
+      steps[5].detail = 'не выполнялся';
+      steps[6].detail = 'не выполнялся';
+      steps[7].detail = 'не выполнялся';
+      steps[8].detail = 'не выполнялся';
+      steps[9].detail = 'ответ не собирался';
+      steps[10].detail = 'проверка не нужна: ответа нет';
     } else if (scenario === 'refusal-date') {
-      steps[6].detail = '1 редакция, действует с 2026-02-01 — на дату отсчёта не действует';
+      steps[7].detail = '1 редакция, действует с 2026-02-01 — на дату отсчёта не действует';
     } else if (scenario === 'refusal-access') {
-      steps[5].detail = 'доступно 0 из 12, отброшено 12 (направление закрыто для роли)';
-      steps[6].detail = 'не проверялась: нет доступных документов';
-      steps[8].detail = 'ответ не собран: нет доступных источников';
-      steps[9].detail = 'утверждений 0 · покрыто 0 · отказ: нет прав';
+      steps[1].detail = 'в компетенции: да · направление: закупки · доступных документов 0';
+      steps[6].detail = 'доступно 0 из 12, отброшено 12 (направление закрыто для роли)';
+      steps[7].detail = 'не проверялась: нет доступных документов';
+      steps[9].detail = 'ответ не собран: нет доступных источников';
+      steps[10].detail = 'утверждений 0 · покрыто 0 · отказ: нет прав';
     } else if (scenario === 'clarify') {
-      steps[1] = { key: 'clarify', title: 'Уточнение', detail: 'нужна дата: в корпусе три редакции SR-01 · запрошено 2 параметра', ms: 190 };
+      steps[2] = { key: 'clarify', title: 'Уточнение', detail: 'нужна дата: в корпусе три редакции SR-01 · запрошено 2 параметра', ms: 190 };
     } else if (scenario === 'verify-trimmed') {
-      steps[9].detail = 'утверждений 5 · покрыто 3 · 2 отброшено (нет цитаты)';
+      steps[10].detail = 'утверждений 5 · покрыто 3 · 2 отброшено (нет цитаты)';
+    } else if (scenario === 'escalate') {
+      steps[9].detail = 'ответ не собран: нет ни одной цитаты';
+      steps[10] = { key: 'escalate', title: 'Передано в службу качества', detail: 'заявка esc-0003 · 2 итерации уточнения · срок: до 2 рабочих дней', ms: 140 };
     }
     return steps;
   }
@@ -219,8 +425,22 @@
       }
 
       if (scenario === 'refusal-nocorpus') guard(handlers.onRefusal)(clone(REFUSAL_NOT_IN_CORPUS));
+      else if (scenario === 'refusal-outofscope') guard(handlers.onRefusal)(clone(REFUSAL_OUT_OF_SCOPE));
       else if (scenario === 'refusal-date') guard(handlers.onRefusal)(clone(REFUSAL_DATE));
       else if (scenario === 'refusal-access') guard(handlers.onRefusal)(clone(REFUSAL_ACCESS));
+      else if (scenario === 'escalate') {
+        /* §15.3: вместо verify последним идёт escalate. */
+        guard(handlers.onEscalate)({
+          ticket: 'esc-0003',
+          iterations: 2,
+          reason: 'В базе знаний нет порядка согласования с единственным поставщиком',
+          searched: { documents: 27, cases: 4 },
+          next: 'Заявка передана в службу качества. Ответ появится в базе как кейс.',
+          eta: 'до 2 рабочих дней',
+          question: question
+        });
+        return; // поток закрывается на эскалации, done не приходит
+      }
       else guard(handlers.onAnswer)(clone(ANSWER));
 
       await delay(110);
@@ -305,11 +525,163 @@
     { id: 'director', title: 'Руководитель', departments: ['*'], business_lines: ['*'], systems: ['*'] }
   ];
 
+  /* §15.2: заявки в службу качества. */
+  var TICKETS = [
+    {
+      id: 'esc-0003',
+      ts: '2026-11-26T11:20:00Z',
+      session_id: 's-7f3a1c',
+      role_id: 'lawyer',
+      business_line: 'закупки',
+      question: 'Как согласовать закупку, если поставщик единственный?',
+      clarifications: [
+        { iteration: 1, asked: ['На какую дату?'], answers: ['2026-07-01'] },
+        { iteration: 2, asked: ['Сумма?', 'Направление?'], answers: ['не знаю', 'закупки'] }
+      ],
+      searched: { documents: 27, cases: 4, accessible: 5, top: ['ТЗ-ЭКЗ-СР01-Р2'] },
+      why_unresolved: 'в корпусе нет порядка для единственного поставщика',
+      kind: 'not_in_corpus',
+      status: 'open'
+    },
+    {
+      id: 'esc-0005',
+      ts: '2026-11-26T09:05:00Z',
+      session_id: 's-1c2d',
+      role_id: 'quality',
+      business_line: 'качество',
+      question: 'Можно ли принять партию с отклонением по влажности 2%?',
+      clarifications: [
+        { iteration: 1, asked: ['Какая номенклатурная позиция?'], answers: ['комплект уплотнения КУ-120'] }
+      ],
+      searched: { documents: 27, cases: 4, accessible: 6, top: ['ТЗ-ЭКЗ-0006-Р2'] },
+      why_unresolved: 'допуски по влажности описаны в стандарте, но стандарт от другого изделия',
+      kind: 'not_in_corpus',
+      status: 'answered',
+      quality_answer: 'Для КУ-120 допуск по влажности — не более 1,5%. Партию принимать нельзя, оформить возврат.',
+      resolved_by: 'quality',
+      answered_at: '2026-11-26T10:30:00Z'
+    },
+    {
+      id: 'esc-0001',
+      ts: '2026-11-25T16:40:00Z',
+      session_id: 's-9a8b',
+      role_id: 'it',
+      business_line: 'персонал',
+      question: 'Кому сообщать об утечке учётных данных?',
+      clarifications: [],
+      searched: { documents: 27, cases: 4, accessible: 0, top: [] },
+      why_unresolved: 'наличие регламента требует службы ИБ, её нет в корпусе',
+      kind: 'no_access',
+      status: 'resolved'
+    }
+  ];
+
+  /* §16.2: черновик кейса + подсказки: чего не хватает и с чем расходится. */
+  var DRAFTS = {
+    'esc-0003': {
+      ticket: 'esc-0003',
+      status: 'answered',
+      quality_answer: 'Для единственного поставщика — обоснование по 44-ФЗ п.4 ч.1 ст.93, форма ОС-2.',
+      resolved_by: 'quality',
+      answered_at: '2026-11-26T13:40:00Z',
+      draft: {
+        question: 'Как согласовать закупку, если поставщик единственный?',
+        answer_in_practice: 'Обоснование по 44-ФЗ п.4 ч.1 ст.93, форма ОС-2.',
+        outcome: 'resolved',
+        business_line: 'закупки',
+        linked_docs: [],
+        tags: ['единственный поставщик', 'закупки', '44-ФЗ'],
+        rule_key: null,
+        author_role: 'quality',
+        author_name: 'служба качества',
+        content_type: 'text',
+        source: 'escalation',
+        escalation_id: 'esc-0003'
+      },
+      suggestions: {
+        missing: [
+          { field: 'linked_docs', why: 'в ответе упомянут 44-ФЗ, но такого документа нет в корпусе',
+            note: 'можно оставить пустым — кейс будет без ссылки на регламент' },
+          { field: 'rule_key', why: 'ответ не относится ни к SR-01/02/03' }
+        ],
+        conflicts: [
+          { with: 'ТЗ-ЭКЗ-СР01-Р2', why: 'ответ предлагает обход процедуры; в регламенте такого исключения нет',
+            severity: 'warning' }
+        ]
+      }
+    },
+    'esc-0005': {
+      ticket: 'esc-0005',
+      status: 'answered',
+      quality_answer: 'Для КУ-120 допуск по влажности — не более 1,5%. Партию принимать нельзя, оформить возврат.',
+      resolved_by: 'quality',
+      answered_at: '2026-11-26T10:30:00Z',
+      draft: {
+        question: 'Можно ли принять партию с отклонением по влажности 2%?',
+        answer_in_practice: 'Для КУ-120 допуск по влажности не более 1,5%; партию не принимать, оформить возврат.',
+        outcome: 'rejected',
+        business_line: 'качество',
+        linked_docs: ['ТЗ-ЭКЗ-0006-Р2'],
+        tags: ['влажность', 'приёмка', 'КУ-120'],
+        rule_key: 'QC-02',
+        author_role: 'quality',
+        author_name: 'служба качества',
+        content_type: 'text',
+        source: 'escalation',
+        escalation_id: 'esc-0005'
+      },
+      suggestions: { missing: [], conflicts: [] }
+    }
+  };
+
+  function tickets() { return clone(TICKETS); }
+  function ticketById(id) {
+    for (var i = 0; i < TICKETS.length; i++) if (TICKETS[i].id === id) return clone(TICKETS[i]);
+    return null;
+  }
+  function draftOf(id) { return DRAFTS[id] ? clone(DRAFTS[id]) : null; }
+
+  /* §16.3: подтверждение черновика — те же правила, что на сервере. */
+  var caseSeq = 21;
+  function confirmDraft(id, caseObj, ackWarnings) {
+    var d = DRAFTS[id];
+    if (!d) return { ok: false, error: 'черновик не найден' };
+    var conflicts = (d.suggestions.conflicts || []);
+    var hard = conflicts.filter(function (c) { return c.severity === 'error'; });
+    if (hard.length) return { ok: false, error: 'есть конфликты уровня error — добавить нельзя' };
+    if (conflicts.length && !ackWarnings) {
+      return { ok: false, error: 'есть предупреждения: подтвердите, что понимаете расхождение' };
+    }
+    if (!caseObj.question || !caseObj.answer_in_practice) {
+      return { ok: false, error: 'обязательные поля не заполнены' };
+    }
+    caseSeq += 1;
+    var caseId = 'case-00' + caseSeq;
+    for (var i = 0; i < TICKETS.length; i++) if (TICKETS[i].id === id) TICKETS[i].status = 'resolved';
+    d.status = 'resolved';
+    return {
+      ok: true,
+      case_id: caseId,
+      in_index: true,
+      ticket_status: 'resolved',
+      affected: 'кейсов в базе: ' + (CASES.length + 1) + ' · вопрос теперь покрыт'
+    };
+  }
+
   global.MockLex = {
     stream: stream,
     roles: function () { return clone(ROLES); },
     businessLines: function () { return clone(BUSINESS_LINES); },
     cases: function () { return clone(CASES); },
-    scenarios: ['answer', 'clarify', 'refusal-nocorpus', 'refusal-date', 'refusal-access', 'verify-trimmed']
+    expand: function (detailId) { return clone(EXPAND[detailId] || null); },
+    form: function (formId) { return formId === FORM.form_id ? clone(FORM) : null; },
+    fillForm: fillForm,
+    similar: function () { return clone(SIMILAR); },
+    doc: function (docId) { return docFor(docId); },
+    tickets: tickets,
+    ticket: ticketById,
+    draft: draftOf,
+    confirmDraft: confirmDraft,
+    scenarios: ['answer', 'clarify', 'refusal-nocorpus', 'refusal-date', 'refusal-access', 'verify-trimmed', 'escalate']
   };
 })(window);
