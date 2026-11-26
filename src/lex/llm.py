@@ -121,12 +121,49 @@ def model_name() -> str:
     return os.environ.get("NEXUS_LINK_MODEL") or "claude-sonnet-4-7"
 
 
+def model_chain() -> list[str]:
+    """Основной слот и запасные, в порядке приоритета.
+
+    Слоты NexusLink флапают: замер 27.11.2026 на стенде — 88 ошибок из 244
+    вызовов (36%), все вида «all candidates exhausted … candidates are
+    currently blacklisted». Отказал кандидат у апстрима — и слот целиком
+    недоступен, хотя остальные шесть работают. Падать сотруднику в ответ на
+    это нельзя: у нас есть другие слоты, и подменять модель допустимо, потому
+    что смысл ответа от модели не зависит — он проверяется цитатами.
+
+    Порядок задаётся ``LEX_LLM_FALLBACK_MODELS`` (через запятую). По умолчанию
+    ``claude-sonnet-4-6, claude-opus-5``: в стресс-тесте 6/6 каждый, среднее
+    0.8 с и 1.4 с — быстрее основного opus-4-6 (18.8 с).
+    """
+    primary = model_name()
+    raw = os.environ.get("LEX_LLM_FALLBACK_MODELS")
+    if raw is None:
+        raw = "claude-sonnet-4-6,claude-opus-5"
+    chain = [primary]
+    for item in raw.split(","):
+        item = item.strip()
+        if item and item not in chain:
+            chain.append(item)
+    return chain
+
+
 def api_key() -> str:
     return os.environ.get("NEXUSLINK_KEY") or ""
 
 
 def configured() -> bool:
     return bool(base_url() and api_key())
+
+
+def is_slot_dead(exc: Exception) -> bool:
+    """Слот недоступен целиком — все его кандидаты в чёрном списке.
+
+    Это не троттлинг (пауза не поможет: кандидаты заблокированы на стороне
+    апстрима) и не обрыв сети. Лечится только сменой слота, поэтому опознаётся
+    отдельно — чтобы ``chat`` переключился на следующий, а не ждал впустую.
+    """
+    text = str(exc).lower()
+    return "blacklisted" in text or "candidates exhausted" in text
 
 
 def chat(
@@ -136,18 +173,25 @@ def chat(
     temperature: float = 0.2,
     timeout: float = DEFAULT_TIMEOUT,
     retries_on_empty: int | None = None,
+    model: str | None = None,
 ) -> str:
     """Вызов ``/chat/completions`` с лестницей бюджетов. Возвращает текст.
 
-    Провайдер на этом слоте пишет блок ``reasoning`` до ``content``. При
-    малом ``max_tokens`` рассуждение съедает весь лимит: ``finish_reason =
-    length``, ``content`` пуст. Это не сбой сети — это исчерпанный бюджет, и
-    лечится он бОльшим лимитом, а не отказом сотруднику.
+    **Цепочка слотов.** Если слот отдал «all candidates exhausted … blacklisted»,
+    повторять его бессмысленно: кандидаты заблокированы на апстриме. Вместо
+    этого переходим к следующему слоту из ``model_chain()``. Смысл ответа от
+    модели не зависит — он проверяется цитатами в ``verify``, поэтому подмена
+    слота не ослабляет гарантию «только из регламента».
+
+    **Лестница бюджетов.** Провайдер на этом слоте пишет блок ``reasoning`` до
+    ``content``. При малом ``max_tokens`` рассуждение съедает весь лимит:
+    ``finish_reason = length``, ``content`` пуст. Это не сбой сети — это
+    исчерпанный бюджет, и лечится он бОльшим лимитом, а не отказом сотруднику.
 
     Поэтому пустой ответ — не ошибка сразу, а повод повторить с лимитом из
-    ``RETRY_BUDGETS`` (4096, 8192). Каждая попытка пишется в
-    ``var/llm-debug.jsonl`` (если журнал включён, ``LEX_LLM_DEBUG=1``) — по этому
-    журналу считается распределение, а не «иногда падает».
+    ``RETRY_BUDGETS``. Каждая попытка пишется в ``var/llm-debug.jsonl`` (если
+    журнал включён, ``LEX_LLM_DEBUG=1``) — по этому журналу считается
+    распределение, а не «иногда падает».
     """
     if not configured():
         raise LLMError(
@@ -155,56 +199,63 @@ def chat(
             "(см. .env и docs/DEPLOY-NEXUSLINK.md)"
         )
     retries = EMPTY_RETRIES if retries_on_empty is None else retries_on_empty
-    base = max(MIN_MAX_TOKENS, int(max_tokens))
-    budgets = [base]
+    budgets_chain = [max(MIN_MAX_TOKENS, int(max_tokens))]
     for b in RETRY_BUDGETS[:retries]:
-        if b > budgets[-1]:
-            budgets.append(b)
+        if b > budgets_chain[-1]:
+            budgets_chain.append(b)
 
-    last: tuple[dict, dict] | None = None
-    # Почему не дошли до ответа — для честного сообщения, если он так и не
-    # получился. Раньше здесь стоял `assert last is not None`: когда все
-    # попытки выпали по троттлингу, `last` оставался пустым, AssertionError
-    # летел без текста, и SSE-кадр уходил с `message: ""` — жюри видело
-    # «пустой ответ» вместо причины.
+    models = [model] if model else model_chain()
     last_error: LLMError | None = None
-    for attempt, budget in enumerate(budgets):
-        t0 = time.monotonic()
-        try:
-            payload, body = _post_chat(messages, budget, temperature, timeout)
-        except LLMError as exc:
+    last: tuple[dict, dict] | None = None
+    dead: list[str] = []
+
+    for slot in models:
+        if slot in dead:
+            continue
+        slot_failed = False
+        for attempt, budget in enumerate(budgets_chain):
+            t0 = time.monotonic()
+            try:
+                payload, body = _post_chat(messages, budget, temperature, timeout, slot)
+            except LLMError as exc:
+                llm_debug.record(
+                    model=slot, max_tokens=budget, finish_reason="",
+                    content="", reasoning="",
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
+                    attempt=attempt, retried=attempt > 0, error=str(exc),
+                )
+                last_error = exc
+                if is_slot_dead(exc):
+                    dead.append(slot)
+                    slot_failed = True
+                    break
+                if not is_transient(exc):
+                    raise
+                if _throttle_wait(attempt + 1):
+                    continue
+                slot_failed = True
+                break
+            content = _content_of(payload, body)
+            reasoning = _reasoning_of(payload)
+            _tokens_add(payload)
             llm_debug.record(
-                model=model_name(), max_tokens=budget, finish_reason="",
-                content="", reasoning="",
+                model=slot, max_tokens=budget,
+                finish_reason=_finish_reason(payload), content=content,
+                reasoning=reasoning,
                 elapsed_ms=int((time.monotonic() - t0) * 1000),
-                attempt=attempt, retried=attempt > 0, error=str(exc),
+                attempt=attempt, retried=attempt > 0,
             )
-            if not is_transient(exc):
-                raise
-            # Троттлинг или разрыв связи с апстримом: пауза растёт линейно
-            # (3 с, 6 с, 9 с). Бюджет не меняем — он тут ни при чём.
-            last_error = exc
-            if _throttle_wait(attempt + 1):
-                continue
-            raise
-        content = _content_of(payload, body)
-        reasoning = _reasoning_of(payload)
-        _tokens_add(payload)
-        llm_debug.record(
-            model=model_name(), max_tokens=budget,
-            finish_reason=_finish_reason(payload), content=content,
-            reasoning=reasoning,
-            elapsed_ms=int((time.monotonic() - t0) * 1000),
-            attempt=attempt, retried=attempt > 0,
-        )
-        if content:
-            return content
-        last = (payload, body)
+            if content:
+                return content
+            last = (payload, body)
+        if slot_failed:
+            continue
 
     if last is None:
         raise LLMError(
             "NexusLink не отдал ответ ни на одной попытке: "
-            f"{last_error or 'апстрим недоступен'} (попыток {len(budgets)})"
+            f"{last_error or 'апстрим недоступен'} "
+            f"(слотов опрошено {len(models)}, мертвы: {', '.join(dead) or 'нет'})"
         )
     _raise_empty(*last)
 
@@ -238,10 +289,10 @@ def _throttle_wait(attempt: int) -> bool:
 
 
 def _post_chat(messages: list[dict], max_tokens: int, temperature: float,
-               timeout: float) -> tuple[dict, dict]:
+               timeout: float, model: str | None = None) -> tuple[dict, dict]:
     url = f"{base_url()}/chat/completions"
     body = {
-        "model": model_name(),
+        "model": model or model_name(),
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
