@@ -13,6 +13,10 @@
 
   var ROW_H = 42;
   var OVERSCAN = 6;
+  /* Высота строки метрик релевантности. В CSS это .step__relevance:
+     height 18px + margin-top 3px. Держим в константе, чтобы прокрутка
+     считалась без замера layout; меняешь там — меняй здесь. */
+  var REL_H = 21;
 
   /* Порядок и цвета — docs/API-CONTRACT.md §3, §8, §9, §10, §12.5.
      color в событии не используется: цвета мапит UI сам, как требует §3. */
@@ -93,8 +97,42 @@
     main.appendChild(head);
 
     if (step.detail) main.appendChild(el('div', 'step__val', step.detail));
+    /* §12.8: проверка релевантности — отдельной строкой, а не хвостом detail.
+       Жюри смотрит именно сюда: «предмет 100% · близость 0.69» — это два
+       измеримых числа, по которым видно, что поиск не просто вернул похожие
+       фрагменты, а проверил, о том ли они. Разбираем из того же detail, что
+       прислал сервер: отдельного поля в контракте шага нет. */
+    if (key === 'retrieve') main.appendChild(relevanceLine(step.detail));
     row.appendChild(main);
     return row;
+  }
+
+  /* Строка метрик релевантности. Возвращает null, если сервер их не прислал
+     (старый ответ, mock, шаг без поиска) — тогда лишней пустой строки нет. */
+  function relevanceLine(detail) {
+    var text = String(detail || '');
+    var subj = text.match(/предмет\s+(\d+)\s*%/i);
+    var cos = text.match(/близость\s+([\d.,]+)/i);
+    if (!subj && !cos) return null;
+
+    var line = el('div', 'step__relevance');
+    if (subj) {
+      var s = parseInt(subj[1], 10);
+      var tone = s >= 75 ? 'ok' : (s >= 40 ? 'warn' : 'bad');
+      line.appendChild(el('span', 'step__relevance-label', 'предмет'));
+      line.appendChild(el('span', 'step__relevance-value step__relevance-value--' + tone, subj[1] + '%'));
+    }
+    if (cos) {
+      var v = parseFloat(String(cos[1]).replace(',', '.'));
+      var ctone = v >= 0.5 ? 'ok' : (v >= 0.35 ? 'warn' : 'bad');
+      line.appendChild(el('span', 'step__relevance-label', 'близость'));
+      line.appendChild(el('span', 'step__relevance-value step__relevance-value--' + ctone,
+        (isNaN(v) ? cos[1] : v.toFixed(2))));
+    }
+    line.setAttribute('title', 'предмет — доля слов вопроса, найденных во фрагментах '
+      + '(порог 0.75); близость — косинус вопроса к лучшему фрагменту (порог 0.50). '
+      + 'Ниже порога — фрагменты не про этот вопрос, ответа нет.');
+    return line;
   }
 
   function ConsoleView(body, metaNode, statusNode) {
@@ -150,20 +188,65 @@
     this.renderWindow();
     this.updateMeta();
     var nearBottom = this.body.scrollTop + this.body.clientHeight >= this.body.scrollHeight - ROW_H * 2;
-    if (nearBottom) this.body.scrollTop = this.body.scrollHeight;
+    if (nearBottom) {
+      /* rAF: все layout-сдвиги (.ibprog, .params) уже применились к этому моменту,
+         и scrollHeight финален. Без rAF — scrollTop фиксируется до layout-рефлоу,
+         и последующее появление скрытых элементов смещает scrollHeight → прыжок. */
+      var self = this;
+      requestAnimationFrame(function () {
+        self.body.scrollTop = self.body.scrollHeight;
+      });
+    }
   };
 
-  /* Окно: только строки в области просмотра ± OVERSCAN. */
+  /* Окно: только строки в области просмотра ± OVERSCAN.
+
+     Высота строки не всегда ROW_H: у шага поиска под detail есть ещё строка
+     метрик релевантности, и длинный detail переносится на две строки. Раньше
+     распорки считались как «число строк × ROW_H», и такая строка ломала
+     прокрутку — окно уезжало вниз на собственную высоту. Поэтому высоты
+     складываются по строкам: у кого есть метрики — тому прибавка.
+     Оценка по содержимому, а не замер DOM: замер требует layout на каждый
+     push, а строк в прогоне сотни. */
+  function relevanceExtra(step) {
+    if (!step || (step.kind || 'step') !== 'step' || step.key !== 'retrieve') return 0;
+    return /предмет\s+\d+\s*%|близость\s+[\d.,]+/i.test(String(step.detail || ''))
+      ? REL_H : 0;
+  }
+
+  function heightUpTo(steps, count) {
+    var h = 0;
+    for (var i = 0; i < count; i++) h += ROW_H + relevanceExtra(steps[i]);
+    return h;
+  }
+
   ConsoleView.prototype.renderWindow = function () {
     var total = this.steps.length;
     if (!total) return;
     var top = this.body.scrollTop;
     var view = this.body.clientHeight || 400;
-    var first = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
-    var last = Math.min(total, Math.ceil((top + view) / ROW_H) + OVERSCAN);
 
-    this.padTop.style.height = (first * ROW_H) + 'px';
-    this.padBottom.style.height = ((total - last) * ROW_H) + 'px';
+    /* first — первая строка, чей низ не выше области просмотра. */
+    var first = 0;
+    var acc = 0;
+    while (first < total) {
+      var hFirst = ROW_H + relevanceExtra(this.steps[first]);
+      if (acc + hFirst > top) break;
+      acc += hFirst;
+      first++;
+    }
+    first = Math.max(0, first - OVERSCAN);
+
+    var last = first;
+    var used = heightUpTo(this.steps, first);
+    while (last < total && used < top + view) {
+      used += ROW_H + relevanceExtra(this.steps[last]);
+      last++;
+    }
+    last = Math.min(total, last + OVERSCAN);
+
+    this.padTop.style.height = heightUpTo(this.steps, first) + 'px';
+    this.padBottom.style.height = heightUpTo(this.steps, total - last) + 'px';
 
     this.windowNode.textContent = '';
     for (var i = first; i < last; i++) {
