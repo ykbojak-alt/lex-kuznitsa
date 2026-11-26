@@ -523,6 +523,7 @@ class CorpusKnowledge:
         self.departments: list[str] = []
         self.topics: list[str] = []
         self.doc_ids: list[str] = []
+        self.docs_by_topic: dict[str, list[str]] = {}
         self.vocabulary: set[str] = set()
         self._build()
 
@@ -548,6 +549,8 @@ class CorpusKnowledge:
             topic = self._topic_of(doc.get("title"))
             if topic and topic not in topics:
                 topics.append(topic)
+            if topic and doc_id:
+                self.docs_by_topic.setdefault(topic, []).append(doc_id)
         self.topics = topics
         self.doc_ids = [str(d.get("doc_id") or "") for d in docs
                         if isinstance(d, dict) and d.get("doc_id")]
@@ -604,11 +607,19 @@ class CorpusKnowledge:
 
     @staticmethod
     def _topic_of(title: str | None) -> str:
+        """\u0422\u0435\u043c\u0430 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430 = \u0442\u0435\u043a\u0441\u0442 \u0432 \u043a\u0430\u0432\u044b\u0447\u043a\u0430\u0445, \u0438\u043d\u0430\u0447\u0435 \u2014 \u0441\u0430\u043c \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a.
+
+        \u0423 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u043a\u043e\u0440\u043f\u0443\u0441\u0430 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0438 \u0432\u0438\u0434\u0430 \u00ab\u0420\u0435\u0433\u043b\u0430\u043c\u0435\u043d\u0442 \u00ab\u0441\u0440\u043e\u043a \u2026\u00bb\u00bb, \u0438 \u0442\u0435\u043c\u043e\u0439
+        \u0434\u043e\u043b\u0436\u043d\u0430 \u0431\u044b\u0442\u044c \u043a\u0430\u0432\u044b\u0447\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c. \u0423 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u043e\u0432 \u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a\u0430 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u2014 \u0443\u0436\u0435
+        \u0442\u0435\u043c\u0430 (\u00ab\u041f\u0440\u043e\u0435\u043a\u0442\u043d\u0430\u044f \u0434\u0435\u044f\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c (\u0414\u0438\u0440\u0435\u043a\u0446\u0438\u044f \u0418\u0411)\u00bb), \u043a\u0430\u0432\u044b\u0447\u0435\u043a \u043d\u0435\u0442; \u0431\u0440\u0430\u0442\u044c
+        \u043e\u0431\u0449\u0443\u044e \u0447\u0430\u0441\u0442\u044c \u0434\u043e \u0441\u043a\u043e\u0431\u043a\u0438 \u0437\u043d\u0430\u0447\u0438\u0442 \u043f\u043e\u0442\u0435\u0440\u044f\u0442\u044c \u0440\u0430\u0437\u043b\u0438\u0447\u0438\u0435 \u043c\u0435\u0436\u0434\u0443 \u0447\u0435\u0442\u044b\u0440\u044c\u043c\u044f
+        \u0440\u0435\u0433\u043b\u0430\u043c\u0435\u043d\u0442\u0430\u043c\u0438 \u0438 \u043f\u0440\u0435\u0432\u0440\u0430\u0442\u0438\u0442\u044c \u0438\u0445 \u0432 \u043e\u0434\u043d\u0443 \u0442\u0435\u043c\u0443.
+        """
         if not title:
             return ""
-        text = title.split("(")[0].strip()
+        text = str(title).strip()
         if "\u00ab" in text and "\u00bb" in text:
-            text = text.split("\u00ab")[1].split("\u00bb")[0]
+            return text.split("\u00ab")[1].split("\u00bb")[0].strip()
         return text.strip()
 
     # ---- поиск ----
@@ -1425,12 +1436,33 @@ class Dialogue:
             if not self.role_pins_department(role):
                 missing.append("department")
 
-        if not rule_key and not params.get("doc_type"):
+        # Вид документа спрашиваем, только если тема не сузилась сама. У вопроса
+        # про «кто назначает РП» документ один, и требовать от сотрудника
+        # выбрать из десяти видов — издевательство, а не уточнение.
+        if not rule_key and not params.get("doc_type") and self._topic_too_broad(question):
             missing.append("doc_type")
-
         order = ["business_line", "as_of", "amount", "department", "rule_key",
                  "doc_type"]
         return [key for key in order if key in missing]
+
+    def _topic_too_broad(self, question: str | None) -> bool:
+        """Есть ли смысл спрашивать вид документа.
+
+        Спрашивать незачем, если вид назван в вопросе или документов по теме в
+        базе не больше двух — поиск сам разберётся. В маленьком каталоге (до
+        семи тем) спрашивать тем более нечего: у заказчика четыре регламента,
+        и требовать «выберите вид из десяти» — не уточнение, а барьер.
+        """
+        hay = _norm(question)
+        if not hay:
+            return False
+        if self.knowledge.match_topic(hay):
+            return False
+        for topic, doc_ids in self.knowledge.docs_by_topic.items():
+            norm = _norm(topic)
+            if norm and norm in hay and len(doc_ids) <= 2:
+                return False
+        return len(self.knowledge.topics) > 6
 
     def _needs_amount(self, question: str) -> bool:
         hay = _norm(question)
