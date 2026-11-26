@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare MD5 manifests for Python/JavaScript source under src/ and scripts/.
+# Compare MD5 and mtime manifests for Python/JavaScript under src/ and scripts/.
 set -euo pipefail
 
 REMOTE_HOST="${1:-${LEX_REMOTE_HOST:-root@2.27.5.234}}"
@@ -17,7 +17,8 @@ fi
 SSH_KNOWN_HOSTS="${LEX_SSH_KNOWN_HOSTS:-$DEFAULT_KNOWN_HOSTS}"
 command -v ssh >/dev/null || { echo 'ERROR: ssh is required' >&2; exit 2; }
 command -v find >/dev/null && command -v md5sum >/dev/null && command -v sort >/dev/null \
-  || { echo 'ERROR: find, sort, and md5sum are required' >&2; exit 2; }
+  && command -v stat >/dev/null && command -v python3 >/dev/null \
+  || { echo 'ERROR: find, md5sum, sort, stat, and python3 are required' >&2; exit 2; }
 [ -r "$SSH_KEY" ] || { echo "ERROR: SSH key not readable: $SSH_KEY" >&2; exit 2; }
 [ -r "$SSH_KNOWN_HOSTS" ] || { echo "ERROR: SSH known_hosts not readable: $SSH_KNOWN_HOSTS" >&2; exit 2; }
 [ -d "$SOURCE_ROOT/src" ] && [ -d "$SOURCE_ROOT/scripts" ] \
@@ -37,19 +38,80 @@ if [ -n "${WSL_DISTRO_NAME:-}" ] && [[ "$SSH_KEY" == /mnt/* ]]; then
   SSH_KEY="$KEY_COPY"
 fi
 
-(cd "$SOURCE_ROOT" && find src scripts -type f \( -name '*.py' -o -name '*.js' \) -print0 \
-  | LC_ALL=C sort -z | xargs -0 -r md5sum) >"$TMP/local.md5"
+manifest() {
+  local root="$1"
+  (
+    cd "$root"
+    find src scripts -type f \( -name '*.py' -o -name '*.js' \) -print0 \
+      | LC_ALL=C sort -z \
+      | while IFS= read -r -d '' path; do
+          digest="$(md5sum <"$path" | cut -d ' ' -f1)"
+          mtime="$(stat -c '%Y' -- "$path")"
+          printf '%s\t%s\t%s\n' "$path" "$digest" "$mtime"
+        done
+  ) | LC_ALL=C sort -t "$(printf '\t')" -k1,1
+}
+
+manifest "$SOURCE_ROOT" >"$TMP/local.tsv"
 
 ssh -i "$SSH_KEY" -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" -c aes128-gcm@openssh.com -o BatchMode=yes -o ConnectTimeout=10 \
-  "$REMOTE_HOST" "cd '$REMOTE_DIR' && find src scripts -type f \\( -name '*.py' -o -name '*.js' \\) -print0 | LC_ALL=C sort -z | xargs -0 -r md5sum" \
-  >"$TMP/remote.md5"
+  "$REMOTE_HOST" bash -s -- "$REMOTE_DIR" >"$TMP/remote.tsv" <<'REMOTE_MANIFEST'
+set -euo pipefail
+ROOT="$1"
+cd "$ROOT"
+find src scripts -type f \( -name '*.py' -o -name '*.js' \) -print0 \
+  | LC_ALL=C sort -z \
+  | while IFS= read -r -d '' path; do
+      digest="$(md5sum <"$path" | cut -d ' ' -f1)"
+      mtime="$(stat -c '%Y' -- "$path")"
+      printf '%s\t%s\t%s\n' "$path" "$digest" "$mtime"
+    done \
+  | LC_ALL=C sort -t "$(printf '\t')" -k1,1
+REMOTE_MANIFEST
 
-local_count="$(wc -l <"$TMP/local.md5" | tr -d ' ')"
-remote_count="$(wc -l <"$TMP/remote.md5" | tr -d ' ')"
+local_count="$(wc -l <"$TMP/local.tsv" | tr -d ' ')"
+remote_count="$(wc -l <"$TMP/remote.tsv" | tr -d ' ')"
 printf 'Python/JS files: local=%s remote=%s\n' "$local_count" "$remote_count"
-if diff -u "$TMP/local.md5" "$TMP/remote.md5"; then
-  echo 'MATCH: all Python/JavaScript files are byte-identical.'
-  exit 0
-fi
-echo 'MISMATCH: diff above lists missing, extra, or changed files.' >&2
-exit 1
+
+python3 - "$TMP/local.tsv" "$TMP/remote.tsv" <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+def load(path):
+    result = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        name, digest, mtime = line.split("\t")
+        result[name] = (digest, int(mtime))
+    return result
+
+local, remote = map(load, sys.argv[1:])
+paths = sorted(local.keys() | remote.keys())
+diffs = []
+touched = 0
+def stamp(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec="seconds")
+
+for name in paths:
+    left, right = local.get(name), remote.get(name)
+    if left is None:
+        diffs.append((name, "missing-local", "—", right[0], "—", stamp(right[1]), "server-only"))
+    elif right is None:
+        diffs.append((name, "missing-server", left[0], "—", stamp(left[1]), "—", "local-only"))
+    elif left[0] != right[0]:
+        newer = "local" if left[1] > right[1] else "server" if right[1] > left[1] else "same-mtime"
+        diffs.append((name, "md5-diff", left[0], right[0], stamp(left[1]), stamp(right[1]), newer))
+    elif left[1] != right[1]:
+        touched += 1
+
+if diffs:
+    print("MD5/mtime differences:")
+    print("status\tfile\tlocal_md5\tserver_md5\tlocal_mtime_utc\tserver_mtime_utc\tnewer_by_mtime")
+    for row in diffs:
+        print("\t".join(row))
+    print(f"MISMATCH: {len(diffs)} differing/missing path(s); {touched} matching-content path(s) have different mtimes.")
+    sys.exit(1)
+print(f"MATCH: all {len(paths)} Python/JavaScript files have identical MD5.")
+if touched:
+    print(f"NOTE: {touched} identical file(s) have different mtimes.")
+PY

@@ -27,6 +27,7 @@ import logging
 import re
 import smtplib
 from email.message import EmailMessage
+from urllib.parse import quote
 
 from . import config, tickets
 
@@ -89,11 +90,23 @@ def send_letter(ticket: dict, to: str, sender: str, cc: str | None = None,
 
 
 def letter_body(ticket: dict) -> str:
-    """Тело письма: вопрос, уточнения и что уже проверено."""
+    """Тело письма: вопрос, уточнения, что проверено и ссылка на заявку.
+
+    Ссылка на заявку — первым делом: сотрудник качества должен открыть её и
+    сразу работать в ней (ответ там же становится черновиком кейса), а не
+    искать тикет по номеру руками.
+    """
     asker = ticket.get("asker") or {}
-    body_lines = [str(ticket.get("question") or "").strip()]
+    body_lines: list[str] = []
+
+    link = ticket_link(ticket)
+    if link:
+        body_lines.append(f"Заявка: {link}")
+        body_lines.append("")
+
     if asker.get("role_id"):
-        body_lines.insert(0, f"От: {config.employee_email(asker['role_id'])}")
+        body_lines.append(f"От: {config.employee_email(asker['role_id'])}")
+    body_lines.append(str(ticket.get("question") or "").strip())
     if ticket.get("clarifications"):
         body_lines.append("")
         body_lines.append("Уточнения в диалоге:")
@@ -114,6 +127,20 @@ def letter_body(ticket: dict) -> str:
     return "\n".join(body_lines).strip()
 
 
+def ticket_link(ticket: dict) -> str:
+    """Прямая ссылка на заявку в веб-интерфейсе стенда.
+
+    Без ``STAND_URL`` ссылки нет: на локальном стенде адрес неизвестен, и
+    подставлять выдуманный нельзя — письмо должно вести туда, где заявка
+    действительно открывается.
+    """
+    base = getattr(config, "STAND_URL", "").rstrip("/")
+    tid = str(ticket.get("id") or ticket.get("ticket") or "").strip()
+    if not base or not tid:
+        return ""
+    return f"{base}/#ticket={quote(tid)}"
+
+
 def email_block(ticket: dict, delivery: str = "simulated") -> dict:
     """§22.2: блок письма для карточки. `delivery` — фактический исход."""
     asker = ticket.get("asker") or {}
@@ -126,6 +153,7 @@ def email_block(ticket: dict, delivery: str = "simulated") -> dict:
         "subject": _subject(ticket.get("question", "")),
         "sent_at": sent_at,
         "delivery": delivery,
+        "ticket_url": ticket_link(ticket),
     }
 
 

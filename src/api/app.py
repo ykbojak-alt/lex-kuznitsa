@@ -20,6 +20,11 @@ from pydantic import BaseModel, Field
 # Запуск из корня репозитория (`uvicorn src.api.app:app`) — ядро лежит в src/lex,
 # поэтому src должен быть в sys.path. Из каталога src/ это уже так.
 _SRC = Path(__file__).resolve().parents[1]
+
+# Длина текста вопроса в аналитике. Обрезка — только для показа в таблице:
+# полный текст остаётся в журнале, а строка «×18» рядом говорит, сколько раз
+# вопрос реально задали.
+QUESTION_MAX_CHARS = 160
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
@@ -325,6 +330,10 @@ def _similar_questions() -> list[dict]:
 
     Группировку журнала делает ACE; пока её нет — считаем здесь по журналу,
     и это честно помечено в отчёте. Канонический вопрос — самый частый вариант.
+
+    ``question`` — тот же текст, что ``canonical``, но под именем, которое
+    читает таблица «часто спрашивают» (``src/web/app.js``, там фолбэк как раз
+    на него). Без него живой ответ отдавал одни числа без самих вопросов.
     """
     groups: dict[str, dict] = {}
     for row in core.journal_read(limit=100_000):
@@ -346,9 +355,11 @@ def _similar_questions() -> list[dict]:
         variants = sorted(slot["variants"].items(), key=lambda kv: -kv[1])
         canonical = variants[0][0]
         out.append({
+            "question": canonical[:QUESTION_MAX_CHARS],
             "canonical": canonical,
             "count": slot["count"],
-            "variants": [v for v, _ in variants if v != canonical][:5],
+            "variants": [v[:QUESTION_MAX_CHARS] for v, _ in variants
+                         if v != canonical][:5],
             "last_seen": slot["last_seen"],
             "refusal_rate": round(slot["refusals"] / slot["count"], 3) if slot["count"] else 0.0,
         })

@@ -768,6 +768,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                 # Отправка не роняет ответ: сбой SMTP даёт delivery=failed, и
                 # карточка честно говорит, что письмо не ушло.
                 payload["email"] = mail.deliver({
+                    "id": payload.get("ticket_id") or "",
                     "question": question,
                     "created_at": entry["ts"],
                     "why_unresolved": str(payload.get("reason") or ""),

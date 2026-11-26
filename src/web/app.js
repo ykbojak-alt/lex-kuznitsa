@@ -443,6 +443,22 @@
   }
   $('navBrand').addEventListener('click', function (e) { e.preventDefault(); goScreen('chat'); });
 
+  /* Прямая ссылка на заявку: #ticket=LEX-2026-0007 приходит из письма.
+     Сотрудник качества открывает письмо в почте, жмёт ссылку и попадает
+     сразу в эту заявку, а не в общий список. */
+  function openFromHash() {
+    var m = /(?:^|[#&])ticket=([^&]+)/.exec(global.location.hash || '');
+    if (!m) return;
+    var tid = decodeURIComponent(m[1]);
+    if (!ticketsAllowed()) {
+      goScreen('chat');
+      return;
+    }
+    goScreen('tickets');
+    renderTicketDetail(tid);
+  }
+  global.addEventListener('hashchange', openFromHash);
+
   /* ------------------------------------------------------------------ экраны-справочники */
 
   function renderRolesScreen() {
@@ -1322,21 +1338,27 @@
 
     for (var s = 0; s < sims.length; s++) {
       var item = sims[s];
+      // Сервер отдаёт каноническую формулировку в поле canonical, мок — в
+      // question. Читаем оба: иначе колонка «Вопрос» пустая, и таблица
+      // показывает одни числа — владелец это и увидел.
+      var text = String(item.canonical || item.question || '');
+      if (!text) continue;
       var tr2 = el('tr');
       var tdq = el('td');
-      var qlink = el('button', 'linkish', item.question);
+      var qlink = el('button', 'linkish', text);
       qlink.type = 'button';
-      qlink.addEventListener('click', (function (text) {
+      qlink.title = text;
+      qlink.addEventListener('click', (function (qtext) {
         return function () {
           goScreen('chat');
           var box = $('question');
-          box.value = text;
+          box.value = qtext;
           box.focus();
-          box.setSelectionRange(text.length, text.length);
+          box.setSelectionRange(qtext.length, qtext.length);
         };
-      })(item.question));
+      })(text));
       tdq.appendChild(qlink);
-      if (item.refusal_rate >= 0.5) {
+      if ((item.refusal_rate || 0) >= 0.5) {
         tdq.appendChild(el('span', 'sig-nodoc', item.note ? item.note : 'регламента нет'));
       }
       tr2.appendChild(tdq);
@@ -2603,5 +2625,6 @@
     renderRolesScreen();
     $('navCount').textContent = state.mock ? 'демо-режим · без бэкенда' : 'живой режим';
     document.documentElement.setAttribute('data-mode', state.mock ? 'mock' : 'live');
+    openFromHash();
   });
 })(window);

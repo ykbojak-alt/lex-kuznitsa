@@ -200,6 +200,33 @@ def case_stats(rows: list[dict[str, Any]], escalations: list[dict[str, Any]],
     }
 
 
+def latency(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Скорость ответа: за всё время и скользящее окно последние 20 записей."""
+    vals = [float(r["elapsed_ms"]) for r in rows
+            if isinstance(r.get("elapsed_ms"), (int, float))]
+    if not vals:
+        return {"empty": True, "hint": "В журнале нет elapsed_ms — скорость пока не измерялась."}
+
+    def p95(v: list[float]) -> int:
+        ordered = sorted(v)
+        return int(ordered[min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)])
+
+    def summarise(v: list[float]) -> dict[str, Any]:
+        return {
+            "records": len(v),
+            "avg_ms": round(sum(v) / len(v), 1),
+            "p95_ms": p95(v),
+        }
+
+    recent = vals[-20:]
+    return {
+        "empty": False,
+        "all_time": summarise(vals),
+        "recent20": summarise(recent),
+        "note": "elapsed_ms из journal.jsonl; recent20 — последние 20 запросов (скользящее окно).",
+    }
+
+
 def token_usage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Расход токенов из journal.jsonl. Меньше 5 записей — честное пустое состояние."""
     measured = []
@@ -227,6 +254,7 @@ def token_usage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ordered = sorted(totals)
     p95 = ordered[min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)]
     calls = [int(t["calls"]) for t in measured if t.get("calls") is not None]
+    recent = sorted(totals[-20:])
     return {
         "empty": False,
         "records": len(measured),
@@ -235,6 +263,11 @@ def token_usage(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_tokens": sum(totals),
         "avg_total_per_request": round(sum(totals) / len(totals), 1),
         "p95_total_per_request": p95,
+        "window20": {
+            "records": len(recent),
+            "avg_total_per_request": round(sum(recent) / len(recent), 1),
+            "p95_total_per_request": recent[min(len(recent) - 1, math.ceil(0.95 * len(recent)) - 1)],
+        },
         "llm_calls": sum(calls) if calls else None,
         "llm_calls_measured": bool(calls),
         "cost_estimate": round(sum(costs), 4) if costs else None,
@@ -268,6 +301,7 @@ def compute() -> dict[str, Any]:
         "criterion2": clarification_stats(sessions),
         "criterion3": case_stats(rows, escalations, cases),
         "token_usage": token_usage(rows),
+        "latency": latency(rows),
         "timeline": timeline(rows),
         "last_request_ts": max((str(r.get("ts") or "") for r in rows), default="") or None,
     }
@@ -283,6 +317,7 @@ __all__ = [
     "clarification_stats",
     "compute",
     "escalation_reasons",
+    "latency",
     "outcomes",
     "relevance_gate",
     "router",
