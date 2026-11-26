@@ -9,7 +9,9 @@
     догадкой, и НЕ задаёт их там, где всё уже известно; пропуск даёт явное
     умолчание;
   * §15 (v1.7) — 2-3 уточняющих итерации, потом эскалация в службу качества;
-    вопрос «вне базы» эскалируется сразу, без бесполезных уточнений.
+    вопрос «вне базы» эскалируется сразу, без бесполезных уточнений;
+  * §17 — направление определить не удалось: спрашиваем его первым;
+  * §21 — уточняющие вопросы простым языком, но реквизиты нормы дословно.
 
 Скрипт ничего не меняет в репозитории: сессии и заявки пишутся в var/.
 """
@@ -24,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from lex.dialogue import (  # noqa: E402
+    FORMAL_MARKERS,
     MAX_CLARIFY_ITERATIONS,
     MIN_CLARIFY_ITERATIONS,
     Dialogue,
@@ -41,6 +44,10 @@ def _dialogue(tag: str) -> Dialogue:
 
 def main() -> int:
     VAR.mkdir(parents=True, exist_ok=True)
+    # Сессии прошлого прогона исчерпывают счётчик кругов и делают проверку
+    # ложноположительной. Чистим только свои файлы.
+    for stale in VAR.glob("sessions-check*.jsonl"):
+        stale.unlink(missing_ok=True)
     dlg = _dialogue("check")
 
     # --- §10: неполный вопрос -> список уточнений с reason.
@@ -121,6 +128,45 @@ def main() -> int:
     assert event["iterations"] == iterations
     assert event["reason"] and event["next"] and event["eta"]
     print("7. событие escalate ->", json.dumps(event, ensure_ascii=False)[:160])
+
+    # --- §21: вопросы простым языком, реквизиты — дословно.
+    d5 = _dialogue("check-tone")
+    plain = d5.needs_clarification(
+        "Какой срок согласования заявки?", role="lawyer", as_of=None
+    )
+    assert plain, "есть уточняющий вопрос"
+    for q in plain:
+        for marker in FORMAL_MARKERS:
+            assert marker not in q.text.lower(), f"канцелярит в вопросе: {marker}"
+            assert marker not in q.reason.lower(), f"канцелярит в причине: {marker}"
+    as_of_q = next(q for q in plain if q.key == "as_of")
+    rule = d5.knowledge.rules["SR-01"]
+    for effective in rule.effective_dates:
+        assert effective in as_of_q.reason, f"дата {effective} потеряна в причине"
+    assert rule.key in as_of_q.reason, "ключ правила потерян в причине"
+    print("8. §21 простой язык ->", as_of_q.text, "| реквизиты целы")
+
+    # --- §17: направление определить не удалось -> спрашиваем первым.
+    d6 = _dialogue("check-direction")
+    sid6 = "s-check-direction"
+    direction = d6.needs_clarification(
+        "Какой срок согласования заявки?", role="lawyer", need_direction=True,
+        session_id=sid6,
+    )
+    assert direction and direction[0].key == "business_line", \
+        "вопрос о направлении должен быть первым"
+    assert direction[0].options, "у вопроса о направлении есть варианты"
+    print("9. §17 направление ->", direction[0].text, direction[0].options)
+
+    # направление названо -> про него больше не спрашиваем
+    d6.apply_answers(sid6, {"business_line": "Закупки"})
+    again = d6.needs_clarification(
+        "Какой срок согласования заявки?", role="lawyer", need_direction=True,
+        session_id=sid6,
+    )
+    assert again is None or all(q.key != "business_line" for q in again), \
+        "направление спросили повторно"
+    print("10. §17 направление названо -> повторно не спрашиваем")
 
     print("OK: диалог с уточнением и эскалацией работает")
     return 0

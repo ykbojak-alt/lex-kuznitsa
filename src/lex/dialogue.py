@@ -51,6 +51,13 @@ MIN_CLARIFY_ITERATIONS = 2
 MAX_CLARIFY_ITERATIONS = 3
 DEFAULT_TTL_SECONDS = 30 * 60
 
+#: Канцелярит, которого в уточняющих вопросах быть не должно (§21): уточнять
+#: нужно ПОНЯТНО, а не канцелярски. Реквизиты при этом не трогаются.
+FORMAL_MARKERS = (
+    "согласно", "в соответствии с", "осуществляется", "данный вопрос",
+    "вышеуказанн", "определить действующую", "надлежащ",
+)
+
 #: Основы слов, по которым вопрос считается «процессным» даже без совпадений
 #: со словарём корпуса: такие вопросы уточнить полезно, поэтому «вне базы» их
 #: не считаем (§15.1: если не уверен — уточняй, это безопаснее).
@@ -83,6 +90,7 @@ PARAM_DEFAULTS: dict[str, tuple[str, str]] = {
     "amount": ("не указана", "сумма не указана — применяю правило целиком"),
     "doc_type": ("любой применимый регламент",
                  "вид документа не указан — беру все применимые"),
+    "business_line": ("", "направление не указано — беру все доступные"),
     "rule_key": ("", "правило не указано — выбираю по теме вопроса"),
 }
 
@@ -803,15 +811,29 @@ class Dialogue:
         session_id: str | None = None,
         answers: dict[str, Any] | None = None,
         ctx: dict[str, Any] | None = None,
+        need_direction: bool = False,
+        lines: Sequence[str] | None = None,
     ) -> list[Question] | None:
         """Нужны ли уточнения.
 
         Аргументы принимаются и как отдельные параметры, и как ctx-словарь
-        (ключи: question, role_id/role, as_of, session_id, answers, params).
+        (ключи: question, role_id/role, as_of, session_id, answers, params,
+        need_direction, lines).
+
+        need_direction=True — направление определить не удалось (§17):
+        первым идёт вопрос о направлении, потому что без него непонятно,
+        какие документы вообще смотреть.
 
         Возвращает список вопросов (1..3) либо None, если уточнять нечего
-        (или круги исчерпаны — тогда параметры закрываются умолчаниями).
+        (или итерации исчерпаны — тогда параметры закрываются умолчаниями).
         """
+        ctx_data: dict[str, Any] = {}
+        if isinstance(question, dict):
+            ctx_data.update(question)
+        if ctx:
+            ctx_data.update(ctx)
+        need_direction = bool(need_direction or ctx_data.get("need_direction"))
+        lines = list(lines or ctx_data.get("lines") or [])
         q, role, as_of, session_id, answers, params_in = self._normalize_args(
             question, role, role_id, as_of, session_id, answers, ctx
         )
@@ -845,7 +867,7 @@ class Dialogue:
                 self.store.save(session)
             return None
 
-        missing = self._missing(params, role, q, matched_rules)
+        missing = self._missing(params, role, q, matched_rules, need_direction)
 
         if not missing:
             if session is not None:
@@ -860,7 +882,8 @@ class Dialogue:
             self.store.save(session)
             return None
 
-        questions = self._build_questions(missing, params, role, q, matched_rules)
+        questions = self._build_questions(missing, params, role, q, matched_rules,
+                                         lines=lines)
         if session is not None:
             self._record_clarification(session, questions)
             self.store.save(session)
@@ -1020,8 +1043,8 @@ class Dialogue:
         return Question(
             key="subject",
             text="О каком заказе, договоре или поставщике идёт речь? (номер или предмет)",
-            reason=("параметры собраны, но подходящего документа не нашлось — "
-                    "уточню предмет, чтобы не искать кота в темноте"),
+            reason=("все параметры есть, но нужного документа не нашлось — "
+                    "уточню предмет, чтобы искать не кота в темноте"),
             kind="text",
         )
 
@@ -1030,7 +1053,7 @@ class Dialogue:
         return Question(
             key="doc_type",
             text="О каком регламенте идёт речь?",
-            reason=("дата и предмет названы, но подходящего документа не нашлось — "
+            reason=("дата и предмет названы, нужного документа нет — "
                     "уточню, какой регламент имеется в виду"),
             kind="choice",
             options=list(self.knowledge.topics[:10]),
@@ -1225,7 +1248,21 @@ class Dialogue:
         topic = self.knowledge.match_topic(q)
         if topic:
             params.setdefault("doc_type", topic)
+        line = self._match_line(q)
+        if line:
+            params.setdefault("business_line", line)
         return params, matched_rules
+
+    def _match_line(self, question: str | None) -> str | None:
+        """Направление, названное в вопросе («по закупкам» → «Закупки»)."""
+        hay = _norm(question)
+        if not hay:
+            return None
+        for title in self.available_lines():
+            norm = _norm(title)
+            if norm and norm in hay:
+                return title
+        return None
 
     def _record_clarification(self, session: Session,
                               questions: Sequence[Question]) -> None:
@@ -1342,7 +1379,8 @@ class Dialogue:
         role: str | None,
     ) -> None:
         """Закрывает недостающие параметры явными умолчаниями."""
-        for key in ("as_of", "department", "amount", "doc_type", "rule_key"):
+        for key in ("as_of", "department", "amount", "doc_type", "rule_key",
+                    "business_line"):
             if params.get(key):
                 continue
             if session.assumption_for(key):
@@ -1355,7 +1393,8 @@ class Dialogue:
                 session.defaulted.append(key)
             if key == "as_of":
                 session.params["as_of"] = value
-            elif key in ("department", "amount", "doc_type", "rule_key"):
+            elif key in ("department", "amount", "doc_type", "rule_key",
+                         "business_line"):
                 session.params[key] = value
 
     def _missing(
@@ -1364,9 +1403,15 @@ class Dialogue:
         role: str | None,
         question: str,
         matched_rules: Sequence[str],
+        need_direction: bool = False,
     ) -> list[str]:
         """Каких параметров не хватает для честного ответа."""
         missing: list[str] = []
+
+        # §17: направление определить не удалось — спросить его надо первым,
+        # от него зависит, какие документы вообще смотреть.
+        if need_direction and not params.get("business_line"):
+            missing.append("business_line")
 
         rule_key = params.get("rule_key") or ""
         if not rule_key and len(matched_rules) > 1:
@@ -1387,7 +1432,8 @@ class Dialogue:
         if not rule_key and not params.get("doc_type"):
             missing.append("doc_type")
 
-        order = ["as_of", "amount", "department", "rule_key", "doc_type"]
+        order = ["business_line", "as_of", "amount", "department", "rule_key",
+                 "doc_type"]
         return [key for key in order if key in missing]
 
     def _needs_amount(self, question: str) -> bool:
@@ -1405,21 +1451,34 @@ class Dialogue:
         role: str | None,
         question: str,
         matched_rules: Sequence[str],
+        lines: Sequence[str] | None = None,
     ) -> list[Question]:
         questions: list[Question] = []
         rule_key = params.get("rule_key") or ""
         rule = self.knowledge.rules.get(rule_key)
 
         for key in missing:
-            if key == "as_of" and rule is not None:
+            if key == "business_line":
+                options = list(lines or self.available_lines())
+                questions.append(Question(
+                    key="business_line",
+                    text="О каком направлении вопрос?",
+                    reason=("без направления неясно, какие документы смотреть — "
+                            "направление задаёт и права роли"),
+                    kind="choice",
+                    options=options,
+                ))
+            elif key == "as_of" and rule is not None:
                 dates = ", ".join(d for d in rule.effective_dates if d)
+                # §21: реквизиты (ключ правила, даты редакций) — дословно,
+                # а формулировка — проще.
                 questions.append(Question(
                     key="as_of",
-                    text="На какую дату определить действующую редакцию?",
-                    reason=(f"в корпусе {_num_word(len(rule.revisions))} редакции "
-                            f"правила {rule.key}"
+                    text="На какую дату считаем?",
+                    reason=(f"правило {rule.key} в корпусе в "
+                            f"{_num_word(len(rule.revisions))} редакциях"
                             + (f" ({dates})" if dates else "")
-                            + ", без даты нельзя выбрать действующую"),
+                            + " — без даты нельзя понять, какая действует"),
                     kind="date",
                 ))
             elif key == "amount" and rule is not None:
@@ -1427,21 +1486,20 @@ class Dialogue:
                 questions.append(Question(
                     key="amount",
                     text="Какая сумма заявки?",
-                    reason=("от суммы зависит порядок: порог автоматического "
-                            f"одобрения — {self._threshold_text(rule)}"),
+                    reason=("от суммы зависит ответ — порог автоматического "
+                            f"одобрения {self._threshold_text(rule)}"),
                     kind="choice",
                     options=options,
                 ))
             elif key == "department":
                 options = self._department_options(rule)
-                title = (f"Отдел «{role}» видит все подразделения — по чьему "
-                         "подразделению вопрос?") if role else                         "Подразделение не указано — по чьему подразделению вопрос?"
+                title = (f"роль «{role}» видит все отделы — чей запрос?"
+                         if role else "отдел не назван — чей запрос?")
                 questions.append(Question(
                     key="department",
-                    text="Подразделение?",
-                    reason=(title + "; редакции правила лежат в разных "
-                            "подразделениях, от этого зависит, какая редакция "
-                            "попадёт в ответ"),
+                    text="Какое подразделение?",
+                    reason=(title + "; от этого зависит, какая редакция правила "
+                            "подойдёт"),
                     kind="choice",
                     options=options,
                 ))
@@ -1460,14 +1518,46 @@ class Dialogue:
                     key="doc_type",
                     text="О каком регламенте вопрос?",
                     reason=(f"в корпусе {len(self.knowledge.topics)} видов "
-                            "документов — без уточнения не выбрать "
-                            "применимый"),
+                            "документов — уточните, какой подходит"),
                     kind="choice",
                     options=options,
                 ))
             if len(questions) >= self.max_questions:
                 break
         return questions[: self.max_questions]
+
+    def available_lines(self) -> list[str]:
+        """Направления базы (§11/§17) — из policy, иначе из корпуса.
+
+        Данные, а не код: policy держит карту направлений, корпус — системы
+        документов. Пустой список — уточнять нечего.
+        """
+        try:
+            from .policy import BUSINESS_LINES
+        except Exception:
+            BUSINESS_LINES = {}
+        titles = [str(v.get("title") or k)
+                  for k, v in (BUSINESS_LINES or {}).items() if k]
+        if titles:
+            return titles
+        systems: list[str] = []
+        for doc in self.knowledge.manifest.get("documents") or []:
+            if isinstance(doc, dict):
+                system = str(doc.get("system") or "").strip()
+                if system and system not in systems:
+                    systems.append(system)
+        return systems[:10]
+
+    def direction_question(self, lines: Sequence[str] | None = None) -> Question:
+        """§17: направление определить не удалось — спросим его."""
+        return Question(
+            key="business_line",
+            text="О каком направлении вопрос?",
+            reason=("без направления неясно, какие документы смотреть — "
+                    "направление задаёт и права роли"),
+            kind="choice",
+            options=list(lines or self.available_lines()),
+        )
 
     def _threshold_text(self, rule: RuleInfo) -> str:
         thresholds = rule.thresholds
