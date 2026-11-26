@@ -113,6 +113,13 @@ GROUNDING_THRESHOLD = float(os.environ.get("LEX_GROUNDING_THRESHOLD", "0.45"))
 # это «спросить ещё раз», а не «дать другой ответ»: из результатов берётся
 # лучший по опоре на цитаты (§12).
 COMPOSE_ATTEMPTS = int(os.environ.get("LEX_COMPOSE_ATTEMPTS", "2"))
+# Порог «ответ достаточно хорош, второй вызов не нужен». 0.999 недостижим на
+# практике: замер 27.11.2026 — 96% и 55% опоры в первом ответе, второй вызов
+# добавлял 45 с к запросу и лучше не делал. Безопасность держит не этот порог,
+# а шаг verify: он отбрасывает утверждения без цитат и ставит оговорку. Порог
+# нужен только чтобы не платить вторым вызовом за ответ, который и так
+# опирается на цитаты.
+COMPOSE_ACCEPT_RATIO = float(os.environ.get("LEX_COMPOSE_ACCEPT", "0.85"))
 
 SYSTEM_PROMPT = (
     "Ты отвечаешь ТОЛЬКО на основе фрагментов, переданных ниже. Если фрагменты не "
@@ -1046,7 +1053,7 @@ class Orchestrator:
                 best_text, best_ratio = text, ratio
             # Полностью опёртый ответ — второй вызов не нужен: детерминизм
             # достигнут тем, что первый результат уже принимаем.
-            if ratio >= 0.999 and text.strip():
+            if ratio >= COMPOSE_ACCEPT_RATIO and text.strip():
                 return text, ""
         if not best_text.strip():
             detail = "; ".join(errors) if errors else "модель вернула пустой ответ"

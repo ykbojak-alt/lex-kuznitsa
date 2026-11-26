@@ -13,7 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=LEX_EMBED_URL=http://127.0.0.1:8081
 Environment=LEX_RERANK_URL=http://127.0.0.1:8082
 ExecStart=/opt/lex-kuznitsa/.venv/bin/python -m uvicorn api.app:app --host 127.0.0.1 --port 8090 --app-dir /opt/lex-kuznitsa/src
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]
