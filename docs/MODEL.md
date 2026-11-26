@@ -64,8 +64,8 @@
 
 | Роль | Модель | Порт | Устройство | Лицензия |
 |---|---|---|---|---|
-| Embedding | bge-m3 (dim 1024) | 8081 | CPU | Apache-2.0 |
-| Reranker | bge-reranker-base (20 мс/док) | 8082 | CPU | Apache-2.0 |
+| Embedding | bge-m3 (dim 1024) | 8081 | CPU | MIT |
+| Reranker | bge-reranker-base (20 мс/док) | 8082 | CPU | MIT |
 
 Запуск: `scripts/start-embed.ps1`, `scripts/start-rerank.ps1`.
 Проверка: `curl http://127.0.0.1:8081/health` → `{"status":"ok","model":"bge-m3","dim":1024,"device":"cpu","ready":true}`.

@@ -436,6 +436,10 @@ def _run_options(question: str, role_id: str, as_of: str | None,
         kwargs["tone"] = tone
     if business_line:
         kwargs["business_line"] = business_line
+    if config.NO_LLM:
+        # §12: без модели ответ собирается из цитат. Тон и оговорки при этом
+        # остаются — их считает grounding, а не LLM.
+        kwargs["no_llm"] = True
     return RunOptions(**kwargs)
 
 

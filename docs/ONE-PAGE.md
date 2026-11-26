@@ -10,7 +10,7 @@
 с Anthropic/OpenAI API. Fallback — локально развёрнутая **Qwen3-8B-Instruct GGUF
 Q4_K_M** (~5 GB, лицензия веса Apache-2.0), которая используется, если шлюз
 недоступен или требуется изолированный контур. Embedding — **bge-m3**
-(~2 GB, Apache-2.0), reranker — **bge-reranker-base** (~1 GB, Apache-2.0), оба
+(~2 GB, MIT), reranker — **bge-reranker-base** (~1 GB, MIT), оба
 поднимаются локально независимо от профиля LLM. Наш код — MIT.
 
 ## Агентность (не менее 7 шагов)

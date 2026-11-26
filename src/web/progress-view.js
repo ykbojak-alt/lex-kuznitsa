@@ -10,7 +10,10 @@
 (function (global) {
   'use strict';
 
-  var TOTAL = 10;
+  /* Шагов 11 (§3: accept → policy → decompose → inspect → retrieve → cases →
+     permissions → resolve → conflict → compose → verify). Значение по умолчанию,
+     реальное берётся из total каждого шага SSE — mock и живой бэкенд совпадают. */
+  var TOTAL = 11;
   var MIN_STEP_MS = 90;
 
   function el(tag, cls, text) {
@@ -117,7 +120,8 @@
 
     var tone = kind === 'ok' ? 'ok'
       : kind === 'caveat' ? 'caveat'
-        : kind === 'refusal' ? 'refusal' : 'scope';
+        : kind === 'error' ? 'error'
+          : kind === 'refusal' ? 'refusal' : 'scope';
     this.wrap.className = 'progress progress--done progress--' + tone;
     if (this.ibBar) this.ibBar.className = 'ibprog ibprog--done ibprog--' + tone;
 

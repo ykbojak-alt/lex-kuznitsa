@@ -42,6 +42,48 @@ POLICY_MIN_COVERAGE = float(os.environ.get("POLICY_MIN_COVERAGE", "0.08"))
 # выводить его из system и типа документа), поэтому карта живёт здесь и
 # правится данными, а не логикой.
 BUSINESS_LINES: dict[str, dict] = {
+    "проектная деятельность": {
+        "title": "Проектная деятельность",
+        "keywords": (
+            "проект", "ртз", "расчёт трудозатрат", "расчет трудозатрат", "ткп",
+            "карточк", "гип", "главный инженер", "роль проект", "этап",
+            "инициац", "закрыти проекта", "акт выполненных", "смет",
+        ),
+    },
+    "пресейл": {
+        "title": "Пресейл",
+        "keywords": (
+            "пресейл", "возможн сделк", "аккаунт-менеджер", "менеджер по продаже решений",
+            "пресейл-архитектор", "bdm", "tps", "технический пресейл",
+            "квалификац", "тендер", "хардоффер",
+        ),
+        # Аббревиатуры «АМ», «ПА», «SS» — отдельным списком и только целым
+        # словом: как подстрока «па» ловится в «паспорт», «компания»,
+        # «программа», и направление уезжает на каждый такой вопрос.
+        "abbrev": ("ам", "па", "ss", "ртз", "ткп", "гип"),
+    },
+    "поставка": {
+        "title": "Поставка и субподряд",
+        "keywords": (
+            "поставк", "спецификац", "вендор", "подрядчик", "субподряд",
+            "партнёр", "партнер", "оборудован", "лиценз",
+        ),
+    },
+    "договор": {
+        "title": "Договор и финансы",
+        "keywords": (
+            "договор", "согласован договор", "маржинальн", "себестоимост",
+            "ставк себестоимост", "бюджет", "оплат", "акт",
+        ),
+    },
+    "команда": {
+        "title": "Команда и ресурсы",
+        "keywords": (
+            "команд", "ресурс", "менеджер ресурс", "назначени", "занятост",
+            "роли", "архитектор", "координатор департамент", "руководитель проекта",
+        ),
+    },
+    # --- синтетический корпус sample-corpus (разработка и тесты) ---
     "закупки": {
         "title": "Закупки",
         "keywords": (
@@ -123,8 +165,10 @@ def available_lines(corpus: Corpus) -> list[dict]:
     counts: dict[str, int] = {line: 0 for line in BUSINESS_LINES}
     for doc in corpus.documents:
         hay = f"{doc.title} {doc.kind} {doc.system}".lower()
+        words = set(re.findall(r"[\w-]+", hay))
         for line, spec in BUSINESS_LINES.items():
-            if any(k in hay for k in spec["keywords"]):
+            by_word = words & set(spec.get("abbrev") or ())
+            if by_word or any(k in hay for k in spec["keywords"]):
                 counts[line] += 1
     out = []
     for line, spec in BUSINESS_LINES.items():
@@ -138,9 +182,12 @@ def _line_of_text(text: str) -> tuple[str | None, float, list[str]]:
     tokens = set(tokenize(low))
     for generic in _GENERIC:
         tokens.discard(generic)
+    words = set(re.findall(r"[\w-]+", low))
     best: tuple[str | None, float, list[str]] = (None, 0.0, [])
     for line, spec in BUSINESS_LINES.items():
         hits = [k for k in spec["keywords"] if k in low]
+        # Аббревиатуры — только целым словом, иначе «па» = «паспорт».
+        hits += [a for a in (spec.get("abbrev") or ()) if a in words]
         if not hits:
             # запасной путь: совпадение по токенам со стеммингом index.tokenize
             hits = [t for t in tokens if t.startswith(spec["keywords"][0][:5])]

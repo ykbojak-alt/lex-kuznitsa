@@ -1911,7 +1911,9 @@
     if (ev.type === 'done') {
       consoleView.push({ kind: 'done', key: 'done', title: 'Готово', detail: 'путь: ' + (d.inference_path || '—') + ' · журнал: ' + (d.journal_id || '—'), ms: d.elapsed_ms });
       /* После отказа «готово» вводит в заблуждение: отвечать было нечем. */
-      if (ctx.outcome === 'refusal' || ctx.outcome === 'scope') {
+      if (ctx.outcome === 'error') {
+        consoleView.setStatus('запрос прерван: сбой на стороне агента', 'bad');
+      } else if (ctx.outcome === 'refusal' || ctx.outcome === 'scope') {
         consoleView.setStatus(ctx.outcome === 'scope'
           ? 'ответа нет: вопрос вне базы знаний'
           : 'ответа нет: в базе не нашлось', 'idle');
@@ -1927,6 +1929,9 @@
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
       consoleView.push({ kind: 'error', key: 'error', title: 'Ошибка', detail: (d.message || '') + (d.stage ? ' · стадия ' + d.stage : '') });
       consoleView.setStatus('ошибка: ' + (d.stage || 'сервер'), 'bad');
+      /* Иначе полоса навсегда остаётся «живой» и врёт, будто агент ещё думает. */
+      ctx.outcome = 'error';
+      progressView.finish('error', 'Сбой на стадии ' + (d.stage || 'сервер'));
       var note = el('p', 'refusal__reason', 'Запрос не обработан: ' + (d.message || 'ошибка сервера') + '.');
       ctx.host.appendChild(note);
     }
@@ -1941,7 +1946,7 @@
       turn.host.dataset.turnId = ctxId;
       state.turn = turn;
       consoleView.clear();
-      progressView.start(10);
+      progressView.start();
     } else {
       /* §10: продолжение диалога — тот же ход ленты, полоса не начинается заново. */
       ctxId = state.turn ? state.turn.host.dataset.turnId : ctxId;

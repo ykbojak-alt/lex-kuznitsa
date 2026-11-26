@@ -21,6 +21,13 @@ import urllib.request
 MIN_MAX_TOKENS = 1024
 DEFAULT_TIMEOUT = 180.0
 
+# Пустой content при непустом reasoning — исчерпанный бюджет, а не сбой связи.
+# Один повтор с удвоенным лимитом спасает прогон; больше — рискуем ждать
+# долго и зря. Пороги в конфиге, потому что у слота может быть свой потолок.
+EMPTY_RETRIES = int(os.environ.get("LEX_LLM_EMPTY_RETRIES", "1"))
+EMPTY_BACKOFF_MULT = int(os.environ.get("LEX_LLM_BACKOFF_MULT", "2"))
+EMPTY_MAX_TOKENS = int(os.environ.get("LEX_LLM_MAX_TOKENS", "4096"))
+
 # ------------------------------------------------------------ §21: два тона
 #
 # Владелец: «Агент может ответить сотруднику менее формальным языком, НО БЕЗ
@@ -97,18 +104,41 @@ def chat(
     max_tokens: int = MIN_MAX_TOKENS,
     temperature: float = 0.2,
     timeout: float = DEFAULT_TIMEOUT,
+    retries_on_empty: int = EMPTY_RETRIES,
 ) -> str:
-    """Один вызов ``/chat/completions``. Возвращает текст ответа."""
+    """Один вызов ``/chat/completions``. Возвращает текст ответа.
+
+    Пустой ``content`` при непустом ``reasoning`` — не сбой сети, а исчерпанный
+    бюджет: модель ушла в рассуждение и не успела ответить. Это лечится
+    повтором с бОльшим лимитом, а не отказом сотруднику. Без повтора любой
+    прогон, где слот «задумался», превращается в error-кадр — проверено на
+    живом прогоне 26.11.2026.
+    """
     if not configured():
         raise LLMError(
             "NexusLink не настроен: нужны NEXUS_LINK_BASE_URL и NEXUSLINK_KEY "
             "(см. .env и docs/DEPLOY-NEXUSLINK.md)"
         )
+    budget = max(MIN_MAX_TOKENS, int(max_tokens))
+    attempt = 0
+    while True:
+        payload, body = _post_chat(messages, budget, temperature, timeout)
+        content = _content_of(payload, body)
+        if content:
+            return content
+        if attempt >= retries_on_empty:
+            _raise_empty(payload, body)
+        attempt += 1
+        budget = min(budget * EMPTY_BACKOFF_MULT, EMPTY_MAX_TOKENS)
+
+
+def _post_chat(messages: list[dict], max_tokens: int, temperature: float,
+               timeout: float) -> tuple[dict, dict]:
     url = f"{base_url()}/chat/completions"
     body = {
         "model": model_name(),
         "messages": messages,
-        "max_tokens": max(MIN_MAX_TOKENS, int(max_tokens)),
+        "max_tokens": max_tokens,
         "temperature": temperature,
     }
     req = urllib.request.Request(
@@ -132,24 +162,29 @@ def chat(
         raise LLMError(f"NexusLink недоступен ({url}): {exc}") from exc
     except json.JSONDecodeError as exc:
         raise LLMError(f"NexusLink вернул не JSON: {exc}") from exc
-
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
         raise LLMError(f"NexusLink без choices: {str(payload)[:300]}")
-    message = choices[0].get("message") or {}
-    content = (message.get("content") or "").strip()
-    if not content:
-        (message.get("reasoning") or "").strip()
-        usage = payload.get("usage") or {}
-        hint = (
-            f" (reasoning_tokens={usage.get('reasoning_tokens')}, "
-            f"max_tokens={body['max_tokens']})"
-        )
-        raise LLMError(
-            "NexusLink вернул пустой content — обычно ответ ушёл целиком в блок "
-            f"reasoning; поднимите max_tokens{hint}"
-        )
-    return content
+    return payload, body
+
+
+def _content_of(payload: dict, body: dict) -> str:
+    message = (payload.get("choices") or [{}])[0].get("message") or {}
+    return (message.get("content") or "").strip()
+
+
+def _raise_empty(payload: dict, body: dict) -> None:
+    usage = payload.get("usage") or {}
+    message = (payload.get("choices") or [{}])[0].get("message") or {}
+    reasoning = (message.get("reasoning") or "").strip()
+    hint = (
+        f" (reasoning_tokens={usage.get('reasoning_tokens')}, "
+        f"reasoning_chars={len(reasoning)}, max_tokens={body['max_tokens']})"
+    )
+    raise LLMError(
+        "NexusLink вернул пустой content — обычно ответ ушёл целиком в блок "
+        f"reasoning; поднимите max_tokens{hint}"
+    )
 
 
 def reachable(timeout: float = 20.0) -> bool:

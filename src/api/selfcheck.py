@@ -351,13 +351,36 @@ def _first_doc_id() -> str | None:
 
 
 def _run_sse(args) -> None:
-    body = {
-        "question": "Сколько экземпляров договора нужно оформить при закупке у единственного поставщика?",
-        "role_id": "lawyer",
-        "as_of": "2026-07-01",
-        "tone": "plain",
-    }
-    events = sse("/api/ask", body)
+    """Прогон потока: короткий вопрос (clarify) + полный каскад с уточнениями.
+
+    Ядро по §10 спрашивает уточнение, пока не получит ответы; поэтому
+    «полный каскад» — это несколько запросов с накопленными `answers`
+    в одной сессии. Транспорт обязан отдать каждый поток целиком.
+    """
+    question = ("Сколько экземпляров договора нужно оформить при закупке "
+                "у единственного поставщика?")
+    session = "selfcheck-sse"
+    answers: dict = {}
+    events: list[tuple[str, dict]] = []
+
+    for _ in range(4):
+        body = {"question": question, "role_id": "lawyer",
+                "as_of": "2026-07-01", "tone": "plain",
+                "session_id": session, "answers": answers}
+        events = sse("/api/ask", body)
+        kinds = [k for k, _ in events]
+        if any(k in ("answer", "refusal", "escalate") for k in kinds):
+            break
+        clar = next((d for k, d in events if k == "clarify"), None)
+        if clar is None:
+            break
+        questions = clar.get("questions") or []
+        if not questions:
+            break
+        q = questions[0]
+        options = q.get("options") or []
+        answers[q.get("key") or "answer"] = options[0] if options else "да"
+
     kinds = [k for k, _ in events]
     steps = [d for k, d in events if k == "step"]
 
@@ -367,10 +390,14 @@ def _run_sse(args) -> None:
     rows.append((OK, "SSE: шаги", f"{len(steps)} шагов"))
 
     keys = [d.get("key") for d in steps]
-    if keys and keys[0] == "policy":
-        rows.append((OK, "SSE: policy первым (§17.1)", keys[0]))
+    # §17.1: policy — первый СОДЕРЖАТЕЛЬНЫЙ шаг; перед ним идёт accept (§3).
+    first_after_accept = next((k for k in keys if k != "accept"), None)
+    if first_after_accept == "policy":
+        rows.append((OK, "SSE: policy первым после accept (§17.1)",
+                     f"{keys[0]} -> {first_after_accept}"))
     else:
-        rows.append((FAIL, "SSE: policy первым (§17.1)", f"первый шаг: {keys[0] if keys else '—'}"))
+        rows.append((FAIL, "SSE: policy первым после accept (§17.1)",
+                     f"после accept: {first_after_accept}; шаги {keys}"))
 
     totals = {d.get("total") for d in steps}
     if len(totals) == 1:

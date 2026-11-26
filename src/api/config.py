@@ -20,7 +20,8 @@ VERSION = "1.14.0"
 
 CORPUS_DIR = Path(os.environ.get("LEX_CORPUS_DIR") or (ROOT / "sample-corpus"))
 VAR_DIR = Path(os.environ.get("LEX_VAR_DIR") or (ROOT / "var"))
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = Path(os.environ.get("LEX_STATIC_DIR")
+                  or (Path(__file__).resolve().parent / "static"))
 
 JOURNAL_PATH = Path(os.environ.get("LEX_JOURNAL_PATH") or (VAR_DIR / "journal.jsonl"))
 CASES_PATH = Path(os.environ.get("LEX_CASES_PATH") or (VAR_DIR / "cases.jsonl"))
@@ -37,6 +38,10 @@ NEXUSLINK_KEY = os.environ.get("NEXUSLINK_KEY", "")
 NEXUS_LINK_MODEL = os.environ.get("NEXUS_LINK_MODEL", "")
 
 PROBE_TIMEOUT = float(os.environ.get("LEX_PROBE_TIMEOUT", "4"))
+
+# §12: ответ без модели (цитаты как есть). Нужен, когда слот отвечает пустым
+# content из-за reasoning-бюджета: демо не должно падать на шаге compose.
+NO_LLM = os.environ.get("LEX_NO_LLM", "").lower() in ("1", "true", "yes", "on")
 
 # §18.2: SLA тикета. Значения в конфиге, не в коде.
 SLA_HOURS = {"normal": float(os.environ.get("LEX_SLA_HOURS", "48")),

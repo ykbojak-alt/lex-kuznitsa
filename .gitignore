@@ -47,3 +47,12 @@ demo/*.mp4
 
 # Internal farm documents — never published
 docs/legacy/
+# Собранный UI (генерируется scripts/build-web.sh)
+src/api/static/
+
+# Документы заказчика: НЕ в публичный репозиторий (данные третьей стороны).
+# Корпус собирается локально/на стенде из этого каталога, в git не попадает.
+dataset/
+# Производный корпус из реальных документов — тоже вне git
+corpus-real/
+sample-corpus-real/

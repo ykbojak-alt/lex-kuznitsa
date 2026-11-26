@@ -1478,6 +1478,12 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 .progress--refusal .progress__now,
 .progress--scope .progress__now { color: var(--text-2); }
 
+/* Сбой бэкенда — единственный случай, когда красный уместен. */
+.progress--error .progress__fill,
+.progress--error .pdot--past,
+.progress--error .pdot--now { background: var(--danger); }
+.progress--error .progress__now { color: var(--danger); }
+
 /* Компактный дубль в шапке Console Lex. */
 .ibprog {
   height: 3px;
@@ -1498,6 +1504,7 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 .ibprog--caveat .ibprog__fill { background: var(--cav-medium); }
 .ibprog--refusal .ibprog__fill,
 .ibprog--scope .ibprog__fill { background: var(--text-3); }
+.ibprog--error .ibprog__fill { background: var(--danger); }
 
 /* ------------------------------------------------------------ §20 оговорка */
 

@@ -321,6 +321,17 @@ def _clusters(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     return result, {"method": method, "threshold": SIM_THRESHOLD, "min_count": SIM_MIN_COUNT}
 
 
+def aggregate(path: str | Path | None = None, *, recompute: bool = False) -> dict[str, Any]:
+    """Публичное имя агрегатора для HTTP-слоя (§2, §20.5).
+
+    ``src/api/core.analytics()`` ищет именно ``aggregate``: у ядра функция
+    исторически называется ``stats``, и без этого имени слой молча уходил в
+    упрощённый фолбэк — без `refusals_by_reason`, `answer_rate` и кластеров.
+    Один алиас дешевле, чем переименование, которое тронет вызывающих.
+    """
+    return stats(path, recompute=recompute)
+
+
 def stats(path: str | Path | None = None, *, recompute: bool = False,
           limit: int | None = None) -> dict[str, Any]:
     """Все агрегаты GET /api/analytics. Кэш по числу записей + mtime файла."""
@@ -384,6 +395,62 @@ def stats(path: str | Path | None = None, *, recompute: bool = False,
         case_outcomes[str(c.get("outcome") or "open")] += 1
         case_roles[str(c.get("author_role") or "")] += 1
 
+    # v1.12 — оговорки и честный answer_rate
+    note_levels: Counter[str] = Counter()
+    note_reasons: Counter[str] = Counter()
+    plain = caveated = 0
+    for e in entries:
+        if e.get("refused"):
+            continue
+        level = e.get("caveat_level")
+        if level:
+            caveated += 1
+            note_levels[str(level)] += 1
+            for reason in (e.get("caveat_reasons") or []):
+                note_reasons[str(reason)] += 1
+        else:
+            plain += 1
+    answer_rate = {"plain": plain, "caveated": caveated, "refused": refusals}
+    caveats = {
+        "total": caveated,
+        "by_level": {k: note_levels.get(k, 0) for k in ("low", "medium", "high")},
+        "by_reason": [{"code": k, "count": v} for k, v in note_reasons.most_common(10)],
+        "answer_rate": answer_rate,
+    }
+
+    # v1.10/§18 — тикеты из var/escalations.jsonl, top_topics = «чего нет в каталоге»
+    escs = _read_escalations()
+    esc_status = Counter(str(e.get("status") or "open") for e in escs)
+    esc_lines = Counter(str(e.get("business_line") or "общее") for e in escs)
+    esc_topics: Counter[str] = Counter()
+    hours: list[float] = []
+    for esc in escs:
+        why = str(esc.get("why_unresolved") or "")
+        found = re.search(r"<([^>]+)>", why)
+        topic = (found.group(1) if found else str(esc.get("question") or ""))[:80]
+        if topic:
+            esc_topics[topic] += 1
+        if esc.get("answered_at") and esc.get("ts"):
+            try:
+                from datetime import datetime
+                t0 = datetime.fromisoformat(str(esc["ts"]).replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(str(esc["answered_at"]).replace("Z", "+00:00"))
+                hours.append((t1 - t0).total_seconds() / 3600)
+            except ValueError:
+                pass
+    tickets = {
+        "total": len(escs),
+        "open": esc_status.get("open", 0),
+        "assigned": esc_status.get("assigned", 0),
+        "answered": esc_status.get("answered", 0),
+        "closed": esc_status.get("closed", 0),
+        "by_business_line": [{"line": k, "count": v} for k, v in esc_lines.most_common()],
+        "avg_hours_to_assign": 0.0,  # отдельного поля времени назначения в журнале нет
+        "avg_hours_to_answer": round(sum(hours) / len(hours), 2) if hours else 0.0,
+        "sla_breached": 0,
+        "top_topics": [{"topic": k, "count": v} for k, v in esc_topics.most_common(10)],
+    }
+
     clusters, cluster_meta = _clusters(entries)
     out: dict[str, Any] = {
         "total": total,
@@ -414,6 +481,11 @@ def stats(path: str | Path | None = None, *, recompute: bool = False,
         # v1.5 — кластеризация (по запросу/с кэшем)
         "similar_questions": clusters,
         "clustering": cluster_meta,
+        # v1.10 / v1.12 / v1.15 — тикеты, оговорки, честный answer_rate
+        "tickets": tickets,
+        "caveats": caveats,
+        "answer_rate": answer_rate,
+        "write_roles": sorted(WRITE_ROLES),
     }
     _STATS_CACHE[key] = deepcopy(out)
     return out
