@@ -32,7 +32,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[2]
 JOURNAL_PATH = Path(os.environ.get("LEX_JOURNAL_PATH") or (ROOT / "var" / "journal.jsonl"))
 CASES_PATH = Path(os.environ.get("LEX_CASES_PATH") or (ROOT / "var" / "cases.jsonl"))
-MANIFEST_PATH = Path(os.environ.get("LEX_MANIFEST_PATH") or (ROOT / "sample-corpus" / "manifest.json"))
+MANIFEST_PATH = Path(os.environ.get("LEX_MANIFEST_PATH") or (ROOT / "corpus-real" / "manifest.json"))
 EMBED_URL = os.environ.get("LEX_EMBED_URL", "http://127.0.0.1:8081").rstrip("/")
 EMBED_MODEL = os.environ.get("LEX_EMBED_MODEL", "bge-m3")
 SIM_THRESHOLD = float(os.environ.get("LEX_SIM_THRESHOLD", "0.82"))
@@ -40,7 +40,7 @@ SIM_MIN_COUNT = int(os.environ.get("LEX_SIM_MIN_COUNT", "3"))
 HOT_REFUSAL_RATE = float(os.environ.get("LEX_HOT_REFUSAL_RATE", "0.3"))
 ESCALATIONS_PATH = Path(os.environ.get("LEX_ESCALATIONS_PATH") or (ROOT / "var" / "escalations.jsonl"))
 
-# v1.15: чтение единое, запись только для службы качества и руководства.
+# v1.16: чтение по отделам роли, запись только для службы качества и руководства.
 WRITE_ROLES = frozenset({"quality", "director"})
 
 

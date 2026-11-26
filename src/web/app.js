@@ -36,6 +36,7 @@
     ticketDraftCache: {},
     caseCache: null,
     stats: null,
+    juryStats: null,
     similar: [],
     paused: false
   };
@@ -76,6 +77,23 @@
       if (state.roles[i].id === id) return state.roles[i].title;
     }
     return id || '—';
+  }
+
+  function currentRole() {
+    for (var i = 0; i < state.roles.length; i++) {
+      if (state.roles[i].id === state.roleId) return state.roles[i];
+    }
+    return null;
+  }
+
+  /* Подпись роли с объёмом чтения: «Дирекция ИБ · 2 из 4».
+     Без числа человек не видит границы доступа — выбирает роль и не понимает,
+     почему агент не находит документ. Числа приходят с /api/roles из того же
+     фильтра, что и чтение (§23 v1.16), поэтому обещать больше ядра UI не может. */
+  function roleDocsLabel(role) {
+    var title = role.title || role.id;
+    if (role.documents_total == null) return title;
+    return title + ' · ' + role.documents_available + ' из ' + role.documents_total;
   }
 
   var CONTENT_TYPE_LABEL = { text: 'текст', image: 'картинка', scan: 'скан', mixed: 'смешанный', case: 'кейс' };
@@ -206,20 +224,31 @@
     var i, b;
 
     if (activeTab === 'role') {
-      hint.innerHTML = 'Выберите роль — от неё зависят <em>права записи</em>. Чтение документов одинаково у всех ролей (§23).';
+      hint.innerHTML = 'Выберите роль — от неё зависит, <em>какие документы</em> агент вправе показать. Регламенты читаются только по отделам роли; запись — у службы качества и руководства.';
       for (i = 0; i < state.roles.length; i++) {
-        b = el('button', 'chip', state.roles[i].title);
+        var roleItem = state.roles[i];
+        b = el('button', 'chip', roleDocsLabel(roleItem));
         b.type = 'button';
         b.setAttribute('role', 'radio');
-        b.setAttribute('aria-checked', String(state.roles[i].id === state.roleId));
-        b.addEventListener('click', makeRolePicker(state.roles[i].id));
+        b.setAttribute('aria-checked', String(roleItem.id === state.roleId));
+        if (roleItem.documents_total != null) {
+          b.title = 'Доступно ' + roleItem.documents_available + ' из '
+            + roleItem.documents_total + ' документов корпуса';
+        }
+        b.addEventListener('click', makeRolePicker(roleItem.id));
         row.appendChild(b);
       }
       /* §23.2: маленькая строка о модели прав — без неё новый выбор читается неверно. */
-      var perm = el('p', 'panelbar__perm',
-        canWrite()
-          ? 'Чтение: все документы · Запись: разрешена'
-          : 'Чтение: все документы · Запись: только служба качества и руководство');
+      var own = currentRole();
+      var permText;
+      if (own && own.documents_total != null) {
+        permText = 'Чтение: ' + own.documents_available + ' из ' + own.documents_total
+          + ' документов';
+      } else {
+        permText = 'Чтение: по отделам роли';
+      }
+      permText += canWrite() ? ' · Запись: разрешена' : ' · Запись: только служба качества и руководство';
+      var perm = el('p', 'panelbar__perm', permText);
       perm.id = 'permLine';
       row.appendChild(perm);
       return;
@@ -902,6 +931,91 @@
     return card;
   }
 
+  /* Экран для жюри: три критерия + таймлайн — всё из GET /api/stats (реальные журналы). */
+  function renderJuryStats(host, s) {
+    if (!s || s.empty) {
+      host.appendChild(el('p', 'section-sub', s && s.hint ? s.hint : 'Журнал пуст — данных для аналитики нет.'));
+      return;
+    }
+    var c1 = s.criterion1 || {}, c2 = s.criterion2 || {}, c3 = s.criterion3 || {};
+
+    host.appendChild(el('h3', 'detail-h', 'Критерий 1 · ответы, уточнения, эскалации'));
+    var o = c1.outcomes || { counts: {}, shares: {} };
+    var t1 = el('table', 'wikitable');
+    var h1 = el('tr');
+    ['Исход', 'Количество', 'Доля'].forEach(function (x) { h1.appendChild(el('th', null, x)); });
+    t1.appendChild(h1);
+    [['answer', 'ответ'], ['clarify', 'уточнение'], ['escalate', 'эскалация'], ['refusal', 'отказ']].forEach(function (pair) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, pair[1]));
+      tr.appendChild(el('td', 'num', String((o.counts || {})[pair[0]] || 0)));
+      tr.appendChild(el('td', 'num', Math.round(((o.shares || {})[pair[0]] || 0) * 100) + '%'));
+      t1.appendChild(tr);
+    });
+    host.appendChild(t1);
+
+    var rg = c1.relevance_gate || {};
+    host.appendChild(el('p', 'section-sub',
+      'Гейт релевантности остановил ответ: ' + (rg.stops || 0) + ' раз из ' + (rg.retrieve_steps || 0)
+      + ' шагов retrieve (порог покрытия темы < ' + rg.subject_coverage_min + ' или косинус < ' + rg.top_cosine_min + ').'));
+    var reasons = c1.top_escalation_reasons || [];
+    if (reasons.length) {
+      var t2 = el('table', 'wikitable');
+      var h2 = el('tr');
+      ['Причина эскалации (топ-5)', 'Раз'].forEach(function (x) { h2.appendChild(el('th', null, x)); });
+      t2.appendChild(h2);
+      reasons.forEach(function (r) {
+        var tr = el('tr');
+        tr.appendChild(el('td', null, r.reason));
+        tr.appendChild(el('td', 'num', String(r.count)));
+        t2.appendChild(tr);
+      });
+      host.appendChild(t2);
+    }
+
+    host.appendChild(el('h3', 'detail-h', 'Критерий 2 · диалог с уточнениями'));
+    host.appendChild(el('p', 'section-sub',
+      'Диалогов с уточнениями: ' + (c2.dialogues_with_clarify || 0)
+      + ' · среднее число раундов: ' + (c2.avg_rounds || 0)));
+    var params = c2.top_params || [];
+    if (params.length) {
+      host.appendChild(el('p', 'section-sub', 'Чаще спрашивают: '
+        + params.slice(0, 5).map(function (p) { return p.key + ' — ' + p.count; }).join(' · ')));
+    }
+
+    host.appendChild(el('h3', 'detail-h', 'Критерий 3 · кейсы из заявок службы качества'));
+    host.appendChild(el('p', 'section-sub',
+      'Кейсов из заявок: ' + (c3.cases_from_tickets || 0)
+      + ' · среднее время заявка→кейс: ' + (c3.avg_hours_ticket_to_case || 0) + ' ч'
+      + ' · вопросов отвечено из кейсов: ' + (c3.answered_from_cases || 0)));
+
+    var days = s.timeline || [];
+    host.appendChild(el('h3', 'detail-h', 'Ответы по дням'));
+    if (!days.length) {
+      host.appendChild(el('p', 'section-sub', 'Данных по дням нет.'));
+      return;
+    }
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = doc.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 300 60');
+    svg.setAttribute('class', 'sparkline');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Ответы по дням: ' + days.map(function (d) { return d.day + ' — ' + d.count; }).join('; '));
+    var max = Math.max.apply(null, days.map(function (d) { return d.count; }).concat([1]));
+    var points = days.map(function (d, i) {
+      var x = days.length > 1 ? (i * 300 / (days.length - 1)) : 150;
+      var y = 58 - (d.count / max) * 50;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var line = doc.createElementNS(NS, 'polyline');
+    line.setAttribute('points', points);
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', 'var(--link)');
+    line.setAttribute('stroke-width', '2');
+    svg.appendChild(line);
+    host.appendChild(svg);
+  }
+
   function renderStatsScreen() {
     if (!state.mock && !state.stats) {
       fetch('api/analytics').then(function (r) { return r.json(); }).then(function (j) {
@@ -915,6 +1029,13 @@
     host.appendChild(el('h2', 'section-title', 'Аналитика'));
     host.appendChild(el('p', 'section-sub',
       'Считается по журналу запросов (контракт §2, /api/analytics). В мок-режиме данные демонстрационные.'));
+    if (!state.mock && !state.juryStats) {
+      fetch('api/stats').then(function (r) { return r.json(); }).then(function (j) {
+        state.juryStats = j;
+        renderStatsScreen();
+      }).catch(function () { /* без данных — честное пустое состояние */ });
+    }
+    if (!state.mock && state.juryStats) renderJuryStats(host, state.juryStats);
     var table = el('table', 'wikitable');
     var head = el('tr');
     ['Показатель', 'Значение'].forEach(function (h) { head.appendChild(el('th', null, h)); });
@@ -1775,7 +1896,7 @@
       meta.appendChild(el('dt', null, rows[r][0]));
       var dd = el('dd', null, rows[r][1]);
       if (rows[r][0] === 'Номер' && data.ticket) {
-        var copy = el('button', 'linkish lettercard__copy', 'скопировать');
+        var copy = el('button', 'linkish lettercard__copy', 'Скопировать номер заявки');
         copy.type = 'button';
         copy.setAttribute('aria-label', 'Скопировать номер заявки ' + data.ticket);
         copy.addEventListener('click', (function (id, btn) {
@@ -1795,6 +1916,17 @@
 
     box.appendChild(el('p', 'lettercard__demo',
       'демонстрационный режим — реальная отправка не выполнялась'));
+
+    /* ESCALATE: что именно искал агент — по документу/топу видно, почему ответа нет. */
+    if (data.searched) {
+      var s = data.searched;
+      var bits = [];
+      if (s.documents != null) bits.push('документов: ' + s.documents);
+      if (s.cases != null) bits.push('кейсов: ' + s.cases);
+      if (s.business_lines && s.business_lines.length) bits.push('направлений: ' + s.business_lines.join(', '));
+      if (s.top && s.top.length) bits.push('топ: ' + s.top.join(', '));
+      if (bits.length) box.appendChild(el('p', 'ticketcard__reason', 'Что искали — ' + bits.join(' · ')));
+    }
 
     if (status === 'open' || status === 'assigned') {
       if (data.reason) box.appendChild(el('p', 'ticketcard__reason', 'Почему: ' + data.reason));

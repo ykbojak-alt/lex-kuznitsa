@@ -506,7 +506,9 @@ def _manifest_path(corpus_dir: str | Path | None) -> Path:
     if corpus_dir:
         return Path(corpus_dir) / "manifest.json"
     root = Path(__file__).resolve().parents[2]
-    return root / "sample-corpus" / "manifest.json"
+    # Реальный корпус, не синтетика: см. orchestrator.DEFAULT_CORPUS.
+    env = os.environ.get("LEX_CORPUS_DIR")
+    return (Path(env) if env else root / "corpus-real") / "manifest.json"
 
 
 class CorpusKnowledge:

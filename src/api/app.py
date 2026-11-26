@@ -36,6 +36,9 @@ from . import (
     probes,
     tickets,
 )
+from . import (
+    stats as stats_api,
+)
 
 app = FastAPI(
     title="LEX API",
@@ -46,6 +49,8 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+
+app.include_router(stats_api.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,7 +175,30 @@ async def health() -> dict:
 
 @app.get("/api/roles")
 def get_roles() -> list[dict]:
-    return core.roles()
+    """Роли корпуса и объём чтения каждой — «доступно N из M».
+
+    Раньше отдавались только id/title, и человек не видел границы доступа:
+    выбирал роль и не понимал, почему агент не отвечает. Числа считаются тем
+    же фильтром, что и чтение (§23 v1.16), — то есть UI не может обещать
+    больше, чем ядро отдаст.
+    """
+    docs = core.manifest_documents()
+    total = len(docs)
+    out: list[dict] = []
+    for role in core.roles():
+        row = dict(role)
+        try:
+            filtered = core.filter_documents(docs, str(role.get("id") or ""))
+            row["documents_total"] = int(filtered.get("total", total))
+            row["documents_available"] = int(filtered.get("available", total))
+            row["documents_dropped"] = int(filtered.get("dropped", 0))
+            row["read_mode"] = str((filtered.get("permissions") or {}).get("mode") or "")
+        except Exception:
+            row["documents_total"] = total
+            row["documents_available"] = 0
+            row["documents_dropped"] = total
+        out.append(row)
+    return out
 
 
 @app.get("/api/business-lines")
@@ -194,7 +222,15 @@ async def ask(req: AskRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="question обязателен")
     if req.role_id not in core.role_ids():
-        raise HTTPException(status_code=400, detail=f"неизвестная роль: {req.role_id}")
+        # Явная ошибка с перечнем: молчаливое «неизвестная роль» выглядит
+        # поломкой стенда, особенно когда роли переименовали (v1.16:
+        # lawyer/quality/it -> technical/ib/dbrct). Человек должен сразу
+        # видеть, какие значения принимаются.
+        raise HTTPException(
+            status_code=400,
+            detail=(f"неизвестная роль: {req.role_id}. "
+                    f"Доступные роли: {', '.join(core.role_ids())}"),
+        )
     if req.as_of:
         try:
             import datetime as _dt
@@ -235,6 +271,9 @@ def get_analytics() -> dict:
         "missing_by_line": _missing_by_line(base),
         "similar_questions": _similar_questions(),
         "knowledge_loop": _knowledge_loop(),
+        # §16.6/критерий 3: три числа дообучения на верхнем уровне — их
+        # спрашивают про цикл «заявка -> ответ -> кейс -> поиск».
+        **core.learning_metrics(),
         "tickets": _tickets_analytics(),
         "change_requests": changes.analytics(),
         "caveats": caveats,
@@ -474,6 +513,28 @@ def get_cases(limit: int = Query(50, ge=1, le=1000),
     return cases_mod.list_cases(limit=limit, role_id=role_id, tag=tag, rule_key=rule_key)
 
 
+@app.post("/api/cases/{case_id}/reject")
+def post_case_reject(case_id: str, reason: str = "") -> dict:
+    """§8: отклонить кейс — из поиска уходит сразу, след остаётся.
+
+    Отклонение — не удаление: кейс остаётся в файле как история (кто и почему),
+    но ``outcome="rejected"`` исключает его из выдачи на следующем же запросе.
+    """
+    try:
+        return core.reject_case(case_id, reason=reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"кейс не найден: {case_id}") from None
+
+
+@app.delete("/api/cases/{case_id}")
+def delete_case(case_id: str) -> dict:
+    """§8: удалить кейс совсем — для ошибочных записей, которым не место в истории."""
+    out = core.remove_case(case_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=f"кейс не найден: {case_id}")
+    return out
+
+
 # ---------- формы (§13.3-§13.4) ----------
 
 @app.get("/api/forms")
@@ -530,7 +591,7 @@ def _doc_or_error(doc_id: str, role_id: str) -> dict:
 
 
 @app.get("/api/doc/{doc_id}", response_class=HTMLResponse)
-def get_document(doc_id: str, role_id: str = Query("lawyer")):
+def get_document(doc_id: str, role_id: str = Query("director")):
     _doc_or_error(doc_id, role_id)
     try:
         return HTMLResponse(documents.document_html(doc_id, role_id))
@@ -539,7 +600,7 @@ def get_document(doc_id: str, role_id: str = Query("lawyer")):
 
 
 @app.get("/api/doc/{doc_id}/download")
-def download_document(doc_id: str, role_id: str = Query("lawyer")):
+def download_document(doc_id: str, role_id: str = Query("director")):
     _doc_or_error(doc_id, role_id)
     path = documents.resolve(doc_id)
     if path is None:
@@ -549,7 +610,7 @@ def download_document(doc_id: str, role_id: str = Query("lawyer")):
 
 
 @app.get("/api/doc/{doc_id}/preview")
-def doc_preview(doc_id: str, page: int = Query(1, ge=1), role_id: str = Query("lawyer")):
+def doc_preview(doc_id: str, page: int = Query(1, ge=1), role_id: str = Query("director")):
     _doc_or_error(doc_id, role_id)
     got = documents.preview_bytes(doc_id, page)
     if got is not None:

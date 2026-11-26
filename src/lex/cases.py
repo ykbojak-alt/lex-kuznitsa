@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -54,6 +55,13 @@ class Case:
     deviation: str = ""
     confirmed_by: str = ""
     confirmed_at: str = ""
+    # §16.3: кейс из ответа службы качества несёт номер заявки и дату
+    # утверждения — без них нечего считать в метрике «тикет -> кейс».
+    ticket_id: str = ""
+    approved_at: str = ""
+    # §23: кейс виден только автору по умолчанию. public=True — исключение,
+    # когда практика общая и её должен видеть любой отдел.
+    public: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +84,9 @@ class Case:
             "deviation": self.deviation,
             "confirmed_by": self.confirmed_by,
             "confirmed_at": self.confirmed_at,
+            "ticket_id": self.ticket_id,
+            "approved_at": self.approved_at,
+            "public": self.public,
         }
 
     @property
@@ -115,6 +126,7 @@ class CaseStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._cases: list[Case] = []
+        self._cos_cache: tuple[tuple[tuple[str, str], ...], object] | None = None
         self._load()
 
     def _load(self) -> None:
@@ -146,6 +158,38 @@ class CaseStore:
     def get(self, case_id: str) -> Case | None:
         return next((c for c in self._cases if c.id == case_id), None)
 
+    def visible(self, role_id: str | None) -> list[Case]:
+        """Кейсы, которые роль вправе видеть в поиске.
+
+        Кейс — чужой опыт, а не норматив: он содержит вопрос коллеги и то, как
+        его решили. Раньше поиск брал все кейсы разом, и юрист получал в ответ
+        случай из практики другой роли.
+
+        Правило намеренно не такое, как у документов: документы нормативны и
+        читаются всеми (§23), а кейс принадлежит роли-автору. Видно:
+
+        * всё — роли из ``WRITE_ROLES`` (служба качества и руководство): они
+          и так ведут базу, скрывать от них нечего;
+        * кейсы, записанные службой качества, — всем: это ответ на вопрос
+          сотрудника, который она же и задала. Без этого исключения цикл
+          дообучения ломается: кейс создаётся с ``author_role="quality"``, и
+          юрист, задавший исходный вопрос, перестал бы его находить;
+        * кейсы без автора — всем: это импорт практики, у него нет владельца;
+        * кейсы с ``public=True`` — всем: автор явно сказал, что практика
+          общая (например, ответ про порядок, не привязанный к отделу);
+        * остальное — только автору.
+        """
+        role = (role_id or "").strip().lower()
+        if not role or role in WRITE_ROLES:
+            return list(self._cases)
+        return [
+            c for c in self._cases
+            if c.public
+            or c.author_role == role
+            or c.author_role == ""
+            or c.author_role in WRITE_ROLES
+        ]
+
     def find(
         self,
         *,
@@ -165,6 +209,84 @@ class CaseStore:
             out = [c for c in out if c.rule_key == rule_key]
         out = sorted(out, key=lambda c: c.ts, reverse=True)
         return out[:limit] if limit else out
+
+    def search(
+        self,
+        question: str,
+        *,
+        role_id: str | None = None,
+        top: int = 3,
+    ) -> list[Case]:
+        """Кейсы по вопросу — теми же средствами, что документы (§8).
+
+        До этого кейсы искались самодельным пересечением слов: косинус не
+        учитывался вовсе, и перефразированный вопрос («сколько времени на
+        командировку» против «какой срок командировки») кейс не находил.
+        Теперь гибрид как у ``SearchIndex``: BM25 + вектор, слияние RRF.
+        RRF, а не сумма: BM25 не нормирован, косинус в [-1, 1].
+
+        Отклонённые кейсы (``outcome="rejected"``) в выдачу не попадают —
+        это и есть немедленная инвалидация: они остаются в файле для
+        истории, но поиск их не видит.
+        """
+        pool = [c for c in self.visible(role_id) if c.outcome != "rejected"]
+        if not pool:
+            return []
+        q_terms = _tokenize(question)
+        if not q_terms:
+            return []
+
+        bm_scores = _bm25_scores(q_terms, [c.text for c in pool])
+        cos_scores = self._case_cosines(pool, question)
+        bm_rank = sorted(range(len(pool)), key=lambda i: -bm_scores[i])
+        cos_rank = sorted(range(len(pool)), key=lambda i: -cos_scores[i])
+        fused: dict[int, float] = {}
+        for rank, i in enumerate(bm_rank):
+            if bm_scores[i] > 0:
+                fused[i] = fused.get(i, 0.0) + 1.0 / (60 + rank + 1)
+        for rank, i in enumerate(cos_rank):
+            if cos_scores[i] > 0:
+                fused[i] = fused.get(i, 0.0) + 1.0 / (60 + rank + 1)
+        ordered = sorted(fused.items(), key=lambda kv: -kv[1])[:top]
+        return [pool[i] for i, _ in ordered]
+
+    def _case_cosines(self, pool: list[Case], question: str) -> list[float]:
+        """Косинус вопроса к каждому кейсу. Векторы кейсов кэшируются.
+
+        Без кэша каждый вопрос эмбеддил бы все кейсы заново, и это дважды за
+        прогон (стадии cases и retrieve). Ключ — набор id и текстов: правка
+        кейса или удаление сбрасывают кэш сами.
+        """
+        key = tuple((c.id, c.text) for c in pool)
+        with self._lock:
+            cached = self._cos_cache
+        if cached is not None and cached[0] == key:
+            mat = cached[1]
+        else:
+            try:
+                import numpy as np
+
+                from .index import embed_texts
+
+                raw = embed_texts([c.text for c in pool])
+                mat = np.asarray(raw, dtype=np.float64)
+                mat /= np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12
+            except Exception:
+                # Без эмбеддера кейсы всё равно находятся по BM25 — деградация,
+                # а не отказ. Видно в /api/health, как и у документов.
+                return [0.0] * len(pool)
+            with self._lock:
+                self._cos_cache = (key, mat)
+        try:
+            import numpy as np
+
+            from .index import embed_texts
+
+            qv = np.asarray(embed_texts([question])[0], dtype=np.float64)
+            qv /= np.linalg.norm(qv) + 1e-12
+            return [float(x) for x in (mat @ qv)]
+        except Exception:
+            return [0.0] * len(pool)
 
     def next_id(self) -> str:
         n = 0
@@ -195,6 +317,9 @@ class CaseStore:
         escalation_id: str = "",
         confirmed_by: str = "",
         deviation: str = "",
+        ticket_id: str = "",
+        approved_at: str = "",
+        public: bool = False,
         corpus=None,
         as_of=None,
         by_role: str = "",
@@ -257,6 +382,12 @@ class CaseStore:
                     datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                     if confirmed_by else ""
                 ),
+                ticket_id=ticket_id or "",
+                approved_at=approved_at or (
+                    datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if ticket_id else ""
+                ),
+                public=bool(public),
             )
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
@@ -265,6 +396,148 @@ class CaseStore:
                 os.fsync(fh.fileno())
             self._cases.append(case)
             return case
+
+    # ------------------------------------------------------ §16.3: из заявки
+
+    def add_from_ticket(
+        self,
+        *,
+        ticket_id: str,
+        question: str,
+        answer_in_practice: str,
+        author_role: str = "quality",
+        author_name: str = "служба качества",
+        tags: Iterable[str] | None = None,
+        rule_key: str = "",
+        escalation_id: str = "",
+        approved_at: str = "",
+        public: bool = False,
+    ) -> Case:
+        """Кейс из ответа службы качества на заявку (§16.3).
+
+        Отдельный вход, а не ``add()`` со всеми полями: у кейса из заявки
+        обязательно есть номер и дата утверждения, и записывать его без них
+        нельзя — иначе метрика «тикет -> кейс» не посчитается, а кейс
+        невозможно отозвать вместе с заявкой.
+
+        Идемпотентность: одна заявка — один кейс. Повторный вызов по тому же
+        ``ticket_id`` возвращает уже существующий кейс, а не создаёт второй.
+        """
+        tid = (ticket_id or "").strip()
+        if not tid:
+            raise ValueError("кейс из заявки без ticket_id: нечем связать")
+        with self._lock:
+            existing = next((c for c in self._cases if c.ticket_id == tid
+                             and c.outcome != "rejected"), None)
+        if existing is not None:
+            return existing
+        return self.add(
+            question=question,
+            answer_in_practice=answer_in_practice,
+            outcome="resolved",
+            author_role=author_role,
+            author_name=author_name,
+            tags=tags,
+            rule_key=rule_key,
+            source="quality_ticket",
+            escalation_id=escalation_id,
+            ticket_id=tid,
+            approved_at=approved_at,
+            public=public,
+        )
+
+    # -------------------------------------------------- §8: инвалидация кейса
+
+    def reject(self, case_id: str, *, reason: str = "") -> Case:
+        """Отклонить кейс: из поиска он уходит немедленно.
+
+        Не удаляем запись — история отклонений нужна (почему не пошло, кто
+        отклонил). Но ``outcome="rejected"`` выводит кейс из выдачи в тот же
+        момент, без перезапуска и пересборки индекса: поиск читает файл через
+        тот же экземпляр хранилища.
+        """
+        return self._set_outcome(case_id, "rejected", reason=reason)
+
+    def remove(self, case_id: str) -> bool:
+        """Удалить кейс совсем — строку вычёркиваем из файла.
+
+        Нужно, когда кейс ошибочен настолько, что и в истории ему не место
+        (описка, чужие персональные данные). Для обычного «это не подходит»
+        есть ``reject``: он оставляет след.
+        """
+        with self._lock:
+            before = len(self._cases)
+            self._cases = [c for c in self._cases if c.id != case_id]
+            if len(self._cases) == before:
+                return False
+            self._rewrite()
+            return True
+
+    def _set_outcome(self, case_id: str, outcome: str, *, reason: str = "") -> Case:
+        if outcome not in OUTCOMES:
+            raise ValueError(f"outcome={outcome!r} не из {OUTCOMES}")
+        with self._lock:
+            case = next((c for c in self._cases if c.id == case_id), None)
+            if case is None:
+                raise KeyError(case_id)
+            case.outcome = outcome
+            if reason:
+                case.deviation = (case.deviation + " · " if case.deviation else "") + reason
+            self._rewrite()
+            return case
+
+    def _rewrite(self) -> None:
+        """Переписать файл целиком. Вызывать только под ``self._lock``."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for c in self._cases:
+                fh.write(json.dumps(c.to_dict(), ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp.replace(self.path)
+
+
+def _tokenize(text: str) -> list[str]:
+    """Токенизация — та же, что у документов: одно правило поиска на всё."""
+    from .index import tokenize
+
+    return tokenize(text)
+
+
+def _bm25_scores(q_terms: list[str], texts: list[str]) -> list[float]:
+    """BM25 кейсов против вопроса. Параметры — из index.py, не свои.
+
+    Кейсов десятки, поэтому индекс строится на каждый запрос: пересчёт по
+    всем кейсам дешевле, чем поддержка отдельного кэша IDF.
+    """
+    from .index import BM25_B, BM25_K1
+
+    docs = [_tokenize(t) for t in texts]
+    lengths = [len(t) or 1 for t in docs]
+    avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
+    n = max(1, len(docs))
+    df: dict[str, int] = {}
+    for terms in docs:
+        for term in set(terms):
+            df[term] = df.get(term, 0) + 1
+    idf = {t: math.log(1.0 + (n - f + 0.5) / (f + 0.5)) for t, f in df.items()}
+
+    out: list[float] = []
+    for terms, length in zip(docs, lengths, strict=True):
+        tf: dict[str, int] = {}
+        for term in terms:
+            tf[term] = tf.get(term, 0) + 1
+        score = 0.0
+        for term in q_terms:
+            freq = tf.get(term)
+            tidf = idf.get(term)
+            if not freq or tidf is None:
+                continue
+            score += tidf * freq * (BM25_K1 + 1.0) / (
+                freq + BM25_K1 * (1.0 - BM25_B + BM25_B * length / avgdl))
+        out.append(score)
+    return out
 
 
 def _case_from_dict(raw: dict) -> Case:
@@ -287,6 +560,9 @@ def _case_from_dict(raw: dict) -> Case:
         deviation=str(raw.get("deviation") or ""),
         confirmed_by=str(raw.get("confirmed_by") or ""),
         confirmed_at=str(raw.get("confirmed_at") or ""),
+        ticket_id=str(raw.get("ticket_id") or ""),
+        approved_at=str(raw.get("approved_at") or ""),
+        public=bool(raw.get("public") or False),
     )
 
 

@@ -84,28 +84,39 @@ BUSINESS_LINES: dict[str, dict] = {
         ),
     },
     # --- синтетический корпус sample-corpus (разработка и тесты) ---
+    # Эти направления описывают ТОЛЬКО sample-corpus. В corpus-real таких
+    # направлений нет (там «проектная деятельность» и «пресейл»), поэтому
+    # рантайм на реальном корпусе их подмешивать не должен: иначе вопрос про
+    # «закупки» объявляется «в компетенции», поиск идёт по документам, где
+    # закупок нет, и агент либо галлюцинирует, либо эскалирует без причины.
+    # Включаются только при явном LEX_SYNTHETIC_LINES=1 (тесты).
     "закупки": {
         "title": "Закупки",
         "keywords": (
             "закупк", "заявк", "поставщик", "согласован", "контрагент", "договор",
             "тендер", "смет", "цена", "стоимост", "сумм", "оплат",
         ),
+        "synthetic": True,
     },
     "лицензирование": {
         "title": "Лицензирование",
         "keywords": ("лиценз", "сертификат", "аккредитац", "разрешени", "продукт x"),
+        "synthetic": True,
     },
     "качество": {
         "title": "Качество",
         "keywords": ("качеств", "приёмк", "приемк", "входной контроль", "брак", "парти", "дефект"),
+        "synthetic": True,
     },
     "хранение": {
         "title": "Хранение",
         "keywords": ("хранени", "журнал", "архив", "срок хранения", "аудит"),
+        "synthetic": True,
     },
     "персонал": {
         "title": "Персонал",
         "keywords": ("сотрудник", "персонал", "отпуск", "увольнен", "приём на работу", "должност"),
+        "synthetic": True,
     },
 }
 
@@ -114,6 +125,26 @@ BUSINESS_LINES: dict[str, dict] = {
 _GENERIC = frozenset(
     ["документ", "регламент", "порядок", "процедур", "срок", "сроки", "какой", "какая", "какие", "сколько", "нужно", "надо", "можн", "должно", "должн", "организац", "компани", "систем", "контур", "работа", "процесс"]
 )
+
+# Синтетические направления включаются только явно. По умолчанию рантайм
+# работает на corpus-real, где этих направлений нет: включённое «закупки» на
+# реальном корпусе означало бы «вопрос в компетенции», хотя документов по
+# закупкам в базе не существует.
+_SYNTHETIC_LINES_ON = os.environ.get("LEX_SYNTHETIC_LINES", "").lower() in (
+    "1", "true", "yes", "on"
+)
+
+
+def active_lines() -> dict[str, dict]:
+    """Направления, действующие в текущем режиме корпуса.
+
+    На corpus-real — только реальные (проектная деятельность, пресейл и т.д.);
+    синтетические добавляются при ``LEX_SYNTHETIC_LINES=1`` (тесты и прогоны
+    на sample-corpus).
+    """
+    if _SYNTHETIC_LINES_ON:
+        return BUSINESS_LINES
+    return {k: v for k, v in BUSINESS_LINES.items() if not v.get("synthetic")}
 
 
 # Вопросы про практику «вне организации» — прямой запрет §12.4 п.4: на «а как
@@ -152,8 +183,9 @@ class PolicyVerdict:
                 return f"ВНЕ КОМПЕТЕНЦИИ: база не покрывает «{self.business_line}»"
             # Тема не опознана. Врать «эту тему» нельзя: называем то, что база
             # реально покрывает, либо честно говорим, что направление не определено.
-            lines = ", ".join(BUSINESS_LINES[x]["title"] for x in self.lines_available
-                              if x in BUSINESS_LINES) if self.lines_available else ""
+            _lines = active_lines()
+            lines = ", ".join(_lines[x]["title"] for x in self.lines_available
+                              if x in _lines) if self.lines_available else ""
             if lines:
                 return f"ВНЕ КОМПЕТЕНЦИИ: направление не определено · база покрывает: {lines}"
             return "ВНЕ КОМПЕТЕНЦИИ: направление не определено"
@@ -170,16 +202,17 @@ def available_lines(corpus: Corpus) -> list[dict]:
     типа документа. Это соответствует §11: «до появления поля — считать по
     system и типу».
     """
-    counts: dict[str, int] = {line: 0 for line in BUSINESS_LINES}
+    lines_spec = active_lines()
+    counts: dict[str, int] = {line: 0 for line in lines_spec}
     for doc in corpus.documents:
         hay = f"{doc.title} {doc.kind} {doc.system}".lower()
         words = set(re.findall(r"[\w-]+", hay))
-        for line, spec in BUSINESS_LINES.items():
+        for line, spec in lines_spec.items():
             by_word = words & set(spec.get("abbrev") or ())
             if by_word or any(k in hay for k in spec["keywords"]):
                 counts[line] += 1
     out = []
-    for line, spec in BUSINESS_LINES.items():
+    for line, spec in lines_spec.items():
         out.append({"id": line, "title": spec["title"], "docs": counts.get(line, 0)})
     return out
 
@@ -192,7 +225,7 @@ def _line_of_text(text: str) -> tuple[str | None, float, list[str]]:
         tokens.discard(generic)
     words = set(re.findall(r"[\w-]+", low))
     best: tuple[str | None, float, list[str]] = (None, 0.0, [])
-    for line, spec in BUSINESS_LINES.items():
+    for line, spec in active_lines().items():
         hits = [k for k in spec["keywords"] if k in low]
         # Аббревиатуры — только целым словом, иначе «па» = «паспорт».
         hits += [a for a in (spec.get("abbrev") or ()) if a in words]
@@ -305,8 +338,19 @@ DECIDE_ROLES = frozenset({"director"})
 
 
 def can_read(role_id: str | None) -> bool:
-    """§23.1: чтение единое. Аргумент оставлен, чтобы вызовы читались явно."""
-    return True
+    """§23 v1.16: чтение разрешено любой известной роли, но не «всем без разбора».
+
+    v1.15 отвечал здесь ``True`` безусловно — и это было честно только потому,
+    что фильтр чтения тогда не действовал. Теперь действует: роль читает
+    документы своих отделов, значит «может читать» = «роль опознана». Пустой
+    корпус для роли — валидное состояние (``not_in_corpus``), а не запрет.
+    """
+    from .access import resolve_role
+
+    if role_id is None or not str(role_id).strip():
+        # Пустая роль — внутренний вызов из ядра, без API-пользователя.
+        return True
+    return resolve_role(str(role_id)) is not None
 
 
 def can_write(role_id: str | None, *, action: str = "") -> bool:
@@ -330,14 +374,19 @@ def write_denied(role_id: str | None, *, write: bool = True) -> dict:
 def role_lines_from_id(role_id: str) -> list[str]:
     """Направления по умолчанию для роли (аналитика, не доступ).
 
-    §23: на выдачу это больше не влияет — чтение единое. Функция осталась,
-    потому что аналитика (§23.5) сохраняет разрез по ролям: кто о чём
-    спрашивает, нужно для приоритизации обновления регламентов.
+    §23 v1.16: чтение теперь фильтруется — но по ОТДЕЛУ, а не по направлению
+    (направление пересекается у отделов). Функция остаётся для аналитики
+    (§23.5): кто о чём спрашивает — нужно для приоритизации обновления
+    регламентов. На выдачу не влияет.
     """
     mapping = {
         "lawyer": ["*"],
         "director": ["*"],
-        "quality": ["качество"],
-        "it": ["лицензирование"],
+        "quality": ["*"],
+        "it": ["*"],
+        # Реальные отделы корпуса: направление задаётся документом, не ролью.
+        "technical": ["*"],
+        "ib": ["*"],
+        "dbrct": ["*"],
     }
     return mapping.get(role_id, ["*"])

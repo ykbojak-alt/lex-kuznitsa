@@ -58,7 +58,11 @@ from .models import (
 from .tickets import get_ticket_store
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CORPUS = ROOT / "sample-corpus"
+# Корпус по умолчанию — реальные документы заказчика. Синтетический
+# sample-corpus остаётся только тестовой фикстурой (нужен для conflict_rules,
+# которых в corpus-real нет): подставлять его молча в рантайм нельзя, иначе
+# стенд отвечает не по тем документам, а человек этого не видит.
+DEFAULT_CORPUS = ROOT / "corpus-real"
 
 # Сколько фрагментов уходит в промпт (контракт §12.4 п.1: не весь документ).
 TOP_K = int(os.environ.get("LEX_TOP_K", "6"))
@@ -239,10 +243,11 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None) -> StepEvent:
+def _step(n: int, key: str, detail: str, t0: float, *, color: str | None = None,
+          total: int | None = None) -> StepEvent:
     return StepEvent(
         n=n,
-        total=len(STEP_ORDER),
+        total=total or len(STEP_ORDER),
         key=key,  # type: ignore[arg-type]
         title=STEP_TITLES[key],
         detail=detail,
@@ -264,6 +269,21 @@ class Orchestrator:
         self._timeline: dict[str, int] = {}
         self._dlg: Dialogue | None = None
         self._auto_session: str = ""
+        # Число шагов прогона: из STEP_ORDER убираются стадии без данных
+        # (см. _run_stages). Считается лениво вместе с корпусом.
+        self._step_total: int | None = None
+
+    def _total(self) -> int:
+        if self._step_total is None:
+            self._step_total = len(STEP_ORDER) - (0 if self._has_rules() else 2)
+        return self._step_total
+
+    def _has_rules(self) -> bool:
+        """Есть ли в корпусе правила с редакциями — от этого зависят resolve/conflict."""
+        try:
+            return bool(self.corpus.rules)
+        except Exception:
+            return True
 
     @property
     def dialogue(self) -> Dialogue:
@@ -337,7 +357,7 @@ class Orchestrator:
             decision = self._escalation_decision(state)
             if decision.questions:
                 state["clarify_questions"] = decision.questions
-                yield Signal("step", self._clarify_step(len(STEP_ORDER) + 1, state))
+                yield Signal("step", self._clarify_step(self._total() + 1, state))
                 yield Signal("clarify", ClarifyData(
                     session_id=self._session_id(),
                     questions=[ClarifyQuestion(**q.to_dict()) for q in decision.questions],
@@ -347,7 +367,7 @@ class Orchestrator:
                 return                  # §10: ждём ответа, поток закрывается без done
             ticket = decision.escalate or {}
             # §15.3: эскалация — последним шагом, вместо verify.
-            yield Signal("step", self._escalate_step(len(STEP_ORDER), ticket))
+            yield Signal("step", self._escalate_step(self._total(), ticket))
             yield Signal("escalate", self.dialogue.escalate_event(ticket))
             yield Signal("done", self._done())
             return
@@ -361,18 +381,29 @@ class Orchestrator:
 
         Финальное событие не отдаёт сразу, а кладёт в state["final"]:
         решение «отказ или эскалация» принимает run().
+
+        Шаги `resolve` и `conflict` — про редакции и их противоречия. Если в
+        корпусе нет ни одного правила (`conflict_rules` пуст), эти шаги не о
+        чем говорить: `resolve` писал «правило не определено — действует как
+        есть», и это читается как сломанная логика, хотя её просто не к чему
+        применить. На реальном корпусе заказчика правил 0 — там мы эти шаги
+        честно пропускаем, а не выводим пустую строку.
         """
+        has_rules = self._has_rules()
         stages = [
             ("decompose", self._stage_decompose),
             ("inspect", self._stage_inspect),
             ("retrieve", self._stage_retrieve),
             ("cases", self._stage_cases),
             ("permissions", self._stage_permissions),
-            ("resolve", self._stage_resolve),
-            ("conflict", self._stage_conflict),
+        ]
+        if has_rules:
+            stages.append(("resolve", self._stage_resolve))
+            stages.append(("conflict", self._stage_conflict))
+        stages.extend([
             ("compose", self._stage_compose),
             ("verify", self._stage_verify),
-        ]
+        ])
         for n, (key, fn) in enumerate(stages, start=3):
             t_stage = time.monotonic()
             try:
@@ -465,7 +496,7 @@ class Orchestrator:
         if iterations:
             detail += f" · уточнений: {iterations}"
         return StepEvent.model_construct(
-            n=n, total=len(STEP_ORDER), key="escalate", title="Эскалация",
+            n=n, total=self._total(), key="escalate", title="Эскалация",
             detail=detail, ms=_now_ms(self._t0), color="orange",
         )
 
@@ -478,7 +509,7 @@ class Orchestrator:
         state["as_of_label"] = as_of
         role = access.get_role(self.opts.role_id)
         role_title = (role or {}).get("title") or self.opts.role_id
-        return _step(n, "accept", f"роль {role_title}, дата отсчёта {as_of}", self._t0)
+        return _step(n, "accept", f"роль {role_title}, дата отсчёта {as_of}", self._t0, total=self._total())
 
     def _stage_clarify(self, n: int, state: dict) -> Signal | None:
         """§10: хватает ли параметров для ответа.
@@ -521,12 +552,12 @@ class Orchestrator:
     def _clarify_step(self, n: int, state: dict) -> StepEvent:
         """Шаг «Уточнение» — цвет sky, вместо decompose (§10)."""
         questions = state.get("clarify_questions") or []
-        detail = self.dialogue.clarify_step(questions, n=n, total=len(STEP_ORDER))["detail"]
+        detail = self.dialogue.clarify_step(questions, n=n, total=self._total())["detail"]
         # ключа "clarify" в StepKey пока нет (models.py — файл владельца
         # контракта), поэтому model_construct: шаг не должен потеряться из-за
         # литерала, который ещё не расширен.
         return StepEvent.model_construct(
-            n=n, total=max(len(STEP_ORDER), n), key="clarify", title="Уточнение",
+            n=n, total=max(self._total(), n), key="clarify", title="Уточнение",
             detail=detail, ms=_now_ms(self._t0), color="sky",
         )
 
@@ -547,7 +578,7 @@ class Orchestrator:
         if verdict.business_line:
             state["line"] = verdict.business_line
 
-        event = _step(n, "policy", verdict.step_detail(), self._t0)
+        event = _step(n, "policy", verdict.step_detail(), self._t0, total=self._total())
         if verdict.ok:
             return _StageOutcome(event)
 
@@ -590,7 +621,7 @@ class Orchestrator:
         parts.append(_plural_subs(len(subs)))
         if len(subs) > 1:
             parts.append(": " + "; ".join(subs))
-        return _step(n, "decompose", " · ".join(parts), self._t0)
+        return _step(n, "decompose", " · ".join(parts), self._t0, total=self._total())
 
     def _stage_inspect(self, n: int, state: dict) -> StepEvent:
         insp = inspect_corpus(self.opts.corpus_root)
@@ -599,24 +630,34 @@ class Orchestrator:
         det = insp.detail
         if line:
             det += f" · направление {line}"
-        return _step(n, "inspect", det, self._t0)
+        return _step(n, "inspect", det, self._t0, total=self._total())
 
     def _stage_retrieve(self, n: int, state: dict) -> StepEvent | Signal:
         subs = state.get("subquestions") or [self.opts.question]
         hits = self.index.search_many(subs, top_per_query=CANDIDATES)
         doc_hits = [h for h in hits if getattr(h.chunk, "kind", "doc") == "doc"]
+        # §23 v1.16: документ чужого отдела в выдачу не попадает вовсе.
+        # Фильтр ДО реранка и ДО гейта предмета: иначе гейт найдёт предмет в
+        # чужом фрагменте, каскад пойдёт дальше, и compose соберёт ответ по
+        # документу, которого роль не должна видеть.
+        visible_hits, hidden = self._filter_access(doc_hits)
+        state["dropped"] = hidden
         # Документные хиты идут в реранк, кейсы — отдельной стадией (§8).
-        ranked = self._rerank(self.opts.question, doc_hits)
+        ranked = self._rerank(self.opts.question, visible_hits)
         state["doc_hits"] = ranked
         # §3: жюри нужна не одна цифра, а путь: сколько дал каждый канал.
         # BM25 и вектор считаются в index.search (RRF), флаг — в Hit.
-        bm_count = sum(1 for h in doc_hits if h.bm25 > 0)
-        vec_count = sum(1 for h in doc_hits if h.cosine != 0)
+        bm_count = sum(1 for h in visible_hits if h.bm25 > 0)
+        vec_count = sum(1 for h in visible_hits if h.cosine != 0)
         after = len(ranked)
         detail = (f"BM25 {bm_count} · вектор {vec_count} → "
-                  f"кандидатов {len(doc_hits)} · после rerank {after}")
-        if after < len(doc_hits):
-            detail += f" · отсеяно {len(doc_hits) - after}"
+                  f"кандидатов {len(visible_hits)} · после rerank {after}")
+        if hidden:
+            # Скрытое не молчим: жюри должно видеть, что фильтр работает,
+            # а не что документов не нашлось.
+            detail += f" · скрыто по отделу {hidden}"
+        if after < len(visible_hits):
+            detail += f" · отсеяно {len(visible_hits) - after}"
 
         # §12.8 / критерий 1 заказчика: поиск не умеет «ничего не найти» —
         # гибрид всегда отдаёт 24 фрагмента, и по ним получается связный, но
@@ -658,7 +699,7 @@ class Orchestrator:
                 # Регламент вопрос не покрывает, поэтому отвечаем по практике:
                 # документы из выдачи убираем, чтобы в ответ не попало не то.
                 state["doc_hits"] = []
-                return _step(n, "retrieve", detail, self._t0, color="amber")
+                return _step(n, "retrieve", detail, self._t0, color="amber", total=self._total())
             # Раньше здесь ставился только escalate_pending, и каскад шёл
             # дальше: compose собирал ответ по нерелевантным фрагментам,
             # verify его отбрасывал, и человек получал уточнение вместо
@@ -674,30 +715,46 @@ class Orchestrator:
             )
             # _STOP обрывает каскад, но событие шага всё равно надо отдать:
             # жюри и UI видят, ПОЧЕМУ остановились.
-            state["stop_step"] = _step(n, "retrieve", detail, self._t0, color="amber")
+            state["stop_step"] = _step(n, "retrieve", detail, self._t0, color="amber", total=self._total())
             return _STOP
-        return _step(n, "retrieve", detail, self._t0)
+        return _step(n, "retrieve", detail, self._t0, total=self._total())
 
     def _stage_cases(self, n: int, state: dict) -> StepEvent:
         case_hits = self._search_cases()
         state["case_hits"] = case_hits
         det = f"найдено {len(case_hits)} {_plural(len(case_hits), 'кейс', 'кейса', 'кейсов')}"
-        return _step(n, "cases", det, self._t0)
+        return _step(n, "cases", det, self._t0, total=self._total())
 
     def _stage_permissions(self, n: int, state: dict) -> StepEvent | Signal:
-        """§23: шаг информационный, ничего не фильтрует.
+        """§23 v1.16: шаг показывает границу чтения, а не «всё хорошо».
 
-        Чтение единое — значит, весь корпус доступен любой роли, и «отброшено
-        N документов» больше не бывает. Шаг не убираем: он показывает, что
-        права продуманы, и отделяет чтение от записи.
+        Раньше тут стояло «чтение: полный корпус · запись: …» с dropped=0
+        жёстко — то есть шаг врал: фильтра не было. Теперь числа настоящие:
+        сколько документов отсеяно по отделу и сколько осталось.
         """
+        from .access import ALL
+
         doc_hits = state.get("doc_hits") or []
         state["allowed"] = list(doc_hits)
-        state["dropped"] = 0
+        dropped = int(state.get("dropped") or 0)
+        state["dropped"] = dropped
         writable = policy.can_write(self.opts.role_id)
-        det = (f"чтение: полный корпус ({len(self.corpus.documents)} документов) · "
-               f"запись: {'разрешена' if writable else 'недоступна'}")
-        return _step(n, "permissions", det, self._t0)
+        role = self.role_def()
+        departs = [str(x) for x in ((role or {}).get("departments") or [])]
+        total = len(self.corpus.documents)
+        if ALL in departs:
+            read = (f"полный корпус ({total} "
+                    f"{_plural(total, 'документ', 'документа', 'документов')})")
+        else:
+            docs = {getattr(h.chunk, "doc_id", "") for h in doc_hits}
+            available = len(docs)
+            read = f"доступно {available} из {total}"
+            if departs:
+                read += f" · отделы: {', '.join(departs)}"
+            if dropped:
+                read += f" · вне подразделения: {dropped}"
+        det = f"{read} · запись: {'разрешена' if writable else 'недоступна'}"
+        return _step(n, "permissions", det, self._t0, total=self._total())
 
     def _stage_resolve(self, n: int, state: dict) -> StepEvent | Signal:
         as_of = self.opts.as_of
@@ -727,7 +784,7 @@ class Orchestrator:
             det = "; ".join(r.detail() for r in resolutions)
         else:
             det = "правило не определено — действует как есть"
-        return _step(n, "resolve", det, self._t0)
+        return _step(n, "resolve", det, self._t0, total=self._total())
 
     def _stage_conflict(self, n: int, state: dict) -> StepEvent:
         allowed = state.get("allowed") or []
@@ -751,8 +808,9 @@ class Orchestrator:
         if conflicts:
             return _step(n, "conflict",
                          f"{_plural(conflicts, 'кейс', 'кейса', 'кейсов')} по теме "
-                         f"{conflicts}, регламент главнее", self._t0)
-        return _step(n, "conflict", f"конфликтов: 0; фрагментов {len(allowed)}", self._t0)
+                         f"{conflicts}, регламент главнее", self._t0,
+                         total=self._total())
+        return _step(n, "conflict", f"конфликтов: 0; фрагментов {len(allowed)}", self._t0, total=self._total())
 
     async def _stage_compose(self, n: int, state: dict) -> StepEvent | Signal:
         allowed = state.get("allowed") or []
@@ -769,14 +827,14 @@ class Orchestrator:
                 searched=self._searched(state),
                 hint=self._refusal_hint(ticket_id),
             ))
-            return _step(n, "compose", "контекста нет — отказ", self._t0)
+            return _step(n, "compose", "контекста нет — отказ", self._t0, total=self._total())
 
         if self.opts.no_llm:
             text = self._extractive_answer(frames)
         else:
             text = await asyncio.to_thread(self._ask_model, frames, state)
         state["answer_text"] = text
-        return _step(n, "compose", f"из {len(frames)} фрагментов", self._t0)
+        return _step(n, "compose", f"из {len(frames)} фрагментов", self._t0, total=self._total())
 
     def _stage_verify(self, n: int, state: dict) -> StepEvent | Signal:
         text = state.get("answer_text") or ""
@@ -798,7 +856,7 @@ class Orchestrator:
                 searched=self._searched(state),
                 hint=self._refusal_hint(ticket_id),
             ))
-            return _step(n, "verify", report.detail(), self._t0, color="amber")
+            return _step(n, "verify", report.detail(), self._t0, color="amber", total=self._total())
 
         # Барьер 3: усекаем до покрытых ЗАКОНЧЕННЫХ фраз — и отдаём усечённый
         # ответ. Раньше здесь стоял return без state["final"], и каскад
@@ -827,7 +885,7 @@ class Orchestrator:
                 searched=self._searched(state),
                 hint=self._refusal_hint(ticket_id),
             ))
-            return _step(n, "verify", report.detail(), self._t0, color="amber")
+            return _step(n, "verify", report.detail(), self._t0, color="amber", total=self._total())
 
         citations = self._citations(frames, text)
         notes: list[str] = []
@@ -884,7 +942,8 @@ class Orchestrator:
             det += f" · ОГОВОРКА ({caveat.level})"
         return _step(n, "verify", det, self._t0,
                      color="orange" if (caveat and caveat.level == "high")
-                     else ("amber" if (truncated or dropped or caveat) else None))
+                     else ("amber" if (truncated or dropped or caveat) else None),
+                     total=self._total())
 
     def _build_caveat(self, state: dict, report, citations: list, practice_only: bool):
         """§20.1: собрать причины оговорки из фактов прогона."""
@@ -1007,49 +1066,55 @@ class Orchestrator:
         return out
 
     def _search_cases(self) -> list[Case]:
-        stored = self.cases.cases
-        if not stored:
-            return []
-        # Кейсы ищутся теми же средствами, что документы: BM25 по тексту кейса
-        # плюс эмбеддинги. Индекс кейсов строится на лету — их единицы.
-        from .index import tokenize
-
-        q_terms = set(tokenize(self.opts.question))
-        if not q_terms:
-            return []
-        scored: list[tuple[float, Case]] = []
-        for c in stored:
-            terms = set(tokenize(c.text))
-            if not terms:
-                continue
-            overlap = len(q_terms & terms)
-            if overlap:
-                scored.append((overlap / (len(q_terms) ** 0.5), c))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [c for _, c in scored[:3]]
+        # §8/критерий 3: кейсы ищутся теми же средствами, что документы —
+        # BM25 плюс косинус, слияние RRF (CaseStore.search). До этого здесь
+        # было самодельное пересечение слов: перефразированный вопрос, который
+        # закрыт кейсом, его не находил, и дообучение на демо «не работало».
+        # Ролевая видимость (свои, ответы службы качества, импорт) и отсев
+        # отклонённых — внутри search(), чтобы не разъезжались два правила.
+        return self.cases.search(self.opts.question, role_id=self.opts.role_id, top=3)
 
     def _filter_access(self, hits: list) -> tuple[list, int]:
-        """§11/§12.4: роль обязана видеть документ по отделу и направлению.
+        """§23 v1.16: роль видит только документы своих отделов.
 
-        access.py принадлежит ACE — если он есть, зовём его; иначе честно
-        пропускаем всё, но помечаем, что фильтра нет (не выдавать отсутствие
-        прав за проверку прав).
+        Раньше здесь стоял импорт ``allowed_document``, которого в access.py
+        никогда не было: исключение глоталось, и функция возвращала все хиты
+        без фильтра. То есть проверка прав была объявлена, но не выполнялась —
+        ровно то, на что указал владелец.
+
+        Фильтр идёт ДО гейта предмета: если его поставить после, гейт найдёт
+        предмет в чужом фрагменте, пропустит каскад дальше, и compose соберёт
+        ответ по документу, которого роль не должна видеть.
         """
-        try:
-            from .access import allowed_document  # type: ignore
-        except Exception:
+        from .access import ALL, warning_for_doc
+
+        role = self.role_def()
+        if role is not None and ALL in (role.get("departments") or []):
             return hits, 0
-        allowed, dropped = [], 0
+        allowed: list = []
+        hidden_docs: set[str] = set()
         for h in hits:
-            try:
-                ok = allowed_document(h.chunk, self.opts.role_id)
-            except Exception:
-                ok = True
-            if ok:
+            doc = {"department": getattr(h.chunk, "department", "")}
+            if warning_for_doc(doc, role) is None:
                 allowed.append(h)
             else:
-                dropped += 1
-        return allowed, dropped
+                hidden_docs.add(str(getattr(h.chunk, "doc_id", "")))
+        # Считаем ДОКУМЕНТЫ, а не фрагменты: шаг permissions показывает
+        # «доступно N из M», и единицы измерения должны совпадать, иначе
+        # «2 из 4 · вне подразделения 14» читается как ошибка.
+        return allowed, len(hidden_docs)
+
+    def role_def(self) -> dict | None:
+        """Определение роли спрашивающего — по ролям текущего корпуса."""
+        from .access import resolve_role
+
+        defs = getattr(self, "_role_defs", None)
+        if defs is None:
+            from .access import roles_for_corpus
+
+            defs = roles_for_corpus(self.opts.corpus_root)
+            self._role_defs = defs
+        return resolve_role(self.opts.role_id, defs)
 
     def _rule_keys(self, hits: list) -> list[str]:
         return [k for k, _ in self._rules_with_focus(hits)]

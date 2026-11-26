@@ -25,9 +25,10 @@ import contextlib
 import datetime as dt
 import importlib
 import json
+import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -193,37 +194,39 @@ def _line_from_system(system: str) -> str:
 # ---------- роли ----------
 
 def default_roles() -> list[dict]:
-    """Роли из §2 контракта; отделы — из корпуса."""
-    c = corpus()
-    if c is not None and hasattr(c, "departments"):
+    """Роли по отделам текущего корпуса (fallback, если lex.access недоступен)."""
+    m = core_modules()["access"]
+    if m is not None and hasattr(m, "roles_for_corpus"):
         try:
-            departments = list(c.departments())
+            r = m.roles_for_corpus(config.CORPUS_DIR)
+            if isinstance(r, list) and r:
+                return r
         except Exception:
-            departments = []
-    else:
-        departments = sorted({d.get("department") for d in manifest_documents()
-                              if d.get("department")})
+            pass
 
-    def pick(pred: Callable[[str], bool]) -> list[str]:
-        return [x for x in departments if pred(x.lower())]
-
-    return [
-        {"id": "lawyer", "title": "Юридический отдел",
-         "departments": pick(lambda s: "юрид" in s), "systems": []},
-        {"id": "quality", "title": "Отдел качества",
-         "departments": pick(lambda s: "качеств" in s), "systems": []},
-        {"id": "it", "title": "ИТ-служба",
-         "departments": pick(lambda s: s.startswith("ит")), "systems": []},
-        {"id": "director", "title": "Руководитель",
-         "departments": ["*"], "systems": ["*"]},
-    ]
+    departments = sorted({d.get("department") for d in manifest_documents()
+                          if d.get("department")})
+    out = [{"id": "d" + str(i), "title": dep, "departments": [dep], "systems": []}
+           for i, dep in enumerate(departments, start=1)]
+    out.append({"id": "quality", "title": "Служба качества",
+                "departments": ["*"], "systems": ["*"]})
+    out.append({"id": "director", "title": "Руководитель",
+                "departments": ["*"], "systems": ["*"]})
+    return out
 
 
 def roles() -> list[dict]:
+    """Активные роли — по манифесту корпуса (v1.16).
+
+    Раньше брался статический ROLE_DEFS с отделами синтетического корпуса:
+    «Юридический отдел», «Отдел качества», «ИТ-служба». На реальном корпусе
+    таких отделов нет, и при включённом фильтре чтения юрист получил бы ноль
+    документов. Роли выводятся из данных.
+    """
     m = core_modules()["access"]
-    if m is not None and hasattr(m, "roles"):
+    if m is not None and hasattr(m, "roles_for_corpus"):
         try:
-            r = m.roles()
+            r = m.roles_for_corpus(config.CORPUS_DIR)
             if isinstance(r, list) and r:
                 return r
         except Exception:
@@ -236,6 +239,14 @@ def role_ids() -> set[str]:
 
 
 def role_departments(role_id: str) -> list[str]:
+    m = core_modules()["access"]
+    if m is not None and hasattr(m, "resolve_role"):
+        try:
+            r = m.resolve_role(role_id, roles())
+            if r:
+                return list(r.get("departments") or [])
+        except Exception:
+            pass
     for r in roles():
         if r.get("id") == role_id:
             return list(r.get("departments") or [])
@@ -243,8 +254,48 @@ def role_departments(role_id: str) -> list[str]:
 
 
 def role_can_read(role_id: str, department: str) -> bool:
+    m = core_modules()["access"]
+    if m is not None and hasattr(m, "role_allows_department"):
+        try:
+            return bool(m.role_allows_department(role_id, department, roles()))
+        except Exception:
+            pass
     deps = role_departments(role_id)
     return "*" in deps or not deps or department in deps
+
+
+def filter_documents(documents: list[dict] | None = None,
+                     role_id: str = "") -> dict:
+    """§23 v1.16: отбор документов по отделам роли — один путь для всех.
+
+    UI (`/api/roles`) и шаг `permissions` должны показывать ОДНИ И ТЕ ЖЕ
+    числа, что отдало ядро при чтении. Поэтому фильтр не дублируется ни в
+    HTTP-слое, ни в оркестраторе: все зовут ``lex.access.filter_docs``.
+    """
+    docs = manifest_documents() if documents is None else documents
+    m = core_modules()["access"]
+    if m is not None and hasattr(m, "filter_docs"):
+        try:
+            return m.filter_docs(docs, role_id, defs=roles())
+        except Exception:
+            pass
+    # access.py недоступен: честный полный доступ помечаем, а не выдаём
+    # отсутствие фильтра за проверку прав.
+    total = len(docs)
+    return {
+        "documents": docs,
+        "allowed": docs,
+        "total": total,
+        "available": total,
+        "dropped": 0,
+        "reasons": {},
+        "permissions": {"mode": "no_access_module", "total": total,
+                        "available": total, "dropped": 0, "by_reason": {},
+                        "read": f"полный корпус ({total} документов)",
+                        "write": "недоступна", "can_write": False},
+        "refused": False,
+        "refusal_kind": None,
+    }
 
 
 # ---------- журнал ----------
@@ -496,6 +547,37 @@ def _open_quality_ticket(data: dict, question: str, role_id: str,
         return {}
 
 
+_GATE_COVERAGE_RE = re.compile(r"предмет\s+(\d+)\s*%")
+_GATE_COSINE_RE = re.compile(r"близость\s+([\d.,]+)")
+
+
+def _step_record(data: dict) -> dict:
+    """Шаг каскада для журнала: ключ, время, текст и — для поиска — метрики гейта.
+
+    Раньше в журнал писалось только ``{key, ms}``, и аналитика гейта §12.8
+    всегда показывала ноль: числа жили в тексте шага, а не в полях. Теперь
+    из ``detail`` retrieve-шага вынимаются предмет и близость отдельными
+    полями, поэтому /api/stats считает остановки гейта по факту, а не по
+    надежде, что кто-то их допишет вручную.
+    """
+    rec: dict[str, Any] = {
+        "key": data.get("key"),
+        "ms": data.get("ms"),
+        "detail": str(data.get("detail") or ""),
+    }
+    if rec["key"] == "retrieve":
+        cov = _GATE_COVERAGE_RE.search(rec["detail"])
+        cos = _GATE_COSINE_RE.search(rec["detail"])
+        if cov:
+            rec["subject_coverage"] = round(int(cov.group(1)) / 100, 2)
+        if cos:
+            try:
+                rec["top_cosine"] = float(str(cos.group(1)).replace(",", "."))
+            except ValueError:
+                pass
+    return rec
+
+
 async def stream_answer(question: str, role_id: str, as_of: str | None,
                         session_id: str | None = None,
                         answers: dict | None = None,
@@ -541,13 +623,36 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
             kind = getattr(signal, "kind", "")
             data = _as_dict(getattr(signal, "data", {}))
             if kind == "step":
-                entry["steps"].append({"key": data.get("key"), "ms": data.get("ms")})
+                rec = _step_record(data)
+                entry["steps"].append(rec)
+                if "subject_coverage" in rec or "top_cosine" in rec:
+                    # Второй путь для аналитики: /api/stats читает и steps,
+                    # и блок retrieval. Держим оба в согласии, чтобы счётчик
+                    # не зависел от того, какое поле кто читает.
+                    entry["retrieval"] = {
+                        "subject_coverage": rec.get("subject_coverage"),
+                        "top_cosine": rec.get("top_cosine"),
+                    }
                 yield sse.step(int(data.get("n", 0)), str(data.get("key", "")),
                                str(data.get("detail", "")), int(data.get("ms", 0) or 0))
             elif kind == "answer":
+                citations = [c for c in (data.get("citations") or [])
+                             if isinstance(c, dict)]
+                # §8: кейс — не документ. В doc_ids только нормативные
+                # источники, иначе топ-источники и «где не хватает
+                # документов» начинали бы считать кейсы регламентами.
                 entry["doc_ids"] = sorted({
-                    c.get("doc_id") for c in (data.get("citations") or [])
-                    if isinstance(c, dict) and c.get("doc_id")
+                    c.get("doc_id") for c in citations
+                    if c.get("doc_id") and c.get("source_kind") != "case"
+                })
+                # §8/критерий 3: какой кейс реально попал в ответ. Без этого
+                # поля аналитика дообучения показывает ноль, хотя ответ мог
+                # быть построен только по практике. Цитата кейса несёт
+                # source_kind="case" и case_id — берём из неё, а не из шага
+                # cases: там все найденные, а в ответ попали не все.
+                entry["cases_used"] = sorted({
+                    str(c.get("case_id") or c.get("doc_id")) for c in citations
+                    if c.get("source_kind") == "case" and (c.get("case_id") or c.get("doc_id"))
                 })
                 entry["refused"] = bool(data.get("refused", False))
                 if data.get("detail_id"):
@@ -731,6 +836,26 @@ def add_case(payload: dict) -> dict:
     store = case_store()
     if store is None:
         raise RuntimeError("lex.cases недоступен")
+
+    ticket_id = str(payload.get("ticket_id") or "")
+    # §16.3: кейс из заявки идёт своим входом — у него обязательны номер и
+    # дата утверждения, и повторный вызов по той же заявке второй кейс не
+    # создаёт. Обычный POST /api/cases (ручной кейс) работает через add().
+    if ticket_id:
+        case = store.add_from_ticket(
+            ticket_id=ticket_id,
+            question=str(payload.get("question") or ""),
+            answer_in_practice=str(payload.get("answer_in_practice") or ""),
+            author_role=str(payload.get("author_role") or "quality"),
+            author_name=str(payload.get("author_name") or "служба качества"),
+            tags=[str(x) for x in (payload.get("tags") or [])],
+            rule_key=str(payload.get("rule_key") or ""),
+            escalation_id=str(payload.get("escalation_id") or ""),
+            approved_at=str(payload.get("approved_at") or ""),
+            public=bool(payload.get("public") or False),
+        )
+        return {"id": case.id, "ok": True, "in_index": True}
+
     case = store.add(
         question=str(payload.get("question") or ""),
         answer_in_practice=str(payload.get("answer_in_practice") or ""),
@@ -745,17 +870,34 @@ def add_case(payload: dict) -> dict:
         source=str(payload.get("source") or ""),
         escalation_id=str(payload.get("escalation_id") or ""),
         confirmed_by=str(payload.get("confirmed_by") or ""),
+        approved_at=str(payload.get("approved_at") or ""),
+        public=bool(payload.get("public") or False),
     )
     return {"id": case.id, "ok": True, "in_index": True}
 
 
 def list_cases(limit: int = 50, role_id: str | None = None,
                tag: str | None = None, rule_key: str | None = None) -> list[dict]:
+    """Список кейсов с фильтром видимости по роли.
+
+    ``role_id`` здесь не «чьи кейсы показать», а «кто смотрит»: выдача
+    проходит через ``CaseStore.visible`` — то же правило, что в поиске
+    оркестратора. Иначе API отдавал бы юристу кейсы другой роли, хотя в
+    ответе на вопрос они ему уже не видны, — два разных ответа на один вопрос.
+    """
     store = case_store()
     if store is None:
         return []
-    return [c.to_dict() for c in store.find(limit=limit, role_id=role_id,
-                                            tag=tag, rule_key=rule_key)]
+    if role_id:
+        cases = store.visible(role_id)
+        if tag:
+            low = tag.lower()
+            cases = [c for c in cases if any(low in t.lower() for t in c.tags)]
+        if rule_key:
+            cases = [c for c in cases if c.rule_key == rule_key]
+        cases = sorted(cases, key=lambda c: c.ts, reverse=True)[:limit]
+        return [c.to_dict() for c in cases]
+    return [c.to_dict() for c in store.find(limit=limit, tag=tag, rule_key=rule_key)]
 
 
 def cases_count() -> int:
@@ -763,3 +905,76 @@ def cases_count() -> int:
     if store is None:
         return 0
     return len(store.cases)
+
+
+def reject_case(case_id: str, reason: str = "") -> dict:
+    """§8: отклонить кейс — он уходит из поиска немедленно (не из файла)."""
+    store = case_store()
+    if store is None:
+        raise RuntimeError("lex.cases недоступен")
+    case = store.reject(case_id, reason=reason)
+    return {"id": case.id, "ok": True, "outcome": case.outcome, "in_index": False}
+
+
+def remove_case(case_id: str) -> dict:
+    """§8: удалить кейс совсем — строки в базе больше нет."""
+    store = case_store()
+    if store is None:
+        raise RuntimeError("lex.cases недоступен")
+    return {"id": case_id, "ok": store.remove(case_id), "in_index": False}
+
+
+def learning_metrics() -> dict:
+    """§16.6: метрика дообучения для аналитики.
+
+    Три числа, которые жюри спрашивает про критерий 3:
+
+    * ``approved_cases_count`` — сколько кейсов в базе сейчас работают
+      (resolved/escalated/open; отклонённые не в счёт — они из поиска ушли);
+    * ``cases_from_tickets`` — сколько кейсов пришло из заявок службы
+      качества, а не написано вручную;
+    * ``avg_ticket_to_case_hours`` — среднее время от создания заявки до
+      утверждения кейса. Считается по ``approved_at`` кейса и ``created_at``
+      заявки из tickets.jsonl, поэтому пары без любого из полей пропускаются
+      (не выдумываем ноль).
+    """
+    store = case_store()
+    if store is None:
+        return {"approved_cases_count": 0, "cases_from_tickets": 0,
+                "avg_ticket_to_case_hours": 0.0}
+    cases = store.cases
+    approved = [c for c in cases if c.outcome != "rejected"]
+    from_tickets = [c for c in approved if c.ticket_id]
+
+    created: dict[str, str] = {}
+    try:
+        from . import tickets as tickets_mod
+
+        for row in tickets_mod.list_tickets(limit=100_000):
+            created[str(row.get("id") or "")] = str(row.get("created_at") or "")
+    except Exception:
+        created = {}
+
+    hours: list[float] = []
+    for c in from_tickets:
+        t0 = _iso_epoch(created.get(c.ticket_id, ""))
+        t1 = _iso_epoch(c.approved_at)
+        if t0 is not None and t1 is not None and t1 >= t0:
+            hours.append((t1 - t0) / 3600.0)
+
+    return {
+        "approved_cases_count": len(approved),
+        "cases_from_tickets": len(from_tickets),
+        "avg_ticket_to_case_hours": round(sum(hours) / len(hours), 1) if hours else 0.0,
+    }
+
+
+def _iso_epoch(value: str) -> float | None:
+    """Метка ``YYYY-MM-DDTHH:MM:SSZ`` -> секунды эпохи (UTC). None — если не метка."""
+    import datetime as _dt
+
+    try:
+        return _dt.datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.UTC).timestamp()
+    except Exception:
+        return None
