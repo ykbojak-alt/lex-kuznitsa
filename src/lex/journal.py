@@ -62,7 +62,15 @@ CONTENT_FIELDS = {
     "scan": "from_scan",
     "mixed": "from_text",
 }
-REFUSAL_REASONS = ("no_access", "not_in_corpus", "ocr_unavailable")
+# §23: no_access из чтения исчез. out_of_scope — главный отказ §17 (вопрос не
+# нашей компетенции) — обязан быть в списке, иначе аналитика его не покажет.
+REFUSAL_REASONS = (
+    "not_in_corpus",
+    "out_of_scope",
+    "no_edition_in_force",
+    "conflict_unresolved",
+    "ocr_unavailable",
+)
 OUTCOMES = ("resolved", "escalated", "rejected", "open")
 
 _SYNONYMS = {
@@ -135,6 +143,24 @@ def _read_cases(path: str | Path | None = None) -> list[dict[str, Any]]:
     if not target.exists():
         return []
     out = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict):
+                out.append(rec)
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _read_escalations(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Тикеты/эскалации (§18) — те же jsonl, без отдельной БД."""
+    target = Path(path) if path else ESCALATIONS_PATH
+    if not target.exists():
+        return []
+    out: list[dict[str, Any]] = []
     for line in target.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue

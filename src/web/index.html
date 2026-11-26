@@ -59,6 +59,7 @@
 
         <div class="screen is-active" id="screen-chat">
           <div class="intro" id="intro">
+            <img class="intro__art" src="assets/illustration-welcome.svg" alt="" width="200" height="160">
             <p class="answer__lead">Задайте вопрос по регламентам и правилам организации. Ответ придёт с цитатами
             из действующей редакции; каждое утверждение опирается на документ или кейс базы знаний.</p>
             <p class="answer__lead">Если в базе знаний ответа нет — LEX так и скажет и покажет, что именно искал.
@@ -97,7 +98,10 @@
           <textarea id="question" rows="2"
                     placeholder="Например: какой срок согласования заявки на закупку?"
                     aria-describedby="sendHint"></textarea>
-          <button class="btn btn--primary" id="send" type="submit">Спросить</button>
+          <button class="btn btn--primary" id="send" type="submit">
+            <span>Спросить</span>
+            <img class="btn__icon" src="assets/icon-send.svg" alt="" width="14" height="14">
+          </button>
         </div>
         <div class="composer__row">
           <label class="asof" for="asOf">

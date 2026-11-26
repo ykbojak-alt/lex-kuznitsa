@@ -664,6 +664,7 @@ def write_corpus(out_dir: Path, count: int, seed: int, clean: bool) -> dict:
                 "version": d.version,
                 "issued": d.issued.isoformat(),
                 "rule_key": d.rule_key,
+                "business_line": d.business_line,
                 "file": d.path.name if d.path else None,
                 "sha256": d.sha256,
                 "words": d.words,

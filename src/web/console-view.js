@@ -39,6 +39,19 @@
     return node;
   }
 
+  /* Иконки шагов — из assets/ (CODEX). Нет файла — шаг рисуется без иконки. */
+  var STEP_ICON = {
+    accept: 'icon-accept.svg',
+    decompose: 'icon-decompose.svg',
+    retrieve: 'icon-retrieve.svg',
+    permissions: 'icon-permissions.svg',
+    resolve: 'icon-resolve.svg',
+    conflict: 'icon-conflict.svg',
+    compose: 'icon-compose.svg',
+    verify: 'icon-verify.svg',
+    escalate: 'icon-ticket.svg'
+  };
+
   function rowNode(step, isLast) {
     var kind = step.kind || 'step';
     var key = kind === 'step' ? (step.key || 'accept') : kind;
@@ -56,7 +69,22 @@
     var n = kind === 'step' && step.n && step.total
       ? '[' + step.n + '/' + step.total + ']'
       : kind === 'error' ? '[!]' : kind === 'done' ? '[✓]' : '[·]';
-    row.appendChild(el('span', 'step__n', n));
+
+    var marks = el('div', 'step__marks');
+    marks.appendChild(el('span', 'step__n', n));
+    var icon = STEP_ICON[key];
+    if (icon) {
+      var img = document.createElement('img');
+      img.className = 'step__icon';
+      img.src = 'assets/' + icon;
+      img.alt = '';
+      img.width = 14;
+      img.height = 14;
+      marks.appendChild(img);
+    } else {
+      marks.appendChild(el('span', 'step__glyph', '·'));
+    }
+    row.appendChild(marks);
 
     var main = el('div', 'step__main');
     var head = el('div', 'step__key');

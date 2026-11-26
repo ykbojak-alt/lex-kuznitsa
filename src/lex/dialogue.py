@@ -927,7 +927,7 @@ class Dialogue:
         iterations = session.clarification_iterations
         kind = kind or "not_in_corpus"
         why = why_unresolved or self._why_unresolved(
-            session.question, kind, searched, session)
+            session.question, kind, searched)
 
         def _escalate() -> Decision:
             ticket = self.escalate(session_id, why, kind, searched=searched,
@@ -1072,14 +1072,12 @@ class Dialogue:
         question: str | None,
         kind: str = "not_in_corpus",
         searched: dict[str, Any] | None = None,
-        session: Session | None = None,
     ) -> str:
         """§15.2: почему не решилось — конкретно, а не «не найдено»."""
         subject = self._subject(question)
-        if kind == "no_access":
-            role = (session.role_id if session else "") or "роль сотрудника"
-            return (f"по теме «{subject}» документы в корпусе есть, "
-                    f"но ни один не доступен роли «{role}»")
+        if kind == "out_of_scope":
+            return (f"вопрос «{subject}» вне компетенции базы: регламенты по теме "
+                    f"не ведутся, поиск не выполнялся")
         if kind == "no_edition_in_force":
             return (f"на запрошенную дату не действует ни одна редакция "
                     f"правила по теме «{subject}»")

@@ -856,6 +856,11 @@ html[data-theme="dark"] .asof input { color-scheme: dark; }
 .step--old { opacity: 0.62; }
 .step--old:hover { opacity: 1; background: var(--panel-hover); }
 
+.step__marks { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.step__icon { display: block; opacity: 0.85; filter: none; }
+html[data-theme="dark"] .step__icon { filter: invert(0.86); }
+.step__glyph { color: var(--text-3); }
+
 .step__n {
   color: var(--text-3);
   font-size: 11px;
@@ -1523,6 +1528,13 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 
 .caveat__icon { font-size: 13px; line-height: 1; }
 
+.caveat__lvl {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
 .caveat__reasons { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--text); }
 .caveat__reasons li { margin-bottom: 2px; }
 .caveat__advice { margin: 2px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
@@ -1729,6 +1741,21 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 .outcome__q { margin: 0; font-size: 12.5px; color: var(--text-2); }
 .outcome__a { margin: 0; font-size: 13px; color: var(--text); }
 .outcome__meta { margin: 0; font-size: 11px; color: var(--text-3); }
+
+.intro__art { display: block; width: 180px; max-width: 60%; height: auto; margin: 4px 0 14px; }
+
+.btn__icon { display: block; width: 14px; height: 14px; }
+
+.btn--primary { display: inline-flex; align-items: center; gap: 6px; }
+html[data-theme="dark"] .btn__icon { filter: invert(0.86); }
+
+.ico { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; margin-right: 4px; }
+html[data-theme="dark"] .ico { filter: invert(0.86); }
+
+.formcard__head { display: flex; align-items: center; gap: 4px; }
+
+.mail__empty { padding: 18px 4px; }
+.mail__emptyart { display: block; margin: 0 0 10px; }
 
 /* ------------------------------------------------------------ анимации */
 /* Появление: fade + подъём 6px. Каскад цитат — через --i (stagger 40 мс). */

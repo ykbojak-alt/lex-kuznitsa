@@ -502,8 +502,8 @@ def download_form(form_id: str):
     path = core.form_download(form_id)
     if path is None or not Path(path).is_file():
         raise HTTPException(status_code=404, detail=f"бланк формы не найден: {form_id}")
-    return FileResponse(path, filename=Path(path).name,
-                        media_type="text/markdown; charset=utf-8")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": documents.disposition(Path(path).name)})
 
 
 @app.post("/api/forms/{form_id}/fill")
@@ -542,9 +542,8 @@ def download_document(doc_id: str, role_id: str = Query("lawyer")):
     path = documents.resolve(doc_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"файл документа отсутствует: {doc_id}")
-    return FileResponse(path, filename=path.name,
-                        media_type=documents.content_type_for(path),
-                        headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
+    return FileResponse(path, media_type=documents.content_type_for(path),
+                        headers={"Content-Disposition": documents.disposition(path.name)})
 
 
 @app.get("/api/doc/{doc_id}/preview")
@@ -561,8 +560,9 @@ def doc_preview(doc_id: str, page: int = Query(1, ge=1), role_id: str = Query("l
         raise HTTPException(status_code=404, detail=f"файл документа отсутствует: {doc_id}")
     suffix = path.suffix.lower()
     if suffix in documents.PDF_EXT:
-        return FileResponse(path, media_type="application/pdf", filename=path.name,
-                            headers={"X-Preview-Note": "pdf-page-render-unavailable",
+        return FileResponse(path, media_type="application/pdf",
+                            headers={"Content-Disposition": documents.disposition(path.name),
+                                     "X-Preview-Note": "pdf-page-render-unavailable",
                                      "Cache-Control": "public, max-age=300"})
     ctype = preview.content_type_for(path)
     if ctype.startswith("text/") or suffix in (".md", ".txt"):

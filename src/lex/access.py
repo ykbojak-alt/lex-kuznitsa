@@ -181,7 +181,7 @@ def filter_docs(
 
     Пустой список кандидатов = ``not_in_corpus``; ``no_access`` больше не
     возникает никогда (v1.15). ``permissions`` информационный: показываем
-    «чтение: полный корпус · запись: раз/reshena».
+    «чтение: полный корпус · запись: разрешена/недоступна».
     """
     role_obj = get_role(role)
     docs = [d for d in (documents or []) if isinstance(d, dict)]

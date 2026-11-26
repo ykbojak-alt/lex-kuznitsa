@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import mimetypes
 import re
+import urllib.parse
 from pathlib import Path
 
 from . import core
@@ -142,6 +143,18 @@ def _toc_from_html(body: str) -> str:
 def download_name(doc_id: str) -> str:
     path = resolve(doc_id)
     return path.name if path else f"{doc_id}.md"
+
+
+def disposition(filename: str) -> str:
+    """Content-Disposition с кириллицей: заголовки — только latin-1.
+
+    RFC 6266/5987: ASCII-запасное имя в `filename`, UTF-8 в `filename*`.
+    Без этого uvicorn падает на «ТЗ-ЭКЗ-0006.md» с UnicodeEncodeError.
+    """
+    fallback = "".join(ch if ch.isascii() and (ch.isalnum() or ch in " ._-") else "_"
+                       for ch in filename) or "download"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
 
 
 def pdf_page_png(path: Path, page: int) -> tuple[bytes, str] | None:

@@ -150,7 +150,9 @@ event: refusal
 data: {"reason":"На 2025-12-01 ни одна редакция правила SR-01 не действует",
        "sources":["ТЗ-ЭКЗ-СР01-Р1"],"kind":"no_edition_in_force"}
 ```
-`kind`: `no_edition_in_force` | `no_access` | `not_in_corpus` | `conflict_unresolved`.
+`kind`: `out_of_scope` | `no_edition_in_force` | `not_in_corpus` | `conflict_unresolved` | `ocr_unavailable`.
+
+(В v1.15 `no_access` удалён: чтение единое, документ существует — виден всем. См. §23.)
 
 Затем всегда:
 ```json
@@ -168,13 +170,27 @@ data: {"message":"…","stage":"retrieve"}
 
 ## 4. Роли и права (обязательны по брифу)
 
-`src/lex/access.py`:
+**Актуальная модель — §23 (v1.15): чтение единое, запись — только `quality` и
+`director`.** Ниже — историческая модель v1, оставленная для чтения диффа
+контракта; она больше не действует.
+
+`src/lex/access.py` (v1, отменено §23):
 - роль = список отделов + список систем; `*` — все;
 - документ доступен, если `doc.department ∈ role.departments` **или** `role.departments` содержит `*`;
 - если после фильтра по вопросу не осталось доступных документов, **но** они есть
-  без фильтра — это `refusal.kind = "no_access"`, а не «не найдено». Разница
-  видна в Console и в аналитике.
+  без фильтра — это `refusal.kind = "no_access"`, а не «не найдено».
 - `permissions` считает и отдаёт в `detail`: сколько отброшено.
+
+**Действует (v1.15):**
+- чтение — весь корпус для всех ролей (`filter_docs` → `mode: "unified_read"`,
+  `dropped: 0`); `role.departments`/`business_lines` остаются только для
+  аналитики, на выдачу не влияют;
+- запись (`POST /api/cases`, `/api/tickets/*`, `/api/ingest`,
+  `/api/change-requests/*/status`) — `quality`/`director`, иначе `403`;
+  решения по предложениям изменений — только `director`;
+- отказ `no_access` из чтения удалён. Действующие `kind`: `out_of_scope`,
+  `not_in_corpus`, `no_edition_in_force`, `conflict_unresolved`,
+  `ocr_unavailable`.
 
 ---
 

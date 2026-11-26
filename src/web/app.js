@@ -37,6 +37,17 @@
 
   /* ------------------------------------------------------------------ утилиты */
 
+  /* Иконка из assets/ (CODEX): узкая обёртка, чтобы не тянуть разметку в каждый рендер. */
+  function icon(name, cls) {
+    var img = doc.createElement('img');
+    img.src = 'assets/' + name + '.svg';
+    img.alt = '';
+    img.className = 'ico' + (cls ? ' ' + cls : '');
+    img.width = 14;
+    img.height = 14;
+    return img;
+  }
+
   function el(tag, cls, text) {
     var n = doc.createElement(tag);
     if (cls) n.className = cls;
@@ -469,7 +480,13 @@
 
     loadTickets().then(function (list) {
       clear(wrap);
-      if (!list.length) { wrap.appendChild(el('p', 'section-sub', 'Входящие пусты.')); return; }
+      if (!list.length) {
+        var empty = el('div', 'mail__empty');
+        empty.appendChild(icon('illustration-empty', 'mail__emptyart'));
+        empty.appendChild(el('p', 'section-sub', 'Входящие пусты: пока ни один вопрос не остался без ответа.'));
+        wrap.appendChild(empty);
+        return;
+      }
 
       var bar = el('div', 'mail__bar');
       bar.appendChild(el('span', 'mail__count', 'Писем: ' + list.length));
@@ -1269,12 +1286,15 @@
     var form = state.mock ? global.MockLex.form(formId) : null;
     var card = el('div', 'formcard');
     var h = el('div', 'formcard__head');
+    h.appendChild(icon('icon-form'));
     h.appendChild(el('span', 'formcard__title', 'Есть форма: ' + (form ? form.title : formId)));
     card.appendChild(h);
     card.appendChild(el('p', 'formcard__hint', 'Бланк можно скачать и заполнить офлайн или заполнить здесь — агент сверит данные с регламентом.'));
 
     var actions = el('div', 'formcard__actions');
-    var dl = el('button', 'btn', 'Скачать бланк');
+    var dl = el('button', 'btn');
+    dl.appendChild(icon('icon-download'));
+    dl.appendChild(doc.createTextNode('Скачать бланк'));
     dl.type = 'button';
     dl.addEventListener('click', function () { alert('Скачивание: GET /api/forms/' + formId + '/download (в мок-режиме недоступно).'); });
 
@@ -1522,7 +1542,9 @@
       if (c.view_url || c.download_url) {
         var links = el('div', 'ref__links');
         if (c.view_url) {
-          var read = el('button', 'linkish', 'Читать');
+          var read = el('button', 'linkish');
+          read.appendChild(icon('icon-expand'));
+          read.appendChild(doc.createTextNode('Читать'));
           read.type = 'button';
           read.addEventListener('click', (function (cite) {
             return function () { openDocument(cite.doc_id, cite.view_url); };
@@ -1530,7 +1552,9 @@
           links.appendChild(read);
         }
         if (c.download_url) {
-          var dlLink = el('a', 'linkish ref__dl', 'Скачать');
+          var dlLink = el('a', 'linkish ref__dl');
+        dlLink.appendChild(icon('icon-download'));
+        dlLink.appendChild(doc.createTextNode('Скачать'));
           dlLink.href = c.download_url;
           dlLink.setAttribute('download', '');
           dlLink.addEventListener('click', function (e) {

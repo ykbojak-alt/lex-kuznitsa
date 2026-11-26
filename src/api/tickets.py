@@ -122,7 +122,7 @@ def create_escalation(payload: dict) -> dict:
         raise ValueError("why_unresolved обязателен: заявка без анализа бесполезна")
 
     kind = str(payload.get("kind") or "not_in_corpus")
-    if kind not in ("not_in_corpus", "conflict_unresolved", "ocr_degraded", "no_access",
+    if kind not in ("not_in_corpus", "conflict_unresolved", "ocr_degraded",
                     "no_edition_in_force", "out_of_scope"):
         raise ValueError(f"неизвестный kind: {kind}")
 
