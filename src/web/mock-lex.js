@@ -525,15 +525,15 @@
     { id: 'director', title: 'Руководитель', departments: ['*'], business_lines: ['*'], systems: ['*'] }
   ];
 
-  /* §15.2: заявки в службу качества. */
+  /* §18.2: тикеты. Создаёт агент (created_by: "agent"), номер человекочитаемый. */
   var TICKETS = [
     {
-      id: 'esc-0003',
-      ts: '2026-11-26T11:20:00Z',
+      id: 'LEX-2026-0042',
+      created_at: '2026-11-26T11:20:00Z',
+      created_by: 'agent',
       session_id: 's-7f3a1c',
-      role_id: 'lawyer',
-      business_line: 'закупки',
       question: 'Как согласовать закупку, если поставщик единственный?',
+      asker: { role_id: 'lawyer', business_line: 'закупки' },
       clarifications: [
         { iteration: 1, asked: ['На какую дату?'], answers: ['2026-07-01'] },
         { iteration: 2, asked: ['Сумма?', 'Направление?'], answers: ['не знаю', 'закупки'] }
@@ -541,45 +541,70 @@
       searched: { documents: 27, cases: 4, accessible: 5, top: ['ТЗ-ЭКЗ-СР01-Р2'] },
       why_unresolved: 'в корпусе нет порядка для единственного поставщика',
       kind: 'not_in_corpus',
-      status: 'open'
+      priority: 'normal',
+      assignee: null,
+      status: 'open',
+      sla_due: '2026-11-28T11:20:00Z'
     },
     {
-      id: 'esc-0005',
-      ts: '2026-11-26T09:05:00Z',
+      id: 'LEX-2026-0041',
+      created_at: '2026-11-26T09:05:00Z',
+      created_by: 'agent',
       session_id: 's-1c2d',
-      role_id: 'quality',
-      business_line: 'качество',
       question: 'Можно ли принять партию с отклонением по влажности 2%?',
+      asker: { role_id: 'quality', business_line: 'качество' },
       clarifications: [
         { iteration: 1, asked: ['Какая номенклатурная позиция?'], answers: ['комплект уплотнения КУ-120'] }
       ],
       searched: { documents: 27, cases: 4, accessible: 6, top: ['ТЗ-ЭКЗ-0006-Р2'] },
       why_unresolved: 'допуски по влажности описаны в стандарте, но стандарт от другого изделия',
       kind: 'not_in_corpus',
+      priority: 'normal',
+      assignee: 'И. Петрова',
       status: 'answered',
+      sla_due: '2026-11-28T09:05:00Z',
       quality_answer: 'Для КУ-120 допуск по влажности — не более 1,5%. Партию принимать нельзя, оформить возврат.',
-      resolved_by: 'quality',
       answered_at: '2026-11-26T10:30:00Z'
     },
     {
-      id: 'esc-0001',
-      ts: '2026-11-25T16:40:00Z',
+      id: 'LEX-2026-0040',
+      created_at: '2026-11-26T08:10:00Z',
+      created_by: 'agent',
+      session_id: 's-44aa',
+      question: 'Кто отвечает за хранение документов свыше трёх лет?',
+      asker: { role_id: 'lawyer', business_line: 'хранение' },
+      clarifications: [],
+      searched: { documents: 27, cases: 4, accessible: 4, top: ['ТЗ-ЭКЗ-0004-Р1'] },
+      why_unresolved: 'в регламенте срок есть, ответственного нет',
+      kind: 'not_in_corpus',
+      priority: 'high',
+      assignee: 'С. Ковалёв',
+      status: 'assigned',
+      sla_due: '2026-11-26T16:10:00Z'
+    },
+    {
+      id: 'LEX-2026-0038',
+      created_at: '2026-11-25T16:40:00Z',
+      created_by: 'agent',
       session_id: 's-9a8b',
-      role_id: 'it',
-      business_line: 'персонал',
       question: 'Кому сообщать об утечке учётных данных?',
+      asker: { role_id: 'it', business_line: 'персонал' },
       clarifications: [],
       searched: { documents: 27, cases: 4, accessible: 0, top: [] },
       why_unresolved: 'наличие регламента требует службы ИБ, её нет в корпусе',
-      kind: 'no_access',
-      status: 'resolved'
+      kind: 'not_in_corpus',
+      priority: 'normal',
+      assignee: 'И. Петрова',
+      status: 'closed',
+      sla_due: '2026-11-27T16:40:00Z',
+      close_reason: 'вопрос вне охвата, передан в ИБ напрямую'
     }
   ];
 
   /* §16.2: черновик кейса + подсказки: чего не хватает и с чем расходится. */
   var DRAFTS = {
-    'esc-0003': {
-      ticket: 'esc-0003',
+    'LEX-2026-0042': {
+      ticket: 'LEX-2026-0042',
       status: 'answered',
       quality_answer: 'Для единственного поставщика — обоснование по 44-ФЗ п.4 ч.1 ст.93, форма ОС-2.',
       resolved_by: 'quality',
@@ -596,7 +621,7 @@
         author_name: 'служба качества',
         content_type: 'text',
         source: 'escalation',
-        escalation_id: 'esc-0003'
+        escalation_id: 'LEX-2026-0042'
       },
       suggestions: {
         missing: [
@@ -610,8 +635,8 @@
         ]
       }
     },
-    'esc-0005': {
-      ticket: 'esc-0005',
+    'LEX-2026-0041': {
+      ticket: 'LEX-2026-0041',
       status: 'answered',
       quality_answer: 'Для КУ-120 допуск по влажности — не более 1,5%. Партию принимать нельзя, оформить возврат.',
       resolved_by: 'quality',
@@ -628,11 +653,62 @@
         author_name: 'служба качества',
         content_type: 'text',
         source: 'escalation',
-        escalation_id: 'esc-0005'
+        escalation_id: 'LEX-2026-0041'
       },
       suggestions: { missing: [], conflicts: [] }
     }
   };
+
+  var ticketSeq = 42;
+
+  /* §18.2: тикет создаёт агент — новый номер в очередь. */
+  function createTicket(question, roleId, lineId) {
+    ticketSeq += 1;
+    var id = 'LEX-2026-00' + ticketSeq;
+    var t = {
+      id: id,
+      created_at: '2026-11-26T12:00:00Z',
+      created_by: 'agent',
+      session_id: 's-mock-' + ticketSeq,
+      question: question,
+      asker: { role_id: roleId || '', business_line: lineId || 'закупки' },
+      clarifications: [
+        { iteration: 1, asked: ['На какую дату определить действующую редакцию?'], answers: ['2026-07-01'] },
+        { iteration: 2, asked: ['О каком направлении речь?'], answers: ['закупки'] }
+      ],
+      searched: { documents: 27, cases: 4, accessible: 5, top: ['ТЗ-ЭКЗ-СР01-Р2'] },
+      why_unresolved: 'в корпусе нет порядка согласования для этого случая',
+      kind: 'not_in_corpus',
+      priority: 'normal',
+      assignee: null,
+      status: 'open',
+      sla_due: '2026-11-28T12:00:00Z'
+    };
+    TICKETS.unshift(t);
+    DRAFTS[id] = {
+      ticket: id,
+      status: 'answered',
+      quality_answer: 'Ответ службы качества (мок): вопрос решён по действующему регламенту.',
+      resolved_by: 'quality',
+      answered_at: '2026-11-26T13:00:00Z',
+      draft: {
+        question: question,
+        answer_in_practice: 'Ответ службы качества (мок): вопрос решён по действующему регламенту.',
+        outcome: 'resolved',
+        business_line: lineId || 'закупки',
+        linked_docs: [],
+        tags: ['мок', lineId || 'закупки'],
+        rule_key: null,
+        author_role: 'quality',
+        author_name: 'служба качества',
+        content_type: 'text',
+        source: 'escalation',
+        escalation_id: id
+      },
+      suggestions: { missing: [{ field: 'linked_docs', why: 'к ответу службы качества не приложен документ', note: 'можно оставить пустым' }], conflicts: [] }
+    };
+    return t;
+  }
 
   function tickets() { return clone(TICKETS); }
   function ticketById(id) {
@@ -640,6 +716,35 @@
     return null;
   }
   function draftOf(id) { return DRAFTS[id] ? clone(DRAFTS[id]) : null; }
+
+  function assignTicket(id, assignee) {
+    for (var i = 0; i < TICKETS.length; i++) {
+      if (TICKETS[i].id === id) {
+        TICKETS[i].assignee = assignee || 'И. Петрова';
+        if (TICKETS[i].status === 'open') TICKETS[i].status = 'assigned';
+        return { ok: true, ticket: clone(TICKETS[i]) };
+      }
+    }
+    return { ok: false, error: 'тикет не найден' };
+  }
+
+  function answerTicket(id) {
+    for (var i = 0; i < TICKETS.length; i++) {
+      if (TICKETS[i].id === id) { TICKETS[i].status = 'answered'; return { ok: true }; }
+    }
+    return { ok: false };
+  }
+
+  function closeTicket(id, reason) {
+    for (var i = 0; i < TICKETS.length; i++) {
+      if (TICKETS[i].id === id) {
+        TICKETS[i].status = 'closed';
+        TICKETS[i].close_reason = reason || '';
+        return { ok: true };
+      }
+    }
+    return { ok: false };
+  }
 
   /* §16.3: подтверждение черновика — те же правила, что на сервере. */
   var caseSeq = 21;
@@ -657,13 +762,13 @@
     }
     caseSeq += 1;
     var caseId = 'case-00' + caseSeq;
-    for (var i = 0; i < TICKETS.length; i++) if (TICKETS[i].id === id) TICKETS[i].status = 'resolved';
+    for (var i = 0; i < TICKETS.length; i++) if (TICKETS[i].id === id) TICKETS[i].status = 'closed';
     d.status = 'resolved';
     return {
       ok: true,
       case_id: caseId,
       in_index: true,
-      ticket_status: 'resolved',
+      ticket_status: 'closed',
       affected: 'кейсов в базе: ' + (CASES.length + 1) + ' · вопрос теперь покрыт'
     };
   }
@@ -682,6 +787,10 @@
     ticket: ticketById,
     draft: draftOf,
     confirmDraft: confirmDraft,
+    createTicket: createTicket,
+    assignTicket: assignTicket,
+    answerTicket: answerTicket,
+    closeTicket: closeTicket,
     scenarios: ['answer', 'clarify', 'refusal-nocorpus', 'refusal-date', 'refusal-access', 'verify-trimmed', 'escalate']
   };
 })(window);

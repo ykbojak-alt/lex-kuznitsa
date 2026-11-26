@@ -738,7 +738,7 @@ class Dialogue:
         manifest: dict[str, Any] | None = None,
         role_departments: dict[str, list[str]] | None = None,
         ttl_minutes: int = 30,
-        max_rounds: int = MAX_CLARIFY_ROUNDS,
+        max_rounds: int = MAX_CLARIFY_ITERATIONS,
         max_questions: int = MAX_QUESTIONS_PER_ROUND,
         today: str | None = None,
     ) -> None:
@@ -902,9 +902,16 @@ class Dialogue:
         missing = self._missing(params, role, session.question, matched_rules)
 
         if not missing:
-            if iterations >= MIN_CLARIFY_ITERATIONS:
+            # Параметры собраны, а ответа нет. Уточняем ещё: сначала предмет,
+            # потом — вид регламента. Это и есть 2-я и 3-я итерации (§15).
+            if iterations < MIN_CLARIFY_ITERATIONS:
+                fallback = self._fallback_question(session.question)
+            elif iterations < MAX_CLARIFY_ITERATIONS and not params.get("doc_type"):
+                fallback = self._fallback_doc_type()
+            else:
+                fallback = None
+            if fallback is None:
                 return _escalate()
-            fallback = self._fallback_question(session.question)
             self._record_clarification(session, [fallback])
             self.store.save(session)
             return Decision(questions=[fallback],
@@ -982,6 +989,17 @@ class Dialogue:
             reason=("параметры собраны, но подходящего документа не нашлось — "
                     "уточню предмет, чтобы не искать кота в темноте"),
             kind="text",
+        )
+
+    def _fallback_doc_type(self) -> Question:
+        """Третья итерация: какой регламент имеется в виду."""
+        return Question(
+            key="doc_type",
+            text="О каком регламенте идёт речь?",
+            reason=("дата и предмет названы, но подходящего документа не нашлось — "
+                    "уточню, какой регламент имеется в виду"),
+            kind="choice",
+            options=list(self.knowledge.topics[:10]),
         )
 
     def _subject(self, question: str | None) -> str:
@@ -1071,6 +1089,10 @@ class Dialogue:
                     "params": {},
                     "assumptions": [],
                     "rounds": 0,
+                    "clarification_iterations": 0,
+                    "clarifications": [],
+                    "searches": [],
+                    "escalation": None,
                     "exhausted": False,
                 }
             session = found
@@ -1081,6 +1103,10 @@ class Dialogue:
             "params": dict(session.params),
             "assumptions": list(session.assumptions),
             "rounds": session.rounds,
+            "clarification_iterations": session.clarification_iterations,
+            "clarifications": list(session.clarifications),
+            "searches": list(session.searches),
+            "escalation": session.escalation,
             "exhausted": session.exhausted,
         }
 
@@ -1231,6 +1257,7 @@ class Dialogue:
                     "skipped": True,
                     "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
+                self._attach_answer(session, value or "не знаю")
                 continue
             if key == "as_of":
                 parsed = extract_date(value) or value
@@ -1450,6 +1477,9 @@ __all__ = [
     "Session",
     "SessionStore",
     "MAX_CLARIFY_ROUNDS",
+    "MAX_CLARIFY_ITERATIONS",
+    "MIN_CLARIFY_ITERATIONS",
+    "Decision",
     "MAX_QUESTIONS_PER_ROUND",
     "extract_amount",
     "extract_date",
