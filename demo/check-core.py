@@ -1106,6 +1106,84 @@ def check_tokens_and_line() -> None:
               f"{type(exc).__name__}: {str(exc)[:120]}")
 
 
+def check_slot_chain() -> None:
+    """N-5: слот в чёрном списке не роняет ответ — берётся следующий.
+
+    Главный фикс ночи (f4aa183): один слот NexusLink может быть недоступен
+    целиком («all candidates exhausted … blacklisted»), остальные работают.
+    ``chat`` обязан перейти к следующему, а не отдать сотруднику ошибку.
+
+    Если этот фикс откатится, сквозные прогоны начнут падать во время демо,
+    причём ровно на тех вопросах, что «случайно» попали на мёртвый слот.
+    Поэтому тест держит инвариант: первый слот 502-blacklisted, второй —
+    нормальный текст, ответ должен прийти и прийти со второго слота.
+
+    Провайдер подменяется целиком (``llm._post_chat``), сеть не нужна.
+    ``model=None`` в вызове заставляет ``chat`` идти по ``model_chain()``.
+    """
+    from lex import llm
+
+    real_post = llm._post_chat
+    real_chain = llm.model_chain
+    real_debug = llm.llm_debug.record
+    seen: list[str] = []
+
+    def fake_post(messages, max_tokens, temperature, timeout, model=None):
+        seen.append(str(model))
+        if model == "slot-dead":
+            # Точная форма отказа апстрима: по ней is_slot_dead решает, что
+            # повторять этот слот бессмысленно.
+            raise llm.LLMError(
+                'NexusLink HTTP 502: {"error":{"message":"nexuslink: all '
+                'candidates exhausted for slot-dead — 1 candidate(s) are '
+                'currently blacklisted"}}')
+        return ({"choices": [{"message": {"content": SLOT_OK_TEXT},
+                              "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 30, "completion_tokens": 8}},
+                {"model": model})
+
+    llm._post_chat = fake_post
+    llm.model_chain = lambda: ["slot-dead", "slot-live"]
+    # Отладка пишет в var/llm-debug.jsonl — в тесте глушим, чтобы не пачкать
+    # рабочий журнал выдуманными вызовами.
+    llm.llm_debug.record = lambda **kw: None
+    # chat() в начале проверяет configured(); провайдер подменён, реального
+    # эндпоинта не нужно, но base_url/key должны быть непусты.
+    old_base = _os.environ.get("NEXUS_LINK_BASE_URL")
+    old_key = _os.environ.get("NEXUSLINK_KEY")
+    _os.environ["NEXUS_LINK_BASE_URL"] = "http://slot-test.invalid/v1"
+    _os.environ["NEXUSLINK_KEY"] = "slot-test-key"
+    try:
+        try:
+            text = llm.chat([{"role": "user", "content": "вопрос"}], max_tokens=64)
+        except Exception as exc:
+            check("N-5: мёртвый слот не роняет ответ", False,
+                  f"{type(exc).__name__}: {str(exc)[:120]}")
+            return
+        check("N-5: мёртвый слот не роняет ответ", text == SLOT_OK_TEXT,
+              f"текст {text[:40]!r}")
+        # Главный инвариант: текст пришёл именно со ВТОРОГО слота, а первый
+        # был опрошен ДО него. Если фикс откатится (is_slot_dead перестанет
+        # распознаваться), сюда придёт либо ошибка, либо текст первого слота.
+        check("N-5: ответ получен СО ВТОРОГО слота после отказа первого",
+              seen[:2] == ["slot-dead", "slot-live"],
+              f"опрошено {seen}")
+        check("N-5: мёртвый слот опрошен РОВНО один раз (без слепого повтора)",
+              seen.count("slot-dead") == 1, f"{seen}")
+    finally:
+        llm._post_chat = real_post
+        llm.model_chain = real_chain
+        llm.llm_debug.record = real_debug
+        for key, val in (("NEXUS_LINK_BASE_URL", old_base), ("NEXUSLINK_KEY", old_key)):
+            if val is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = val
+
+
+SLOT_OK_TEXT = "Ответ со второго слота: срок — три рабочих дня [1]."
+
+
 def check_role_aliases() -> None:
     """Старые id ролей принимаются на входе, но не показываются в списке.
 
@@ -1831,6 +1909,88 @@ def check_subject_gate_audit() -> None:
           f"{tb_best_doc} покрытие {tb_best:.2f}, модальность {tb_has_modal}")
 
 
+def check_subject_is_phrase() -> None:
+    """F-6: третий маркер гейта — фраза предмета рядом, а не совпадение корней.
+
+    Указание ALICE (27.11.2026): третий признак делать «по существу» —
+    проверять, что слова вопроса стоят РЯДОМ, а не что они вообще есть в
+    документе.
+
+    Дефект, который это закрывает: `subject_coverage` ищет стемы «где
+    угодно в документе», и «Какие требования к охране труда на площадке?»
+    даёт 0.75 по КД-ПД-04, потому что «охран» нашёлся в «сохранение старых
+    ставок», а «труд» — в «трудозатратах», в РАЗНЫХ пунктах. Совпадение
+    корней — не норма.
+
+    Правило маркера: >= 2 стема предмета на расстоянии <= 3 слов в одном
+    фрагменте → близость не требуется (фрагмент длинный, а не нерелевантный).
+    Порог предмета при этом 0.60, не 0.75. Условия ALICE соблюдены:
+      * «слово есть, нормы нет» — маркер НЕ срабатывает (проверка ниже
+        «срок хранения бух. документов»: «бухгал» и «хранен» нигде рядом);
+      * «охрана труда» пропускается ровно потому, что п.15.2 КД-ПД-04
+        содержит «правилами охраны труда» — фразу, а не два слова.
+    """
+    from lex.grounding import subject_is_phrase
+
+    # 1. Фраза рядом — маркер срабатывает.
+    check("F-6: «охраны труда» рядом — маркер срабатывает",
+          subject_is_phrase(
+              "Какие требования к охране труда на площадке?",
+              ["правилам внутреннего трудового распорядка, охраны труда и "
+               "прочим нормативным документам"]),
+          "фраза из реального п.15.2 КД-ПД-04")
+
+    # 2. Совпадение корней из разных мест — НЕ срабатывает. Ровно то,
+    #    из-за чего «охрана труда» давала 0.75 при отсутствии нормы.
+    check("F-6: «охран» и «труд» из разных мест — маркер НЕ срабатывает",
+          not subject_is_phrase(
+              "Какие требования к охране труда на площадке?",
+              ["Согласовать сохранение старых ставок согласно процедуре, "
+               "расчет трудозатрат со списком ограничений"]),
+          "два слова есть, фразы нет")
+
+    # 3. Условие ALICE «слово есть, нормы нет»: «срок хранения бух.
+    #    документов» — «бухгал» есть, «хранен» нет рядом. Маркер молчит,
+    #    гейт режет, отказ честный.
+    check("F-6: «срок хранения бух. документов» маркер НЕ пробивает",
+          not subject_is_phrase(
+              "Какой срок хранения бухгалтерских документов?",
+              ["состав бухгалтерских документов, необходимых для сдачи-приёмки "
+               "выполненных работ"]),
+          "«бухгал» без «хранения» рядом")
+
+    # 4. Один стем предмета — маркер не изобретает фразу из ничего.
+    check("F-6: один стем предмета — фразы нет по определению",
+          not subject_is_phrase("Сколько дней отпуска у инженера?",
+                                ["отпуск сотрудника предоставляется по графику"]),
+          "")
+
+    # 5. Живой прогон: у director «охрана труда» доходит до compose, потому
+    #    что маркер снимает требование к косинусу, а не к предмету.
+    real = ROOT / "corpus-real"
+    if not (real / "manifest.json").is_file():
+        return
+    out = asyncio.run(_run("Какие требования к охране труда на площадке?",
+                           role="director", corpus_root=real,
+                           session="s-f6-tb"))
+    keys = [s.data.key for s in out if s.kind == "step"]
+    retrieve = next((s.data for s in out if s.kind == "step"
+                     and s.data.key == "retrieve"), None)
+    check("F-6: «охрана труда» у director проходит гейт по третьему признаку",
+          "compose" in keys and "фраза в фрагменте" in getattr(retrieve, "detail", ""),
+          getattr(retrieve, "detail", "")[:110])
+
+    # 6. Тот же прогон под role=ib: документ скрыт, отказ обязан быть
+    #    ролевым, а не «нет нормы». Маркер F-6 не должен ломать F-2.
+    out = asyncio.run(_run("Какие требования к охране труда на площадке?",
+                           role="technical", corpus_root=real,
+                           session="s-f6-tb-tech"))
+    esc = next((str(s.data.get("reason")) for s in out if s.kind == "escalate"), "")
+    check("F-6: третий признак не ломает ролевой отказ (F-2)",
+          "вне вашего подразделения" in esc,
+          esc[:110])
+
+
 def main() -> int:
     global LLM_DOWN
     corpus = load_corpus(CORPUS)
@@ -1860,12 +2020,14 @@ def main() -> int:
     check_grounding_parser()
     check_tokens_and_line()
     check_role_aliases()
+    check_slot_chain()
     check_p0_leaks()
     check_unstable_compose()
     check_verify_zero()
     check_role_denial_reason()
     check_answer_with_caveat()
     check_subject_gate_audit()
+    check_subject_is_phrase()
     print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed, "
           f"{len(EXPECTED_FAIL)} expected-fail, {len(UNEXPECTED_PASS)} xpass")
     if EXPECTED_FAIL:

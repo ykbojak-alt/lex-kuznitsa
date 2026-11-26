@@ -682,6 +682,48 @@ def subject_coverage(question: str, fragments: list[str]) -> tuple[float, list[s
     return round(found / len(q_stems), 3), missing
 
 
+def subject_is_phrase(question: str, fragments: list[str],
+                      *, window: int = 3) -> bool:
+    """Есть ли в одном фрагменте хотя бы ДВА стема предмета РЯДОМ.
+
+    Отличие от ``subject_coverage``: та считает, встречаются ли стемы хоть
+    где-нибудь (и «охрана труда на площадке» даёт 0.75, потому что «охран»
+    есть в «сохранение», а «труд» — в «трудозатратах», в разных местах
+    документа). Здесь проверяется, что слова стоят рядом — то есть это
+    действительно фраза вопроса, а не совпадение корней.
+
+    Зачем: третий признак гейта §12.8. Предмет набран, но косинус низкий —
+    это либо «слова разошлись по чанкам» (норма есть, но не там), либо
+    «совпали корни разных слов» (нормы нет вовсе). Близость стемов
+    разделяет эти случаи, косинус — нет.
+
+    Возвращает True, если в каком-то фрагменте найдена пара стемов предмета
+    на расстоянии не больше ``window`` слов друг от друга. Одиночный стем
+    рядом с другими словами не считается: «срок» без «хранения» в фразе о
+    приёмке работ — не норма про хранение.
+    """
+    stems = _subject_stems(question)
+    if len(stems) < 2:
+        # Один стем — фразы нет по определению. Такие вопросы остаются у
+        # основного гейта: придумывать для них третий признак значит
+        # ослаблять проверку там, где её и без того мало.
+        return False
+    for frag in fragments or []:
+        toks = _WORDS_RE.findall((frag or "").lower())
+        pos: dict[str, list[int]] = {s: [] for s in stems}
+        for i, w in enumerate(toks):
+            for s in stems:
+                if w.startswith(s[:5]):
+                    pos[s].append(i)
+        ordered = sorted(pos)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1:]:
+                if pos[a] and pos[b] and min(
+                        abs(x - y) for x in pos[a] for y in pos[b]) <= window:
+                    return True
+    return False
+
+
 def _shares_topic(claim: str, cited: str, *, min_shared: int = 2) -> bool:
     """Есть ли у утверждения и цитаты общая содержательная тема.
 

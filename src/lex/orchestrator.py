@@ -39,7 +39,12 @@ from .cases import Case, CaseStore, get_case_store
 from .corpus import Corpus, load_corpus
 from .dialogue import Dialogue
 from .forms import get_form
-from .grounding import GroundingReport, check_grounding, subject_coverage
+from .grounding import (
+    GroundingReport,
+    check_grounding,
+    subject_coverage,
+    subject_is_phrase,
+)
 from .index import SearchIndex, embed_texts, get_index
 from .llm import LLMError
 from .media import inspect_corpus
@@ -79,6 +84,17 @@ RERANK_TOP = int(os.environ.get("LEX_RERANK_TOP", "8"))
 SUBJECT_MIN_COVERAGE = float(os.environ.get("LEX_SUBJECT_MIN", "0.75"))
 # Близость вектора к лучшему фрагменту. Ниже — слова нашлись, а тема не та.
 SUBJECT_MIN_COSINE = float(os.environ.get("LEX_SUBJECT_COSINE", "0.50"))
+# Третий признак гейта §12.8 (указание ALICE 27.11.2026): если стемы предмета
+# стоят рядом во фрагменте, косинус не требуется — тема там есть, фрагмент
+# просто длинный. Порог предмета при этом СНИЖАЕТСЯ до 0.60, но не отменяется:
+# слова рядом ещё не значат, что вопрос покрыт целиком.
+#
+# Замер на corpus-real (27.11.2026): 0.60 — наибольшее значение, при котором
+# «охрана труда» (п.15.2 КД-ПД-04, где РП знакомится с правилами ОТ) считается
+# покрытой; при 0.67 и выше её уже режет, потому что «площадке» есть только в
+# КД-ПД-01. «Срок хранения бух. документов» при этом остаётся отсечённым:
+# «бухгал» и «хранен» не встречаются рядом ни в одном фрагменте.
+SUBJECT_PHRASE_COVERAGE = float(os.environ.get("LEX_SUBJECT_PHRASE", "0.60"))
 # Вопрос ссылается на конкретный документ («в документе Регламент „X"»).
 _DOC_REF = re.compile(
     r"(?:в|по)\s+документ\w*"
@@ -797,13 +813,32 @@ class Orchestrator:
         cos1 = max((h.cosine for h in ranked[:RERANK_TOP]), default=0.0)
         state["subject_coverage"] = round(subj, 2)
         state["top_cosine"] = round(cos1, 3)
-        detail += f" · предмет {subj:.0%} · близость {cos1:.2f}"
+        # Третий признак (указание ALICE 27.11.2026): близость снимает
+        # требование к косинусу, но НЕ к предмету. Смысл: если стемы вопроса
+        # реально стоят рядом во фрагменте, а не совпали корнями из разных
+        # мест документа, то тема там есть — и низкий косинус означает
+        # «фрагмент длинный», а не «фрагмент не про то».
+        #
+        # Предмет при этом должен быть >= 0.60: иначе маркер пропускает
+        # вопросы, где рядом оказалось слово из трёх. На corpus-real
+        # порог 0.75+косинус пропускал «охрану труда» (0.75/cos 0.45) —
+        # ровно на этой границе; правило «предмет 0.60 И фраза рядом»
+        # фильтр не ослабляет, а переносит нагрузку на смысловой признак.
+        phrase_ok = (
+            subj >= SUBJECT_PHRASE_COVERAGE
+            and subject_is_phrase(
+                self.opts.question, [h.chunk.text for h in ranked[:RERANK_TOP]])
+        )
+        state["subject_is_phrase"] = phrase_ok
+        detail += (f" · предмет {subj:.0%} · близость {cos1:.2f}"
+                   + (" · фраза в фрагменте" if phrase_ok else ""))
         # Вопрос, называющий конкретный документ, гейт не режет: в синтетике
         # сотрудник пишет «в документе Регламент „прочая"», и такой вопрос уже
         # адресован, даже если поиск промахнулся мимо нужного чанка.
         names_doc = bool(_DOC_REF.search(self.opts.question))
         if missing and not names_doc and (
-                subj < SUBJECT_MIN_COVERAGE or cos1 < SUBJECT_MIN_COSINE):
+                subj < SUBJECT_MIN_COVERAGE
+                or (cos1 < SUBJECT_MIN_COSINE and not phrase_ok)):
             detail += f" · предмет вопроса не найден ({subj:.0%})"
             # §8: вопрос может закрывать кейс из практики, даже когда регламент
             # его не покрывает. Кейс смотрим ДО остановки каскада: иначе
