@@ -24,6 +24,15 @@
   --danger-bg: #fdf2f2;
   --success: #14866d;
 
+  /* §12.8: пилюли метрик релевантности. Фон и текст раздельно, чтобы светлая
+     и тёмная темы не зависели от прозрачности поверх панели. */
+  --rel-ok-bg: #e6f4f1;
+  --rel-ok-fg: #14866d;
+  --rel-warn-bg: #fdf6e8;
+  --rel-warn-fg: #a66200;
+  --rel-bad-bg: #fde8e8;
+  --rel-bad-fg: #d73333;
+
   /* шаги консоли: приглушённые тона, не неон */
   --s-slate: #54595d;
   --s-violet: #6b4ba1;
@@ -74,6 +83,14 @@ html[data-theme="dark"] {
   --danger: #e26a6a;
   --danger-bg: #2c1a1c;
   --success: #3fb8a0;
+
+  /* §12.8: пилюли метрик в тёмной теме — свои фоны, а не прозрачность. */
+  --rel-ok-bg: #1a2e2b;
+  --rel-ok-fg: #4fc3aa;
+  --rel-warn-bg: #2e2a1a;
+  --rel-warn-fg: #d9a24a;
+  --rel-bad-bg: #2e1a1a;
+  --rel-bad-fg: #e07979;
 
   --s-slate: #a2a9b1;
   --s-violet: #b9a0ea;
@@ -192,13 +209,25 @@ a:visited { color: var(--link-visited); }
   padding: 8px 16px;
 }
 
-.nav__item:hover { background: var(--panel-hover); text-decoration: underline; }
+/* Навигация (LEX-VISUAL-1): наведение — мягкая подложка, выбор — заливка
+   --link с белым текстом. Подложка в токене --panel-hover = #eaecf0. */
+.nav__item:hover { background: var(--panel-hover); border-radius: var(--radius); }
 
 .nav__item[aria-current="page"] {
+  background: var(--link);
+  /* border-left у пункта прозрачный — на заливке он открыл бы полоску фона
+     слева. Красим в тот же цвет, чтобы заливка была ровной. */
   border-left-color: var(--link);
-  background: var(--panel-hover);
-  color: var(--text);
+  color: #fff;
   font-weight: 600;
+}
+
+/* Наведение на активный пункт не должно гасить заливку: у :hover и
+   [aria-current] одинаковая специфичность, и без этого правила подсветка
+   зависела бы от порядка строк в файле. */
+.nav__item[aria-current="page"]:hover {
+  background: var(--s-blue);
+  color: #fff;
 }
 
 .nav__count {
@@ -253,9 +282,12 @@ a:visited { color: var(--link-visited); }
 
 .tab:hover { text-decoration: underline; }
 
+/* Активный таб: подчёркивание 3px в цвет ссылки. Было 2px — спецификация
+   просит 3px; margin-bottom компенсирует, чтобы линия легла на границу. */
 .tab[aria-selected="true"] {
   color: var(--text);
-  border-bottom-color: var(--link);
+  border-bottom: 3px solid var(--link);
+  margin-bottom: -2px;
   font-weight: 600;
 }
 
@@ -270,7 +302,14 @@ a:visited { color: var(--link-visited); }
   vertical-align: 1px;
 }
 
-.tab__badge--set { border-color: var(--success); color: var(--success); }
+/* Заполненный badge — заливка цветом ссылки. Оба состояния из спецификации:
+   активный таб (aria-selected) и «значение задано» (--set). */
+.tab[aria-selected="true"] .tab__badge,
+.tab__badge--set {
+  background: var(--link);
+  border-color: var(--link);
+  color: #fff;
+}
 
 /* панель настроек под вкладками */
 .panelbar {
@@ -618,9 +657,69 @@ html[data-theme="dark"] .q input, html[data-theme="dark"] .q select { color-sche
 .btn:active { background: var(--border-soft); }
 .btn:disabled { color: var(--text-3); border-color: var(--border-soft); cursor: not-allowed; background: var(--page); }
 
-.btn--primary { border-color: var(--link); color: var(--link); font-weight: 600; }
-.btn--primary:hover { background: #eaf3ff; }
-html[data-theme="dark"] .btn--primary:hover { background: #1b2a3e; }
+/* Спецификация кнопок (LEX-VISUAL-1). Значения — в токенах, не хардкодом:
+   --link = #3366cc, --s-blue = #2b5fa8, --border-soft = #c8ccd1, --page = #fff.
+   Primary — единственная заливка на странице: если синих плашек станет много,
+   глаз перестанет находить главное действие. */
+.btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+.btn--primary {
+  background: var(--link);
+  border-color: var(--link);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.btn--primary:hover { background: var(--s-blue); border-color: var(--s-blue); color: #fff; }
+.btn--primary:active { background: var(--s-blue); border-color: var(--s-blue); color: #fff; transform: translateY(1px); }
+.btn--primary:disabled {
+  background: var(--border-soft);
+  border-color: var(--border-soft);
+  color: #fff;
+  opacity: 0.55;
+  /* :hover у primary объявлен раньше и с той же специфичностью — без этого
+     правила недоступная кнопка вспыхивала бы синим под курсором. */
+  transform: none;
+}
+.btn--primary:disabled:hover { background: var(--border-soft); border-color: var(--border-soft); }
+
+/* Тёмная тема: primary — заливка #6e9bf0 (--link тёмной темы) с текстом
+   #101418 (--page). Это 6.70:1, hover #8ab4f0 (--s-blue) — 8.69:1, оба выше
+   AA. Аддитивное расширение LEX-VISUAL-5 поверх светлой заливки выше. */
+html[data-theme="dark"] .btn--primary {
+  background: #6e9bf0;
+  border-color: #6e9bf0;
+  color: #101418;
+}
+html[data-theme="dark"] .btn--primary:hover,
+html[data-theme="dark"] .btn--primary:active {
+  background: #8ab4f0;
+  border-color: #8ab4f0;
+  color: #101418;
+}
+html[data-theme="dark"] .btn--primary:disabled {
+  background: var(--border-soft);
+  border-color: var(--border-soft);
+  color: var(--text-3);
+  opacity: 1;
+}
+html[data-theme="dark"] .btn--primary:disabled:hover {
+  background: var(--border-soft);
+  border-color: var(--border-soft);
+}
+
+/* Иконка внутри primary приходит чёрной (stroke currentColor на <img> не
+   действует). На синей заливке её надо сделать белой. В тёмной теме invert(0.86)
+   из #000 даёт #242424 — на #3366cc это 2.89:1, ниже минимума 3:1: иконка
+   пропадает. Поэтому внутри primary всегда brightness(0) invert(1) — чисто
+   белая, 5.37:1. Остальные иконки в тёмной теме остаются как были.
+
+   В тёмной теме заливка бледнее (#6e9bf0), и здесь правило обратное: белая
+   иконка на #6e9bf0 — 2.76:1, пропадает. Красим её тёмной: 6.70:1. */
+.btn--primary .btn__icon { filter: brightness(0) invert(1); }
+html[data-theme="dark"] .btn--primary .btn__icon { filter: brightness(0); }
 
 .clarify__actions {
   display: flex;
@@ -901,6 +1000,52 @@ html[data-theme="dark"] .step__icon { filter: invert(0.86); }
 
 .step__ms { color: var(--text-3); font-size: 10.5px; white-space: nowrap; }
 
+/* §12.8: метрики релевантности поиска — пилюлями под detail шага.
+   Два числа, по которым видно работу проверки: покрытие предмета вопроса и
+   косинус к лучшему фрагменту. Цвет — светофор по порогам сервера.
+
+   Высота ФИКСИРОВАНА и строка не переносится. Это не косметика: консоль
+   виртуализирована и считает высоту строк без замера layout, поэтому
+   «высота зависит от ширины» ломает прокрутку. Константы связаны:
+   height 18px + margin-top 3px = REL_H в console-view.js. Меняешь здесь —
+   поменяй там. */
+.step__relevance {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.step__relevance-label {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 10px;
+  flex: none;
+}
+
+.step__relevance-value {
+  display: inline-block;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 99px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 10px;
+  /* 16px + 1px сверху + 1px снизу = ровно 18px контейнера. С inherit было бы
+     18 + 2 = 20px, и с overflow: hidden пилюля обрезалась бы по нижней кромке. */
+  line-height: 16px;
+}
+
+.step__relevance-value--ok { background: var(--rel-ok-bg); color: var(--rel-ok-fg); }
+.step__relevance-value--warn { background: var(--rel-warn-bg); color: var(--rel-warn-fg); }
+.step__relevance-value--bad { background: var(--rel-bad-bg); color: var(--rel-bad-fg); }
+
 .step--accept { --step: var(--s-slate); }
 .step--policy { --step: var(--s-pink); }
 .step--escalate { --step: var(--s-amber); }
@@ -974,6 +1119,8 @@ html[data-theme="dark"] .step__icon { filter: invert(0.86); }
 }
 
 .linkish:hover { text-decoration: underline; }
+.linkish:active { color: var(--s-blue); }
+.linkish:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 
 /* ------------------------------------------------------------ кейсы и аналитика */
 
@@ -1661,6 +1808,54 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 /* OUTCOME: эскалация — заявка передана и назван срок ответа */
 .lettercard__lead { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
 
+/* --------------------------------------------- LEX-VISUAL-3: roles/lines/stats */
+
+/* Карточки ролей и направлений. В разметке — строки таблиц, оформляем их как карточки. */
+.role-card, .line-card,
+#screen-roles .wikitable tbody tr,
+#screen-lines .wikitable tbody tr {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 12px 14px;
+}
+
+.role-card:hover, .line-card:hover,
+#screen-roles .wikitable tbody tr:hover,
+#screen-lines .wikitable tbody tr:hover {
+  background: var(--panel-hover);
+  border-color: var(--border);
+}
+
+.role-card__title,
+#screen-roles .wikitable .linkish,
+#screen-lines .wikitable .linkish {
+  font: 400 16px/1.3 var(--font-serif);
+  color: var(--text);
+}
+
+.role-card__desc,
+#screen-roles .wikitable td {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+/* Аналитика: крупные значения и подписи. */
+.stat__value, #screen-stats .rate__num {
+  display: block;
+  font: 400 28px/1.1 var(--font-mono);
+  color: var(--text);
+}
+
+.stat__label, #screen-stats .rate__lbl {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.stat--ok .stat__value, #screen-stats .rate--answered .rate__num { color: var(--success); }
+.stat--warn .stat__value, #screen-stats .rate--caveated .rate__num { color: var(--s-amber); }
+
 .lettercard__meta { margin: 2px 0 0; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 10px; }
 .lettercard__meta dt { font-size: 11.5px; color: var(--text-2); }
 .lettercard__meta dd { margin: 0; font-size: 12.5px; color: var(--text); word-break: break-word; }
@@ -1798,7 +1993,8 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
 
 .btn__icon { display: block; width: 14px; height: 14px; }
 
-.btn--primary { display: inline-flex; align-items: center; gap: 6px; }
+/* Иконки вторичных кнопок в тёмной теме: чёрный штрих -> #242424, читается
+   на тёмной панели. primary перекрывает это своим правилом выше. */
 html[data-theme="dark"] .btn__icon { filter: invert(0.86); }
 
 .ico { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; margin-right: 4px; }
@@ -1948,4 +2144,48 @@ html[data-theme="dark"] .ico { filter: invert(0.86); }
   .composer__field { flex-direction: column; }
   .composer__field .btn { align-self: stretch; }
   .composer__hint { white-space: normal; }
+}
+
+/* доп. №9 / LEX-VISUAL-5: на телефоне консоль — выдвижная нижняя панель.
+   Блок стоит ПОСЛЕ 940px намеренно: при ≤900px действуют оба медиазапроса,
+   и здесь консоль переключается со sticky на fixed поверх ленты — она
+   перестаёт отнимать высоту у статьи. Свёрнутое состояние оставляет полосу
+   переключателя 44px: translateY(calc(100% - 44px)), а не display:none —
+   так анимация идёт transform'ом (композитор, без пересчёта layout).
+
+   #consolePanel здесь не скрываем: это делает правило 940px по .is-collapsed,
+   оставляя один источник истины для свёрнутости.
+
+   .app: разложить в колонку просили через flex-direction, но .app — display:grid,
+   и flex-direction на нём не действует. Одиночная колонка уже задана правилом
+   940px (grid-template-columns: minmax(0, 1fr)), поэтому здесь .app не трогаем:
+   смена grid на flex сломала бы grid-template-rows, на которых держится высота
+   .work (min-height: 66vh).
+
+   .work: консоль стала fixed и всегда занимает снизу 44px полосы переключателя
+   (в свёрнутом виде — ровно её). Без отступа внизу этот пояс перекрывал бы
+   композер, который лежит внутри .work. */
+@media (max-width: 900px) {
+  .console {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    max-height: 40vh;
+    border-top: 1px solid var(--border);
+    transition: transform 300ms var(--ease);
+  }
+  .console.is-collapsed { transform: translateY(calc(100% - 44px)); }
+
+  .console__toggle {
+    height: 44px;
+    padding: 0 16px;
+    font-weight: 600;
+  }
+
+  .infobox { margin: 8px; }
+
+  .work { padding-bottom: 44px; }
+  .work__inner { padding: 16px; }
 }
