@@ -1,6 +1,8 @@
 # ИИкузница — чек-лист открытия спринта (26.11 10:00 МСК)
 
-**Статус:** PREP phase — выполнение ровно в 10:00 при открытии спринта.
+**Статус:** PREP phase. Состояние на 26.11 09:40 — пункты 1, 2, 5, 6 пройдены
+фактически, 3–4 (локальный fallback) и 8 (embedding/reranker) не подняты;
+пункт 8 обязателен к 10:15. Подробности — `docs/SPRINT-READINESS-20261126.md`.
 **План по часам:** `docs/PLAN-48H.md` (48 часов, гейты 4/12/24/40/48).
 
 ---
@@ -10,7 +12,7 @@
 | # | Проверка | GO критерий | Как проверить | Ответственный |
 |---|---|---|---|---|
 | 1 | **NexusLink (sage-pl) доступен** — основной путь | `GET $NEXUS_LINK_BASE_URL/models` отвечает 200 (401/403 = шлюз жив, нужен токен) и `POST /v1/messages` даёт непустой ответ | `sh demo/run-local.sh --require-inference` (проверяет оба пути) | FORGE |
-| 2 | **Слот модели задан явно** | `$NEXUS_LINK_MODEL` непустой и не равен дефолту `claude-sonnet-5` (на sage-pl = 502) | `echo "$NEXUS_LINK_MODEL"` | FORGE |
+| 2 | **Слот модели задан явно** | `$NEXUS_LINK_MODEL` = `claude-sonnet-5` (проверено 26.11: единственный слот, что отвечает через наш вход; `mercury-3` не резолвится — уходит в OpenRouter nemotron) | `echo "$NEXUS_LINK_MODEL"` | FORGE |
 | 3 | **Fallback: локальная Qwen3-8B** | `curl http://127.0.0.1:8080/v1/models` → `Qwen3-8B-Instruct-Q4_K_M` | `curl -s http://127.0.0.1:8080/v1/models` | FORGE |
 | 4 | **VRAM ≤ 7.5 GB** (только для fallback) | `nvidia-smi` занято ≤ 7.5 из 8 GB | `nvidia-smi --query-gpu=memory.used,memory.total --format=csv` | FORGE |
 | 5 | **Dev-датасет не пустой** | `sample-corpus/` — корпус собран, вопросов ≥ 20 | `sh demo/run-local.sh` проходит preflight | CODEX |
