@@ -65,10 +65,11 @@ def frame(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def step(n: int, key: str, detail: str, ms: int) -> str:
+def step(n: int, key: str, detail: str, ms: int, total: int | None = None) -> str:
+    frame_total = total if total and total > 0 else len(_ORDER)
     return frame("step", {
         "n": n,
-        "total": total(),
+        "total": frame_total,
         "key": key,
         "title": _TITLE.get(key, key),
         "detail": detail,

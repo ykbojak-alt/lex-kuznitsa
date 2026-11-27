@@ -51,7 +51,7 @@ _MODEL_PUBLIC_MAP = {
     "claude-opus-4-7": "deepseek-4.1-flash",
     "claude-sonnet-4-7": "qwen-3.8-27b",
     "claude-sonnet-5": "ernie-5.5-flash",
-    "claude-opus-4-6": "deepseek-4.0-flash",
+    "claude-opus-4-6": "deepseek-4.1-flash",
 }
 
 

@@ -750,7 +750,8 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                         "top_cosine": rec.get("top_cosine"),
                     }
                 yield sse.step(int(data.get("n", 0)), str(data.get("key", "")),
-                               str(data.get("detail", "")), int(data.get("ms", 0) or 0))
+                               str(data.get("detail", "")), int(data.get("ms", 0) or 0),
+                               total=int(data.get("total", 0) or 0) or None)
             elif kind == "answer":
                 citations = [c for c in (data.get("citations") or [])
                              if isinstance(c, dict)]
