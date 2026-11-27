@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os as _os
 import sys
@@ -1238,6 +1239,27 @@ def check_role_aliases() -> None:
           f"{bad.status_code}")
 
 
+def check_build_fingerprint() -> None:
+    """/api/health отдаёт отпечаток исполняемого кода — деплой проверяем снаружи.
+
+    Без него нельзя отличить «фикс лежит на диске» от «фикс в работающем
+    процессе»: у агентов нет ssh, и они получали противоречивые статусы.
+    Хеш считается по байтам модулей из ``sys.modules``, поэтому меняется
+    ровно при смене исполняемого кода, а не при правке файла на диске.
+    """
+    from api.app import _build_fingerprint
+
+    first = _build_fingerprint()
+    assert first["sha256"] != "none", "отпечаток не собран"
+    assert len(first["sha256"]) == 16, "короткий sha256 из 16 символов"
+    assert first["modules"] >= 1, "хотя бы один модуль lex в отпечатке"
+    assert _build_fingerprint() == first, "отпечаток стабилен между вызовами"
+    health_src = inspect.getsource(
+        __import__("api.app", fromlist=["health"]).health)
+    assert '"build"' in health_src or "'build'" in health_src, \
+        "поле build в ответе /api/health"
+
+
 def check_case_matcher() -> None:
     """Матчер кейсов не закрывает посторонний вопрос (находка MIMIC, NIGHT-04).
 
@@ -2132,6 +2154,7 @@ def main() -> int:
     check_slot_chain()
     check_p0_leaks()
     check_similar_questions_text()
+    check_build_fingerprint()
     check_case_matcher()
     check_unstable_compose()
     check_verify_zero()

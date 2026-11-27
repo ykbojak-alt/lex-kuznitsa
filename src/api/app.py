@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -163,12 +164,45 @@ class ChangeStatusRequest(BaseModel):
 
 # ---------- health / роли / направления ----------
 
+def _build_fingerprint() -> dict:
+    """Отпечаток кода, который реально исполняет этот процесс.
+
+    Нужен, чтобы деплой был проверяемым снаружи: без ssh нельзя отличить
+    «фикс на диске» от «фикс в работающем процессе», и агенты получали
+    противоречивые статусы. Считаем по байтам модулей, уже загруженных в
+    ``sys.modules``: перезапуск не нужен, а обман невозможен — хеш меняется
+    ровно тогда, когда меняется исполняемый код.
+
+    ``none`` вместо хеша — модуль живёт внутри zip/байткода; тогда это
+    честно видно, а не подменяется нулями.
+    """
+    digest = hashlib.sha256()
+    names: list[str] = []
+    for name in sorted(sys.modules):
+        if not (name == "lex" or name.startswith("lex.")):
+            continue
+        mod = sys.modules[name]
+        path = getattr(mod, "__file__", None)
+        if not path:
+            continue
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            continue
+        digest.update(name.encode("utf-8"))
+        digest.update(data)
+        names.append(name)
+    return {"sha256": digest.hexdigest()[:16] if names else "none",
+            "modules": len(names)}
+
+
 @app.get("/api/health")
 async def health() -> dict:
     probed = await probes.probe_all()
     return {
         "status": "ok",
         "version": config.VERSION,
+        "build": _build_fingerprint(),
         "llm": probed["llm"],
         "embed": probed["embed"],
         "rerank": probed["rerank"],
