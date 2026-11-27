@@ -110,8 +110,12 @@ def main() -> int:
     for line in oks:
         print(f"OK   {line}")
     for line in fails:
-        print(f"FAIL {line}")
-    print(f"\nИТОГ: {len(oks)} OK · {len(fails)} FAIL")
+        print(f"провал: {line}")
+    # Формат итога — контракт check-all.py (регулярка _RE_TOTALS): без него
+    # успешный прогон читается как «не дошёл до итога», то есть как провал.
+    # Проверено вызовом через check-all._run: с прежней строкой «ИТОГ: …»
+    # здоровый страж давал failed=['… не дошёл до итога (код 0)'].
+    print(f"{len(oks)} passed, {len(fails)} failed")
     return 1 if fails else 0
 
 

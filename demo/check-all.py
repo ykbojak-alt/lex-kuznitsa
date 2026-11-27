@@ -8,7 +8,9 @@
 
 1. ``demo/check-core.py`` — самопроверка ядра: каскад, policy, барьеры,
    тикеты, кейсы, гейт §12.8, критерий 3, журнал, алиасы ролей.
-2. ``demo/check-stability.py`` — стабильность ответов на повторных прогонах.
+2. ``tools/check-doc-counts.py`` — числа в доке о блоке ``build`` сверяются
+   с живым ответом ``/api/health``, а не с памятью автора.
+3. ``demo/check-stability.py`` — стабильность ответов на повторных прогонах.
 
 Итог разделён на три корзины, и это главное:
 
@@ -181,6 +183,15 @@ def main(argv: list[str] | None = None) -> int:
     core = _run("demo/check-core.py", [], timeout=args.timeout)
     results.append(core)
     _print_block(core)
+
+    # Доки о блоке build сверяются с ответом API, а не с памятью: за ночь
+    # 27.11 число в этом абзаце трижды не выводилось из того, что считало
+    # (24 модуля, «Шесть полей» при восьми, «Восемь» при девяти). Страж
+    # FORGE; печатает формат «N passed, M failed» — контракт этого раннера,
+    # иначе успешный прогон читается как «не дошёл до итога».
+    docs = _run("tools/check-doc-counts.py", [], timeout=args.timeout)
+    results.append(docs)
+    _print_block(docs)
 
     unstable = 0
     if not args.fast:
