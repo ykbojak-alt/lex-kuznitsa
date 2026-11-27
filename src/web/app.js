@@ -475,6 +475,7 @@
     if (!ticketsAllowed()) {
       pendingTicket = tid;
       goScreen('chat');
+      updateHint();
       return;
     }
     pendingTicket = '';
