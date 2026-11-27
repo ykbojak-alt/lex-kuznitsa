@@ -1455,6 +1455,34 @@ def check_build_fingerprint() -> None:
           source_changed["source_sha256"] == first["source_sha256"],
           "деплой доказывается по отдаваемому, а не по исходнику")
 
+    # ИКОНКА: набор из фиксированного списка файлов не покрывал static/assets/
+    # — 25 файлов и 5,6% клиента, и правка иконки хеш не двигала. Отпечаток
+    # теперь обходит каталог, поэтому обязан ловить и её. Проверка КРАСНЕЕТ на
+    # списочном наборе — без этого она бесполезна (требование NEO).
+    icon = None
+    for _p in sorted(served.rglob("*.svg")):
+        icon = _p
+        break
+    if icon is not None:
+        _orig_icon = _app2._fingerprint_of
+        _icon_marker = str(icon).replace("\\", "/")
+
+        def _patched_icon(path, _orig=_orig_icon, _mark=_icon_marker):
+            data = _orig(path)
+            if path and path.replace("\\", "/").endswith(_mark.split("/static/")[-1]) \
+                    and "/static/" in path.replace("\\", "/"):
+                return (data or b"") + b"\n<!-- probe -->\n"
+            return data
+
+        _app2._fingerprint_of = _patched_icon
+        try:
+            icon_changed = _build_fingerprint()
+        finally:
+            _app2._fingerprint_of = _orig_icon
+        check("сборка: правка ОТДАВАЕМОЙ иконки видна в source_sha256",
+              icon_changed["source_sha256"] != first["source_sha256"],
+              f"{icon.name}: assets входят в отпечаток, а не только шесть файлов")
+
 
 def check_ticket_delivery_truth() -> None:
     """Карточка заявки говорит про доставку правду, а не «simulated» (MIMIC, камень 18).
