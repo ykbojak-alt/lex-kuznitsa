@@ -44,6 +44,10 @@ _RE_XPASS = re.compile(r"^помечено xfail, но уже зелено.*: (.
 # не отвечает. Это НЕ провал кода, и в сводке их надо отделить от «баг
 # чинится кем-то».
 _RE_ENV_DOWN = re.compile(r"^внимание: модель не отвечает .*?Причина: (.+)$")
+# Маркер завершения негейтящего набора: check-stability не печатает строку
+# «N passed, M failed» (его итог — нестабильность, а не корзины), поэтому
+# «дошёл до конца» у него — напечатанный путь к отчёту последней строкой.
+_RE_STAB_DONE = re.compile(r"^отчёт: ")
 
 
 class Result:
@@ -56,13 +60,17 @@ class Result:
         self.returncode = 0
         self.output = ""
         self.env_down = ""
+        # Дошёл ли прогон до строки итога. Без этого флага упавший ребёнок
+        # (необработанное исключение -> exit=1, пустые корзины) неотличим от
+        # прогона без провалов, и сводка печатает ложное «всё зелено».
+        self.saw_totals = False
 
     @property
     def ok(self) -> bool:
         return not self.failed
 
 
-def _run(script: str, args: list[str], *, timeout: int) -> Result:
+def _run(script: str, args: list[str], *, timeout: int, gating: bool = True) -> Result:
     r = Result(Path(script).stem)
     cmd = [PY, str(ROOT / script), *args]
     # Дочерний процесс печатает в pipe консольной кодировкой Windows (cp1251),
@@ -80,6 +88,7 @@ def _run(script: str, args: list[str], *, timeout: int) -> Result:
         r.returncode = 124
         r.output = f"таймаут {timeout} с"
         r.failed = [f"{script}: не уложился в {timeout} с"]
+        r.saw_totals = True  # это уже осмысленный провал, не «упал молча»
         return r
     r.returncode = proc.returncode
     r.output = (proc.stdout or "") + (proc.stderr or "")
@@ -88,6 +97,7 @@ def _run(script: str, args: list[str], *, timeout: int) -> Result:
         m = _RE_TOTALS.match(line)
         if m:
             r.passed = int(m.group(1))
+            r.saw_totals = True
             continue
         m = _RE_FAIL.match(line)
         if m:
@@ -104,7 +114,23 @@ def _run(script: str, args: list[str], *, timeout: int) -> Result:
         m = _RE_ENV_DOWN.match(line)
         if m:
             r.env_down = m.group(1).strip()
-    if r.returncode not in (0, 1):
+            continue
+        if not gating and _RE_STAB_DONE.match(line):
+            r.saw_totals = True
+    # Python выходит с кодом 1 и на необработанном исключении, и на «есть
+    # провалы». Различить их по коду нельзя: если ребёнок упал, он не дошёл
+    # до строки итога, и три корзины остались пустыми — тогда прогон ложный
+    # зелёный. Поэтому отсутствие итога само по себе провал.
+    if not r.saw_totals:
+        r.failed = r.failed or [f"{script}: прогон не дошёл до итога (код {r.returncode})"]
+    elif gating and r.returncode == 1 and not r.failed:
+        # Гейтящий скрипт кодом 1 сообщает ровно «есть настоящие провалы» и
+        # печатает их строкой «провал:». Код 1 без разобранного списка —
+        # признак побитого вывода, а не «провалов нет». Не гейтящий
+        # check-stability кодом 1 сообщает нестабильность и строки «провал:»
+        # не печатает вовсе — его так краснить нельзя (её считает --strict).
+        r.failed = [f"{script}: код 1, но список провалов не разобран"]
+    elif r.returncode not in (0, 1):
         r.failed = r.failed or [f"{script}: код {r.returncode}"]
     return r
 
@@ -161,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         stab = _run("demo/check-stability.py",
                     ["--questions", str(args.questions), "--runs", str(args.runs),
                      *(["--no-llm"] if args.no_llm else [])],
-                    timeout=args.timeout)
+                    timeout=args.timeout, gating=False)
         _print_block(stab)
         for line in stab.output.splitlines():
             if "нестабильных" in line:
