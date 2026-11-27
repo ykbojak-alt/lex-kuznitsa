@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import logging
 import re
@@ -58,6 +59,45 @@ def _subject(question: str) -> str:
     return f"[LEX] Вопрос без ответа в базе: {text}"
 
 
+# Обвязка одного encoded-word: "=?utf-8?b?" + "?=" — 12 символов.
+_ENCODED_WORD_OVERHEAD = 12
+
+
+def encode_subject(text: str, max_word_bytes: int = 42) -> str:
+    """Закодировать тему по RFC 2047 так, чтобы фолдинг не съел пробелы.
+
+    Стандартный генератор Python 3.12 режет заголовок ровно по пробелу и
+    получает два соседних encoded-word, а RFC 2047 §6.2 требует выбрасывать
+    пробел между ними. В Mailpit тема приходила как «годовойпремии»: буквы
+    на месте, а пробел на стыке исчез. Поэтому режем сами и пробел на границе
+    кладём внутрь предыдущего слова — тогда он кодируется вместе с текстом и
+    декодируется обратно.
+
+    Чистый ASCII возвращается как есть: кодировать нечего.
+    """
+    if not text:
+        return ""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_word_bytes:
+        return f"=?utf-8?b?{base64.b64encode(raw).decode('ascii')}?="
+
+    chunks: list[bytes] = []
+    start = 0
+    while start < len(raw):
+        end = min(start + max_word_bytes, len(raw))
+        # Не разрывать многобайтовый символ: откатываемся к его началу.
+        while start < end < len(raw) and (raw[end] & 0xC0) == 0x80:
+            end -= 1
+        # Пробел на границе переносим в текущее слово: иначе он окажется
+        # разделителем двух encoded-word и будет отброшен при декодировании.
+        while end < len(raw) and raw[end] == 0x20:
+            end += 1
+        chunks.append(raw[start:end])
+        start = end
+
+    return " ".join(f"=?utf-8?b?{base64.b64encode(c).decode('ascii')}?=" for c in chunks)
+
+
 def send_letter(ticket: dict, to: str, sender: str, cc: str | None = None,
                 body: str | None = None) -> str:
     """Отправить письмо по SMTP. Возвращает фактический режим доставки.
@@ -74,7 +114,7 @@ def send_letter(ticket: dict, to: str, sender: str, cc: str | None = None,
     msg["To"] = to
     if cc:
         msg["Cc"] = cc
-    msg["Subject"] = _subject(ticket.get("question", ""))
+    msg["Subject"] = encode_subject(_subject(ticket.get("question", "")))
     msg.set_content(body or letter_body(ticket))
     try:
         with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10) as srv:
