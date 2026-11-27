@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os as _os
@@ -1249,15 +1250,43 @@ def check_build_fingerprint() -> None:
     """
     from api.app import _build_fingerprint
 
+    # Через check(), а не assert: упавший assert уронил бы весь прогон
+    # трейсбеком вместо одной строки FAIL, а под `python -O` проверки
+    # исчезли бы молча — обе поломки хуже самого дефекта.
     first = _build_fingerprint()
-    assert first["sha256"] != "none", "отпечаток не собран"
-    assert len(first["sha256"]) == 16, "короткий sha256 из 16 символов"
-    assert first["modules"] >= 1, "хотя бы один модуль lex в отпечатке"
-    assert _build_fingerprint() == first, "отпечаток стабилен между вызовами"
+    check("сборка: отпечаток собран из 16 символов",
+          first["sha256"] != "none" and len(first["sha256"]) == 16,
+          f"{first['sha256']!r}, {len(first['sha256'])} символов")
+
+    check("сборка: в отпечаток попал хотя бы один модуль",
+          first["modules"] >= 1, f"модулей {first['modules']}")
+
+    check("сборка: отпечаток стабилен между вызовами",
+          _build_fingerprint() == first,
+          "одинаковые байты кода — одинаковый хеш")
+
+    # ГЛАВНОЕ свойство: одинаковый код на Windows (CRLF) и Linux (LF) даёт
+    # ОДИН хеш. Без нормализации переводов строк стенд и локаль расходились,
+    # и по полю build нельзя было понять, задеплоен ли тот же код.
+    #
+    # Осторожно: `core.autocrlf=true` держит рабочую копию в CRLF, поэтому
+    # нельзя брать файл и делать replace(b"\n", b"\r\n") — получится CRCRLF,
+    # и «нормализация не работает» окажется ложной тревогой. Сравниваем две
+    # версии ОДНОГО содержимого: сначала в LF, потом в CRLF.
+    src_lex = Path(__file__).resolve().parents[1] / "src" / "lex" / "orchestrator.py"
+    if src_lex.exists():
+        lf = src_lex.read_bytes().replace(b"\r\n", b"\n")
+        crlf = lf.replace(b"\n", b"\r\n")
+        norm = lambda b: hashlib.sha256(b.replace(b"\r\n", b"\n")).digest()  # noqa: E731
+        check("сборка: CRLF и LF дают один отпечаток",
+              norm(lf) == norm(crlf),
+              f"LF {norm(lf).hex()[:12]} · CRLF {norm(crlf).hex()[:12]}")
+
     health_src = inspect.getsource(
         __import__("api.app", fromlist=["health"]).health)
-    assert '"build"' in health_src or "'build'" in health_src, \
-        "поле build в ответе /api/health"
+    check("сборка: поле build в ответе /api/health",
+          '"build"' in health_src or "'build'" in health_src,
+          "деплой проверяется одной командой curl")
 
 
 def check_case_matcher() -> None:
