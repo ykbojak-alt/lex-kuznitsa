@@ -191,10 +191,16 @@ def vector_state() -> dict:
         if not cache.exists():
             return {"ready": False, "reason": "кэш не собран",
                     "chunks": len(getattr(c, "chunks", []) or []), "cache": "нет файла"}
-        # Та же точка входа, что у поиска: SearchIndex из кэша индексов, без
-        # переиндексации BM25 на каждый /api/health (FORGE-R13: было 180-200 мс
-        # против 2.6 мс, рост в 159 раз).
-        idx = get_index_multi(*roots[:2])
+        # Та же точка входа, что у поиска (orchestrator.index), и сверка не с
+        # манифестом, а с тем, что поиск реально видит: третий корень, другой
+        # порядок, иной chunker — любой источник расхождения даёт ready=False,
+        # а не только «корней > 2» (FORGE-R16). Переиндексации BM25 тут нет
+        # (FORGE-R13: было 180-200 мс против 3 мс).
+        idx = get_index_multi(roots[0], roots[1] if len(roots) > 1 else None)
+        n_corpus = len(getattr(c, "chunks", []) or [])
+        if len(idx.chunks) != n_corpus:
+            return {"ready": False, "chunks": n_corpus, "vectors": len(idx.chunks),
+                    "reason": f"индекс видит {len(idx.chunks)} чанков, корпус {n_corpus}"}
         vecs = idx._load_cache()
         n_chunks = len(idx.chunks)
         try:

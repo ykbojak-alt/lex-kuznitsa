@@ -407,6 +407,7 @@ class Orchestrator:
         self._frames: list[Frame] = []
         self._t0 = time.monotonic()
         self._timeline: dict[str, int] = {}
+        self._emitted_steps = 0
         self._dlg: Dialogue | None = None
         self._auto_session: str = ""
         # Число шагов прогона: из STEP_ORDER убираются стадии без данных
@@ -466,7 +467,7 @@ class Orchestrator:
         вместо verify.
         """
         state: dict = {}
-        yield Signal("step", self._stage_accept(1, state))
+        yield self._emit(self._stage_accept(1, state))
         # §17: policy — первый содержательный шаг, ДО всякого поиска. Если
         # вопрос не наш или роли не положено, дальше не идём вовсе: «не ищем»,
         # а не «нашли, но не покажем».
@@ -477,7 +478,7 @@ class Orchestrator:
         # спрашивал направление у сотрудника, хотя оно названо в самом
         # вопросе — уточнение там, где ответ уже есть.
         stage = self._stage_policy(2, state)
-        yield Signal("step", stage.event)
+        yield self._emit(stage.event)
         if stage.signal is not None:
             # §17.6: `out_of_scope` НЕ эскалируется — службе качества нечего
             # разбирать в вопросе про НДС. Эскалация — только для
@@ -488,7 +489,7 @@ class Orchestrator:
             return
         clarify = self._stage_clarify(3, state)
         if clarify is not None:
-            yield Signal("step", self._clarify_step(3, state))
+            yield self._emit(self._clarify_step(3, state))
             yield clarify
             return                      # §10: после clarify поток закрывается
         async for sig in self._run_stages(state):
@@ -499,7 +500,7 @@ class Orchestrator:
             decision = self._escalation_decision(state)
             if decision.questions:
                 state["clarify_questions"] = decision.questions
-                yield Signal("step", self._clarify_step(self._total() + 1, state))
+                yield self._emit(self._clarify_step(self._total() + 1, state))
                 yield Signal("clarify", ClarifyData(
                     session_id=self._session_id(),
                     questions=[ClarifyQuestion(**q.to_dict()) for q in decision.questions],
@@ -509,7 +510,7 @@ class Orchestrator:
                 return                  # §10: ждём ответа, поток закрывается без done
             ticket = decision.escalate or {}
             # §15.3: эскалация — последним шагом, вместо verify.
-            yield Signal("step", self._escalate_step(self._total(), ticket))
+            yield self._emit(self._escalate_step(self._total(), ticket))
             yield Signal("escalate", self.dialogue.escalate_event(ticket))
             yield Signal("done", self._done())
             return
@@ -571,7 +572,7 @@ class Orchestrator:
                     stop_evs = [single] if single is not None else []
                 for ev in stop_evs:
                     self._timeline[ev.key] = _now_ms(t_stage)
-                    yield Signal("step", ev)
+                    yield self._emit(ev)
                 state["final"] = ("done", None)
                 return
             if isinstance(outcome, Signal):
@@ -583,7 +584,7 @@ class Orchestrator:
                     return
             elif isinstance(outcome, StepEvent):
                 self._timeline[key] = _now_ms(t_stage)
-                yield Signal("step", outcome)
+                yield self._emit(outcome)
                 if "final" in state:
                     final = state.pop("final")
                     kind, payload = final
@@ -654,6 +655,18 @@ class Orchestrator:
             kind=kind,
             business_line=state.get("line"),
         )
+
+    def _emit(self, ev: StepEvent) -> Signal:
+        """Единственная точка выдачи шага: сквозной номер = номер выданного.
+
+        Раньше эскалация получала n = self._total(), хотя промежуточные стадии
+        не выполнялись: номера шли 1, 2, 3, 4, 5, 9 — гейт «n сквозной 1..N»
+        падал на реальном ответе (28.11, сгенерированный корпус). Номер обязан
+        считать выданные шаги, а не план каскада.
+        """
+        self._emitted_steps += 1
+        ev.n = self._emitted_steps
+        return Signal("step", ev)
 
     def _escalate_step(self, n: int, ticket: dict) -> StepEvent:
         """§15.3: шаг эскалации — цвет orange, последний, вместо verify."""

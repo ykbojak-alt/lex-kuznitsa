@@ -532,7 +532,7 @@ def main() -> int:
     global CORPUS, QUESTIONS
     if args.corpus:
         CORPUS = Path(args.corpus).resolve()
-        QUESTIONS = CORPUS / "questions.jsonl"
+    QUESTIONS = CORPUS / "questions.jsonl"
 
     has_key = load_env()
     if not has_key:
@@ -582,7 +582,7 @@ def main() -> int:
 
         questions = _pick_corpus(args.questions)
         if not questions:
-            bad("вопросы корпуса загружены", f"нет {QUESTIONS}")
+            bad("вопросы корпуса загружены", f"нет {QUESTIONS} (CORPUS={CORPUS})")
             return 1
 
         corpus_ok = run_corpus_questions(base, questions)
