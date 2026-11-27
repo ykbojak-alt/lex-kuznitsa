@@ -67,10 +67,11 @@ jobs:
           if [ -d tests ] && [ -n "$(ls -A tests 2>/dev/null)" ]; then
             python -m pytest -q
           fi
-          # Сами проверки ядра живут в demo/check-*.py (pytest-тестов нет).
+          # Проверки ядра живут в demo/check-*.py (pytest-тестов нет).
           # Офлайн-набор: без модели, без сервера, без сети.
+          # check-articles.py не входит: он читает corpus-real/, а тот не в git
+          # (публичный репозиторий) — в CI его нет и быть не может.
           python demo/check-refusal-markers.py
-          python demo/check-articles.py
           python demo/check-pipeline.py --no-llm
 
   build:
