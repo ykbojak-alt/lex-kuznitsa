@@ -85,7 +85,11 @@ _corpus_cache: dict[str, Any] = {}
 
 
 def corpus():
-    """Загруженный корпус ядра (кэш по корневому каталогу)."""
+    """Загруженный корпус ядра (кэш по корневому каталогу).
+
+    По §12 загружает corpus-real + corpus-norm (внешние нормативные акты)
+    через load_corpus_multi; если norm-корня нет — только corpus-real.
+    """
     key = str(config.CORPUS_DIR.resolve())
     if key in _corpus_cache:
         return _corpus_cache[key]
@@ -93,9 +97,13 @@ def corpus():
     if m is None or not hasattr(m, "load_corpus"):
         return None
     try:
-        c = m.load_corpus(config.CORPUS_DIR)
+        roots = [config.CORPUS_DIR]
+        norm_dir = getattr(config, "CORPUS_NORM_DIR", None)
+        if norm_dir and norm_dir.exists():
+            roots.append(norm_dir)
+        c = m.load_corpus_multi(roots)
     except Exception:
-        return None
+        c = m.load_corpus(config.CORPUS_DIR)
     _corpus_cache[key] = c
     return c
 
