@@ -1299,6 +1299,37 @@ def check_build_fingerprint() -> None:
           edited["source_sha256"] == "0000000000000000",
           edited["source_sha256"])
 
+    # ЖИВОЙ замер: подменяем ЧТЕНИЕ ФАЙЛА в памяти (_fingerprint_of), диск не
+    # трогаем. Проверки выше гоняют чистую _fingerprint_report, то есть
+    # проверяют формулу, а не саму _build_fingerprint: если её вернуть к
+    # чтению диска на каждый запрос — все они останутся зелёными (проверено
+    # откатом: 10/10 OK на сломанной реализации — нашла FORGE). Здесь
+    # подменяется только источник байтов, исполняемое поведение — настоящее.
+    import api.app as _app
+
+    _orig_fp = _app._fingerprint_of
+
+    def _patched_fp(path):
+        data = _orig_fp(path)
+        if path and path.endswith("orchestrator.py"):
+            return (data or b"") + b"\n# probe\n"
+        return data
+
+    _app._fingerprint_of = _patched_fp
+    try:
+        live = _build_fingerprint()
+    finally:
+        _app._fingerprint_of = _orig_fp
+    check("сборка: ЖИВОЙ замер — правка диска не меняет исполняемый отпечаток",
+          live["sha256"] == first["sha256"],
+          f"{first['sha256']} -> {live['sha256']}")
+    check("сборка: ЖИВОЙ замер — дрейф поднялся",
+          live["source_drift"] is True,
+          "байты в процессе != байты на диске")
+    check("сборка: ЖИВОЙ замер — возврат чтения снимает дрейф",
+          _build_fingerprint()["source_drift"] is False,
+          "чтение восстановлено, дрейфа нет")
+
     # CRLF/LF: одинаковый код на Windows и Linux обязан давать один хеш.
     # Только чтение — файл в общий src/ не пишем.
     src_lex = Path(__file__).resolve().parents[1] / "src" / "lex" / "orchestrator.py"
