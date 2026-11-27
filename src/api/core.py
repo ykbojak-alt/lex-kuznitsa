@@ -767,7 +767,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                 # §5 S3 заказчика: письмо должно РЕАЛЬНО уйти, а не нарисоваться.
                 # Отправка не роняет ответ: сбой SMTP даёт delivery=failed, и
                 # карточка честно говорит, что письмо не ушло.
-                payload["email"] = mail.deliver({
+                letter = mail.deliver({
                     "id": payload.get("ticket_id") or "",
                     "question": question,
                     "created_at": entry["ts"],
@@ -776,6 +776,15 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                     "kind": payload.get("kind") or "",
                     "asker": {"role_id": role_id, "business_line": business_line or ""},
                 })
+                payload["email"] = letter
+                # Факт доставки сохраняем в тикете. Иначе карточка заявки
+                # собирается заново с дефолтом «simulated» и врёт: письмо
+                # ушло по SMTP, а человек читает «демонстрационный режим».
+                if payload.get("ticket_id") and letter.get("delivery"):
+                    with contextlib.suppress(Exception):
+                        from . import tickets as _tickets_mod
+                        _tickets_mod._patch_ticket(
+                            str(payload["ticket_id"]), delivery=letter["delivery"])
                 yield sse.escalate(payload)
             elif kind == "error":
                 raise RuntimeError(str(data.get("message", "ошибка ядра")))

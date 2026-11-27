@@ -191,8 +191,13 @@ def ticket_link(ticket: dict) -> str:
     return f"{base}/#ticket={quote(tid)}"
 
 
-def email_block(ticket: dict, delivery: str = "simulated") -> dict:
-    """§22.2: блок письма для карточки. `delivery` — фактический исход."""
+def email_block(ticket: dict, delivery: str = "") -> dict:
+    """§22.2: блок письма для карточки. `delivery` — фактический исход.
+
+    Без явного значения берём сохранённый в тикете факт доставки: карточка
+    открывается заново каждый раз, и если бы она подставляла «simulated»
+    по умолчанию, то врала бы о реально отправленном письме (нашла MIMIC).
+    """
     asker = ticket.get("asker") or {}
     sent_at = ticket.get("created_at") or _now()
     sender = config.employee_email(str(asker.get("role_id") or ""))
@@ -202,12 +207,12 @@ def email_block(ticket: dict, delivery: str = "simulated") -> dict:
         "cc": sender,
         "subject": _subject(ticket.get("question", "")),
         "sent_at": sent_at,
-        "delivery": delivery,
+        "delivery": delivery or str(ticket.get("delivery") or "simulated"),
         "ticket_url": ticket_link(ticket),
     }
 
 
-def decorate(ticket: dict, delivery: str = "simulated") -> dict:
+def decorate(ticket: dict, delivery: str = "") -> dict:
     """Тикет + поля письма. Используется и в /api/tickets, и в SSE escalate."""
     out = dict(ticket)
     out["channel"] = "email"

@@ -1343,6 +1343,99 @@ def check_case_matcher() -> None:
           "общие только «оформл» и «объект»")
 
 
+def check_ticket_delivery_truth() -> None:
+    """Карточка заявки говорит про доставку правду, а не «simulated» (MIMIC, камень 18).
+
+    Письмо уходит по SMTP (Mailpit), эскалация сохраняет фактический исход в
+    заявку, но карточка читалась заново и рисовала дефолт «simulated» —
+    человек читал «демонстрационный режим» при реально отправленном письме.
+
+    Инварианты:
+      * нет сохранённого факта — «simulated» (не врём в другую сторону);
+      * сохранён «sent»/«failed» — карточка показывает именно его;
+      * явный аргумент сильнее сохранённого (нужно SSE, где исход только что).
+    """
+    import os as _os
+
+    from api import mail, tickets
+
+    saved = _os.environ.get("LEX_VAR_DIR")
+    tmp = tempfile.mkdtemp()
+    _os.environ["LEX_VAR_DIR"] = tmp
+    try:
+        row = tickets.create_ticket({"question": "Кто отвечает за пожарную безопасность?",
+                                     "kind": "not_in_corpus", "session_id": "t-deliv"})
+        tid = row["id"]
+
+        check("delivery: без факта карточка честно говорит «simulated»",
+              mail.decorate(tickets.get_ticket(tid))["email"]["delivery"] == "simulated",
+              "дефолт не выдумывает доставку")
+
+        tickets._patch_ticket(tid, delivery="sent")
+        check("delivery: сохранённый «sent» доходит до карточки",
+              mail.decorate(tickets.get_ticket(tid))["email"]["delivery"] == "sent",
+              "письмо ушло по SMTP — карточка это показывает")
+
+        tickets._patch_ticket(tid, delivery="failed")
+        check("delivery: сохранённый «failed» не подменяется на «simulated»",
+              mail.decorate(tickets.get_ticket(tid))["email"]["delivery"] == "failed",
+              "сбой SMTP виден в карточке")
+
+        check("delivery: явный аргумент сильнее сохранённого",
+              mail.decorate(tickets.get_ticket(tid), delivery="sent")
+              ["email"]["delivery"] == "sent",
+              "SSE знает исход раньше, чем он записан")
+    finally:
+        if saved is None:
+            _os.environ.pop("LEX_VAR_DIR", None)
+        else:
+            _os.environ["LEX_VAR_DIR"] = saved
+
+
+def check_delivery_truth() -> None:
+    """Карточка письма говорит правду о доставке (находка MIMIC).
+
+    Письмо уходило по SMTP, но карточка заявки показывала «демонстрационный
+    режим»: ``delivery`` жил только в SSE-событии эскалации, а карточка
+    собиралась заново с дефолтом ``simulated``. Плюс клиент рисовал строку
+    про демо-режим ВСЕГДА, не глядя на поле.
+
+    Проверяем три вещи: факт доставки сохраняется в тикете, ``email_block``
+    берёт его оттуда, а клиент рисует строку по значению.
+    """
+    from api import mail as mail_mod
+
+    ticket = {"id": "LEX-0001", "question": "Вопрос",
+              "asker": {"role_id": "director"}, "delivery": "sent"}
+    block = mail_mod.email_block(ticket)
+    check("письмо: карточка берёт сохранённый факт доставки",
+          block["delivery"] == "sent",
+          f"delivery={block['delivery']!r} (у тикета sent)")
+
+    without = mail_mod.email_block({"id": "LEX-0002", "question": "Вопрос"})
+    check("письмо: без сохранённого факта — simulated, а не выдумка",
+          without["delivery"] == "simulated",
+          f"delivery={without['delivery']!r}")
+
+    explicit = mail_mod.email_block(ticket, delivery="failed")
+    check("письмо: явный исход сильнее сохранённого",
+          explicit["delivery"] == "failed",
+          f"delivery={explicit['delivery']!r}")
+
+    core_src = (Path(__file__).resolve().parents[1]
+                / "src" / "api" / "core.py").read_text(encoding="utf-8")
+    check("письмо: эскалация сохраняет факт доставки в тикете",
+          "delivery=letter" in core_src.replace(" ", "") or
+          "delivery=letter[" in core_src,
+          "в core.py есть _patch_ticket(delivery=...)")
+
+    web_src = (Path(__file__).resolve().parents[1]
+               / "src" / "web" / "app.js").read_text(encoding="utf-8")
+    check("письмо: клиент различает sent/failed/simulated",
+          "mail__demo--ok" in web_src and "mail__demo--fail" in web_src,
+          "строка про доставку рисуется по значению")
+
+
 def check_similar_questions_text() -> None:
     """«Часто спрашивают» отдаёт САМ вопрос, а не только счётчик.
 
@@ -2199,6 +2292,7 @@ def main() -> int:
     check_slot_chain()
     check_p0_leaks()
     check_similar_questions_text()
+    check_ticket_delivery_truth()
     check_build_fingerprint()
     check_case_matcher()
     check_unstable_compose()
