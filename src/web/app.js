@@ -45,6 +45,20 @@
 
   /* ------------------------------------------------------------------ утилиты */
 
+  /* Роль запоминается в localStorage: сотрудник качества возвращается по
+     ссылке из письма и не должен каждый раз выбирать роль заново. Чужой
+     cookie-контекст тут ни при чём — это локальная настройка браузера, а
+     доступ всё равно проверяет сервер. */
+  var ROLE_KEY = 'lex.role';
+
+  function rememberRole(id) {
+    try { global.localStorage.setItem(ROLE_KEY, id || ''); } catch (e) { /* private mode */ }
+  }
+
+  function storedRole() {
+    try { return global.localStorage.getItem(ROLE_KEY) || ''; } catch (e) { return ''; }
+  }
+
   /* Иконка из assets/ (CODEX): узкая обёртка, чтобы не тянуть разметку в каждый рендер. */
   function icon(name, cls) {
     var img = doc.createElement('img');
@@ -333,6 +347,7 @@
   function makeRolePicker(id) {
     return function () {
       state.roleId = id;
+      rememberRole(id);
       // §23: кейсы отбираются по роли — кеш прошлой роли показывал бы чужие.
       state.caseCache = null;
       state.caseMeta = null;
@@ -340,6 +355,7 @@
       updateHint();
       renderRolesScreen();
       refreshTicketNav();
+      openPendingTicket();
     };
   }
   function makeLinePicker(id) {
@@ -358,7 +374,9 @@
   function updateHint() {
     var hint = $('sendHint');
     if (!state.roleId) {
-      hint.textContent = 'выберите роль — права записи зависят от роли, чтение документов одинаково у всех';
+      hint.textContent = pendingTicket
+        ? 'открыта ссылка на заявку из письма — выберите роль «Отдел качества», чтобы её увидеть'
+        : 'выберите роль — права записи зависят от роли, чтение документов одинаково у всех';
       hint.className = 'composer__hint composer__hint--warn';
       return;
     }
@@ -443,21 +461,35 @@
   }
   $('navBrand').addEventListener('click', function (e) { e.preventDefault(); goScreen('chat'); });
 
-  /* Прямая ссылка на заявку: #ticket=LEX-2026-0007 приходит из письма.
-     Сотрудник качества открывает письмо в почте, жмёт ссылку и попадает
-     сразу в эту заявку, а не в общий список. */
+  /* Ссылка из письма в отдел качества: #ticket=LEX-2026-0007.
+     Сотрудник качества открывает письмо в почте, жмёт ссылку и должен
+     попасть сразу в эту заявку. Роль к этому моменту может быть ещё не
+     выбрана — тогда запоминаем тикет и открываем его сразу после выбора
+     роли, иначе ссылка из письма ведёт в чат и заявку не найти. */
+  var pendingTicket = '';
+
   function openFromHash() {
     var m = /(?:^|[#&])ticket=([^&]+)/.exec(global.location.hash || '');
     if (!m) return;
     var tid = decodeURIComponent(m[1]);
     if (!ticketsAllowed()) {
+      pendingTicket = tid;
       goScreen('chat');
       return;
     }
+    pendingTicket = '';
     goScreen('tickets');
     renderTicketDetail(tid);
   }
   global.addEventListener('hashchange', openFromHash);
+
+  function openPendingTicket() {
+    if (!pendingTicket || !ticketsAllowed()) return;
+    var tid = pendingTicket;
+    pendingTicket = '';
+    goScreen('tickets');
+    renderTicketDetail(tid);
+  }
 
   /* ------------------------------------------------------------------ экраны-справочники */
 
@@ -1343,9 +1375,11 @@
       // показывает одни числа — владелец это и увидел.
       var text = String(item.canonical || item.question || '');
       if (!text) continue;
+      // Видимый текст короткий, полный вопрос — в title/tooltip; счётчик справа.
+      var shortText = text.length > 72 ? text.slice(0, 72).replace(/\s+\S*$/, '') + '…' : text;
       var tr2 = el('tr');
       var tdq = el('td');
-      var qlink = el('button', 'linkish', text);
+      var qlink = el('button', 'linkish', shortText);
       qlink.type = 'button';
       qlink.title = text;
       qlink.addEventListener('click', (function (qtext) {
@@ -2620,9 +2654,16 @@
   /* ------------------------------------------------------------------ старт */
 
   loadReference().then(function () {
+    // Роль из прошлой сессии — чтобы ссылка из письма открывала заявку сразу,
+    // без повторного «выберите роль».
+    var saved = storedRole();
+    if (saved && state.roles.some(function (r) { return r.id === saved; })) {
+      state.roleId = saved;
+    }
     renderTabs();
     updateHint();
     renderRolesScreen();
+    refreshTicketNav();
     $('navCount').textContent = state.mock ? 'демо-режим · без бэкенда' : 'живой режим';
     document.documentElement.setAttribute('data-mode', state.mock ? 'mock' : 'live');
     openFromHash();
