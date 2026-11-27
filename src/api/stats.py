@@ -19,6 +19,8 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from .costs import estimate_request_costs
+
 ROOT = Path(__file__).resolve().parents[2]
 VAR = Path(os.environ.get("LEX_VAR_DIR") or (ROOT / "var"))
 JOURNAL = Path(os.environ.get("LEX_JOURNAL_PATH") or (VAR / "journal.jsonl"))
@@ -301,6 +303,7 @@ def compute() -> dict[str, Any]:
         "criterion2": clarification_stats(sessions),
         "criterion3": case_stats(rows, escalations, cases),
         "token_usage": token_usage(rows),
+        "request_cost_estimate": estimate_request_costs(),
         "latency": latency(rows),
         "timeline": timeline(rows),
         "last_request_ts": max((str(r.get("ts") or "") for r in rows), default="") or None,

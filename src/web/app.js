@@ -1227,6 +1227,7 @@
     hero.appendChild(el('strong', 'request-cost__value',
       '≈ ' + fmtRubEstimate(estimate.average_cost_rub)));
     hero.appendChild(el('span', 'request-cost__basis',
+      fmtNum(estimate.calls_per_request || 1) + ' вызов на слот · ' +
       fmtNum(estimate.input_tokens) + ' входных + ' +
       fmtNum(estimate.output_tokens) + ' выходных токенов на запрос'));
     card.appendChild(hero);
