@@ -11,6 +11,27 @@
 `.git/`, `.venv/`, `__pycache__/` — пересобираются на месте.
 
 **Запуск:** `./deploy/deploy-sagepl.sh root@<хост> /opt/lex-kuznitsa`.
+
+**Клиент собирать ОТДЕЛЬНО.** `src/api/static/` — это копия `src/web/`,
+собранная `scripts/build-web.sh`; в git её нет (`.gitignore`), и деплой её
+не собирает. Пока стенд отдаёт каталог, собранный прошлый раз, правка
+`src/web/app.js` на стенде **не видна вообще** — сервер показывает старый
+клиент, а проверка в git-дереве этого не замечает. Поэтому после выкладки
+кода, если менялся `src/web/`:
+
+```bash
+ssh <хост> 'cd /opt/lex-kuznitsa && sh scripts/build-web.sh'
+```
+
+Проверка, что стенд и исходник совпадают (должно быть пусто):
+
+```bash
+ssh <хост> 'cd /opt/lex-kuznitsa && cmp src/web/app.js src/api/static/app.js'
+```
+
+Локально тот же рассинхрон стережёт `check_web_static_in_sync()` в
+`demo/check-core.py`.
+
 **Проверка после деплоя:** `ssh <хост> 'curl -sf http://127.0.0.1:8090/api/health'`
 (скрипт делает это сам и печатает ответ); при провале —
 `journalctl -u lex-stand -n 50 --no-pager`.

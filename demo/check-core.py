@@ -1240,6 +1240,58 @@ def check_role_aliases() -> None:
           f"{bad.status_code}")
 
 
+def check_web_static_in_sync() -> None:
+    """Стенд отдаёт src/api/static/, а правим мы src/web/. Стережём рассинхрон.
+
+    ``config.STATIC_DIR`` указывает на ``src/api/static``, а этот каталог в
+    ``.gitignore``: он собирается из ``src/web`` скриптом
+    ``scripts/build-web.sh``. Копия ручная, и ничто её не проверяло — значит
+    правка клиента без пересборки живёт в git-дереве и не видна на стенде.
+    Ровно тот же класс, что был с отпечатком: доказательство по НЕВЕРНОМУ
+    источнику. Починили бы §18.4, проверили в исходнике, а на демо показали
+    старый клиент (нашла FORGE).
+
+    Семантика провала: каталог ЕСТЬ, но файлы разошлись — FAIL с именем
+    первого разошедшегося файла. Каталога нет (чистый клон до сборки) —
+    SKIP: это состояние машины, а не дефект клиента, и красная строка в этом
+    случае послала бы искать баг не туда.
+    """
+    src = ROOT / "src" / "web"
+    dst = ROOT / "src" / "api" / "static"
+    if not dst.is_dir():
+        print(f"SKIP клиент: {dst.relative_to(ROOT)} не собран "
+              f"(чистый клон — это состояние машины, не дефект клиента; "
+              f"собирается sh scripts/build-web.sh)")
+        return
+
+    def _tree(root: Path) -> dict[str, str]:
+        return {str(p.relative_to(root)).replace("\\", "/"):
+                hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.rglob("*") if p.is_file()}
+
+    want, have = _tree(src), _tree(dst)
+    missing = sorted(set(want) - set(have))
+    extra = sorted(set(have) - set(want))
+    changed = sorted(k for k in set(want) & set(have) if want[k] != have[k])
+
+    check("клиент: стенд не отстаёт от исходника (src/web == static)",
+          not (missing or extra or changed),
+          "расходится: " + ", ".join(
+              [f"нет на стенде {k}" for k in missing[:3]]
+              + [f"лишнее {k}" for k in extra[:3]]
+              + [f"правлен, не собран {k}" for k in changed[:3]])
+          if (missing or extra or changed) else
+          f"{len(want)} файлов совпадают побайтово")
+
+    # app.js отдельной строкой: именно его правят чаще всего, и в отчёте
+    # должно быть видно, что сверялся он, а не «вообще каталог».
+    if "app.js" in want:
+        check("клиент: app.js стенда равен исходнику",
+              want.get("app.js") == have.get("app.js"),
+              f"исходник {want.get('app.js', '—')[:12]} · "
+              f"стенд {(have.get('app.js') or '—')[:12]}")
+
+
 def check_build_fingerprint() -> None:
     """/api/health отдаёт НЕПОДДЕЛЬНЫЙ отпечаток исполняемого кода.
 
@@ -1423,6 +1475,12 @@ def check_ticket_delivery_truth() -> None:
               all(marker in web for marker in
                   ("mail__demo--ok", "mail__demo--fail", "mail__demo")),
               "строка доставки рисуется по значению, а не всегда одна")
+
+        # ВАЖНО про эту проверку: она читает ИСХОДНИК. Стенд отдаёт
+        # src/api/static/ (config.STATIC_DIR, в .gitignore), а не src/web/ —
+        # значит здесь проверяется файл, который сервер не показывает, и
+        # «зелено» ничего не говорит о том, что видит человек (нашла FORGE).
+        # Совпадение каталогов стережёт check_web_static_in_sync() ниже.
 
         # ЗВЕНО 1 сквозь core.py: проверки выше сами зовут _patch_ticket, то
         # есть проверяют, что карточка умеет читать факт, но НЕ что эскалация
@@ -2380,6 +2438,7 @@ def main() -> int:
     check_p0_leaks()
     check_similar_questions_text()
     check_ticket_delivery_truth()
+    check_web_static_in_sync()
     check_build_fingerprint()
     check_case_matcher()
     check_unstable_compose()
