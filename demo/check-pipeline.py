@@ -146,6 +146,11 @@ def start_server(port: int, state_dir: Path) -> tuple[subprocess.Popen, object]:
     """Поднимает uvicorn из корня репозитория. Возвращает процесс и лог."""
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT)
+    # Вопросы берутся из CORPUS (по умолчанию sample-corpus), а сервер без этих
+    # переменных поднялся бы на корпусе заказчика: вопросы одни, документы другие,
+    # и шаги resolve/conflict пропали бы — гейт падал бы на ровном месте.
+    env["LEX_CORPUS_DIR"] = str(CORPUS)
+    env.setdefault("LEX_CORPUS_NORM_DIR", str(ROOT / "no-corpus-norm"))
     # Журнал и кейсы — во временный каталог: гейт не должен дописывать в живой
     # var/. Иначе каждый прогон искажает аналитику демо.
     env["LEX_VAR_DIR"] = str(state_dir)
