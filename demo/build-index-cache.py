@@ -10,6 +10,12 @@ CPU: ~14 с на чанк при 2 потоках). Это скрытая мин
 
     python demo/build-index-cache.py                 # corpus-real
     python demo/build-index-cache.py sample-corpus
+    python demo/build-index-cache.py corpus-real --corpus-norm corpus-norm --force
+                                                     # объединённый корпус (12/875)
+
+Второй корень обязателен, если стенд поднят с ``corpus-norm``: кэш сверяется
+по ``chunk_ids`` со списком чанков индекса, и кэш от одного корня объединённый
+корпус отвергнет — векторный поиск молча деградирует до BM25 («вектор 0»).
 
 Считает пачками и печатает прогресс, чтобы было видно, что не зависло.
 Прерывание безопасно: кэш пишется только целиком, в конце.
@@ -25,13 +31,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lex.corpus import load_corpus
+from lex.corpus import load_corpus, load_corpus_multi
 from lex.index import SearchIndex
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("corpus", nargs="?", default="corpus-real")
+    ap.add_argument(
+        "--corpus-norm",
+        default=None,
+        help="второй корень (внешние акты). Кэш ляжет в root первого корня, "
+             "с chunk_ids объединённого списка — иначе SearchIndex его отвергнет",
+    )
     ap.add_argument("--force", action="store_true", help="пересчитать даже при живом кэше")
     args = ap.parse_args()
 
@@ -47,13 +59,37 @@ def main() -> int:
         print(f"нет корпуса: {root}", file=sys.stderr)
         return 1
 
-    corpus = load_corpus(root)
-    cache = root / ".lex-index.npz"
+    norm = None
+    if args.corpus_norm:
+        norm = Path(args.corpus_norm)
+        if not norm.is_absolute():
+            norm = ROOT / norm
+        if not (norm / "manifest.json").exists():
+            print(f"нет второго корпуса: {norm}", file=sys.stderr)
+            return 1
+
+    # При двух корнях — load_corpus_multi: SearchIndex сверяет chunk_ids кэша
+    # со своим списком чанков, поэтому кэш обязан быть от объединённого корпуса.
+    # corpus.root у объединённого = первый корень (load_corpus_multi, bases[0]),
+    # туда же и пишется .lex-index.npz.
+    corpus = load_corpus_multi([root, norm]) if norm is not None else load_corpus(root)
+    cache = corpus.root / ".lex-index.npz"
     if cache.exists() and not args.force:
         print(f"кэш уже есть: {cache} ({cache.stat().st_size} байт) — не пересчитываю")
+        print("если корпус менялся — пересчитайте с --force")
         return 0
 
     print(f"корпус: {root} · документов {len(corpus.documents)} · чанков {len(corpus.chunks)}")
+    if args.force and cache.exists():
+        print(f"ВНИМАНИЕ: {cache} будет перезаписан целиком")
+    # Два разных источника, разница втрое — печатаем оба, чтобы не ждать вслепую
+    # и не верить одному числу. Докстринг embed_texts: ~14 с/чанк (2 потока).
+    # Замер на roy1: 4.8 с/чанк. На сервере будет своё — замерь до запуска.
+    n_ch = len(corpus.chunks)
+    print(
+        f"оценка времени: ~{n_ch * 14.0 / 60:.0f} мин (докстринг, 14 с/чанк) … "
+        f"~{n_ch * 4.8 / 60:.0f} мин (замер roy1, 4.8 с/чанк)"
+    )
     t0 = time.time()
     idx = SearchIndex(corpus)
     n = idx.build_vectors(force=args.force)
