@@ -171,6 +171,41 @@ def corpus_stats() -> dict:
     return {"documents": len(manifest_documents()), "chunks": 0}
 
 
+def vector_state() -> dict:
+    """Состояние векторного канала: есть ли кэш под текущий состав корпуса.
+
+    ``probe_embed`` пингует только сервис :8081 и про кэш не знает, поэтому
+    «Embed доступен» мог стоять рядом с «вектор 0» в шаге поиска. Здесь —
+    фактическая готовность векторов: кэш либо совпал по ``chunk_ids``, либо нет.
+    """
+    try:
+        c = corpus()
+        if c is None:
+            return {"ready": False, "reason": "корпус не загружен"}
+        root = getattr(c, "root", None)
+        n_chunks = len(getattr(c, "chunks", []) or [])
+        if root is None:
+            return {"ready": False, "reason": "нет корня корпуса", "chunks": n_chunks}
+        cache = Path(root) / ".lex-index.npz"
+        if not cache.exists():
+            return {"ready": False, "reason": "кэш не собран", "chunks": n_chunks,
+                    "cache": "нет файла"}
+        try:
+            import numpy as np
+            with np.load(cache, allow_pickle=True) as z:
+                ids = [str(x) for x in z["chunk_ids"]]
+        except Exception as exc:
+            return {"ready": False, "reason": f"кэш не читается: {type(exc).__name__}",
+                    "chunks": n_chunks}
+        expected = [getattr(ch, "chunk_id", "") for ch in c.chunks]
+        ok = ids == expected
+        return {"ready": ok, "chunks": n_chunks, "vectors": len(ids),
+                "reason": "совпал" if ok else "состав не совпал (кэш под другой корпус)",
+                "cache": str(cache.name)}
+    except Exception as exc:
+        return {"ready": False, "reason": f"ошибка проверки: {type(exc).__name__}"}
+
+
 def business_lines() -> list[dict]:
     """§11: направления из данных. Поля business_line в манифесте ещё нет —
     выводим из ``system`` и честно помечаем ``derived: true``."""

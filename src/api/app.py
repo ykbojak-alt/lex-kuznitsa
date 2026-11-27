@@ -417,7 +417,7 @@ async def health() -> dict:
         "version": config.VERSION,
         "build": _build_fingerprint(),
         "llm": probed["llm"],
-        "embed": probed["embed"],
+        "embed": {**probed["embed"], "vectors": core.vector_state()},
         "rerank": probed["rerank"],
         "ocr": {"available": documents.ocr_available(),
                 "engine": documents.ocr_engine(), "lang": "rus"},
