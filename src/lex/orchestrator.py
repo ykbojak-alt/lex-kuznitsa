@@ -36,7 +36,7 @@ from pathlib import Path
 from . import access, detail, editions, llm, llm_debug, policy, rerank
 from . import caveat as caveat_mod
 from .cases import Case, CaseStore, get_case_store
-from .corpus import Corpus, load_corpus
+from .corpus import Corpus, load_corpus, load_corpus_multi
 from .dialogue import Dialogue
 from .forms import get_form
 from .grounding import (
@@ -45,7 +45,7 @@ from .grounding import (
     subject_coverage,
     subject_is_phrase,
 )
-from .index import SearchIndex, embed_texts, get_index
+from .index import SearchIndex, embed_texts, get_index, get_index_multi
 from .llm import LLMError
 from .media import inspect_corpus
 from .models import (
@@ -204,6 +204,7 @@ class RunOptions:
     session_id: str | None = None
     answers: dict = field(default_factory=dict)
     corpus_root: Path = DEFAULT_CORPUS
+    corpus_norm_root: Path | None = None
     cases_path: Path = field(default_factory=lambda: ROOT / "var" / "cases.jsonl")
     business_line: str | None = None
     no_llm: bool = False
@@ -436,13 +437,15 @@ class Orchestrator:
     @property
     def corpus(self) -> Corpus:
         if self._corpus is None:
-            self._corpus = load_corpus(self.opts.corpus_root)
+            self._corpus = load_corpus_multi(
+                [self.opts.corpus_root] + ([self.opts.corpus_norm_root] if self.opts.corpus_norm_root else [])
+            )
         return self._corpus
 
     @property
     def index(self) -> SearchIndex:
         if self._idx is None:
-            self._idx = get_index(self.opts.corpus_root)
+            self._idx = get_index_multi(self.opts.corpus_root, self.opts.corpus_norm_root)
         return self._idx
 
     @property

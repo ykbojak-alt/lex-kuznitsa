@@ -283,6 +283,9 @@ class DocumentMeta(BaseModel):
     content_type: ContentType = "text"
     ocr_confidence: float | None = None
     ocr_status: str = ""
+    # §12: внешний нормативный акт (из corpus-norm) — не внутренний регламент
+    # заказчика. Отличается при ролевом фильтре и в гейтах check-core.
+    external: bool = False
 
 
 class Chunk(BaseModel):
@@ -305,6 +308,8 @@ class Chunk(BaseModel):
     page: int | None = None
     ocr_confidence: float | None = None
     source_file: str = ""
+    # §12: чанк из corpus-norm (внешний нормативный акт) — не из corpus-real.
+    external: bool = False
 
 
 class CorpusStats(BaseModel):

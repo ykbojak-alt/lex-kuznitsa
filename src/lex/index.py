@@ -307,6 +307,23 @@ def get_index(corpus_root: str | Path) -> SearchIndex:
     return idx
 
 
+def get_index_multi(
+    corpus_root: str | Path, corpus_norm_root: str | Path | None = None
+) -> SearchIndex:
+    """Индекс по основному корпусу + опционально corpus-norm (внешние акты)."""
+    roots = [Path(corpus_root)]
+    if corpus_norm_root:
+        roots.append(Path(corpus_norm_root))
+    key = "|".join(str(r.resolve()) for r in roots)
+    idx = _CACHE.get(key)
+    if idx is None:
+        from .corpus import load_corpus_multi
+
+        idx = SearchIndex(load_corpus_multi(roots))
+        _CACHE[key] = idx
+    return idx
+
+
 def reset_index(corpus_root: str | Path | None = None) -> None:
     """Сброс кэша — нужен POST /api/ingest (перечитать corpus и индекс)."""
     if corpus_root is None:

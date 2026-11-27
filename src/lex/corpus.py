@@ -159,6 +159,9 @@ def _doc_meta(d: dict) -> DocumentMeta:
         sha256=str(d.get("sha256") or ""),
         words=int(d.get("words") or 0),
         sections=[str(s) for s in (d.get("sections") or [])],
+        content_type=str(d.get("content_type") or "text"),
+        # Внешний нормативный акт — по маркеру в манифесте (source/marker)
+        external=str(d.get("marker") or d.get("source") or "").lower() == "внешний",
     )
 
 
@@ -210,6 +213,7 @@ def load_corpus(
                         revision=revision,
                         effective=effective,
                         position=pos,
+                        external=meta.external,
                     )
                 )
 
@@ -237,6 +241,50 @@ def load_corpus(
         )
 
     return corpus
+
+
+def load_corpus_multi(
+    roots: list[str | Path],
+    *,
+    chunk_tokens: int = CHUNK_TOKENS,
+    overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
+) -> Corpus:
+    """Сливает несколько корпусов в один: первый — базовый (corpus-real).
+
+    Нужен для §12: corpus-real — регламенты заказчика, corpus-norm — внешние
+    нормативные акты (кодексы, ФЗ). Ищем по обоим, но документы внешнего
+    корня помечаются ``external=True``: их видят не все роли, и в гейтах
+    check-core они не входят в счёт «4 внутренних документа».
+
+    Отсутствующий второй корень — не ошибка: демо без нормативного корпуса
+    работает как раньше, на одних регламентах.
+    """
+    roots = [Path(r).resolve() for r in roots]
+    bases = [r for r in roots if r.exists()]
+    if not bases:
+        raise FileNotFoundError("нет ни одного корпуса: " + ", ".join(map(str, roots)))
+    merged = load_corpus(bases[0], chunk_tokens=chunk_tokens, overlap_tokens=overlap_tokens)
+    for extra_root in bases[1:]:
+        extra = load_corpus(extra_root, chunk_tokens=chunk_tokens, overlap_tokens=overlap_tokens)
+        # Документы второго корня — внешние. load_corpus уже проставил флаг
+        # по маркеру манифеста (marker="внешний" / source="внешний"), но если
+        # манифеста с маркером нет — принудительно ставим external на весь
+        # не-первый корень: весь файл-корень заведомо нормативный.
+        for meta in extra.documents:
+            meta.external = True
+        offset = len(merged.chunks)
+        for chunk in extra.chunks:
+            chunk.external = True
+            # position у чанка — сквозной в объединённом корпусе
+            chunk.position = offset + chunk.position
+        merged.documents.extend(extra.documents)
+        merged.chunks.extend(extra.chunks)
+        merged.rules.update(extra.rules)
+        if not merged.watermark and extra.watermark:
+            merged.watermark = extra.watermark
+        if not merged.as_of and extra.as_of:
+            merged.as_of = extra.as_of
+    return merged
 
 
 def _revision_of(meta: DocumentMeta, raw: dict) -> tuple[int | None, str | None]:

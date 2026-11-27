@@ -515,6 +515,7 @@ def _run_options(question: str, role_id: str, as_of: str | None,
         "question": question,
         "role_id": role_id,
         "corpus_root": config.CORPUS_DIR,
+        "corpus_norm_root": config.CORPUS_NORM_DIR,
         "cases_path": config.CASES_PATH,
         # без этого ядро само запишет тикеты/предложения в свои пути по умолчанию
         "tickets_path": config.TICKETS_PATH,
