@@ -87,6 +87,21 @@
     return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   }
 
+  function fmtRubEstimate(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return '—';
+    return n.toLocaleString('ru-RU', {
+      minimumFractionDigits: 3,
+      maximumFractionDigits: 3
+    }) + ' ₽';
+  }
+
+  function fmtModelRate(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return '—';
+    return n.toLocaleString('ru-RU', { maximumFractionDigits: 4 });
+  }
+
   function fmtDate(iso) {
     if (!iso) return '';
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
@@ -1195,6 +1210,61 @@
     return card;
   }
 
+  /* Рыночная оценка считается на сервере по одному прозрачному набору
+     тарифов и объёму токенов из экономической таблицы. */
+  function renderRequestCostBlock(host, estimate) {
+    host.appendChild(el('h3', 'detail-h', 'Стоимость одного запроса'));
+    if (!estimate || !Array.isArray(estimate.models) || !estimate.models.length) {
+      host.appendChild(el('p', 'section-sub',
+        'Рыночная оценка пока недоступна; фактические расходы не подменяются нулём.'));
+      return;
+    }
+
+    var card = el('section', 'request-cost');
+    var hero = el('div', 'request-cost__hero');
+    hero.appendChild(el('span', 'request-cost__label',
+      'Средняя оценка по трём слотам'));
+    hero.appendChild(el('strong', 'request-cost__value',
+      '≈ ' + fmtRubEstimate(estimate.average_cost_rub)));
+    hero.appendChild(el('span', 'request-cost__basis',
+      fmtNum(estimate.input_tokens) + ' входных + ' +
+      fmtNum(estimate.output_tokens) + ' выходных токенов на запрос'));
+    card.appendChild(hero);
+
+    var table = el('table', 'wikitable request-cost__table');
+    var head = el('tr');
+    ['Слот NexusLink', 'Поставщик · цена за 1 млн', 'Оценка', 'Метод / прайс'].forEach(function (label) {
+      head.appendChild(el('th', null, label));
+    });
+    table.appendChild(head);
+    estimate.models.forEach(function (model) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, model.slot || '—'));
+      tr.appendChild(el('td', null,
+        (model.label || model.model || '—') + ' · ' +
+        fmtModelRate(model.input_price_per_million) + ' / ' +
+        fmtModelRate(model.output_price_per_million) + ' ' +
+        (model.currency || '') + '/1 млн'));
+      tr.appendChild(el('td', 'num', fmtRubEstimate(model.cost_rub)));
+      var sourceCell = el('td', null);
+      sourceCell.appendChild(el('span', null, model.method || 'Усреднённый тариф'));
+      if (model.source) {
+        var link = el('a', 'request-cost__source', 'Прайс');
+        link.href = model.source;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        sourceCell.appendChild(doc.createTextNode(' · '));
+        sourceCell.appendChild(link);
+      }
+      tr.appendChild(sourceCell);
+      table.appendChild(tr);
+    });
+    card.appendChild(table);
+    card.appendChild(el('p', 'request-cost__note', estimate.note ||
+      'Тарифная оценка; сумма NexusLink может отличаться.'));
+    host.appendChild(card);
+  }
+
   /* Экономика: всё считает /api/stats, UI только показывает его числа. */
   function renderEconomyBlock(host, tu) {
     host.appendChild(el('h3', 'detail-h', 'Экономика · расход токенов'));
@@ -1229,7 +1299,7 @@
     var llm = h.llm || {}, emb = h.embed || {}, rr = h.rerank || {}, corp = h.corpus || {};
     var indexed = corp.indexed_at || corp.rebuilt_at || corp.last_indexed || corp.index_built_at;
     var rows = [
-      ['Слот модели', llm.slot || '—'],
+      ['Слот модели', llm.slot_label || llm.slot || '—'],
       ['LLM', llm.reachable ? 'доступен' : 'недоступен'],
       ['Embed', (emb.model || '—') + ' · ' + (emb.reachable ? 'доступен' : 'недоступен')],
       ['Rerank', (rr.model || '—') + ' · ' + (rr.reachable ? 'доступен' : 'недоступен')],
@@ -1394,6 +1464,7 @@
       }).catch(function () {});
     }
     if (!state.mock && state.juryStats) {
+      renderRequestCostBlock(host, state.juryStats.request_cost_estimate);
       renderJuryStats(host, state.juryStats);
       renderEconomyBlock(host, state.juryStats.token_usage);
     }
