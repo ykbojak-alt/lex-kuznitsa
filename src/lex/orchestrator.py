@@ -480,6 +480,9 @@ class Orchestrator:
         # спрашивал направление у сотрудника, хотя оно названо в самом
         # вопросе — уточнение там, где ответ уже есть.
         stage = self._stage_policy(2, state)
+        if stage.signal is not None:
+            # Отказ по компетенции — поток закрывается на этом же шаге.
+            self._terminated = True
         yield self._emit(stage.event)
         if stage.signal is not None:
             # §17.6: `out_of_scope` НЕ эскалируется — службе качества нечего
@@ -491,6 +494,7 @@ class Orchestrator:
             return
         clarify = self._stage_clarify(3, state)
         if clarify is not None:
+            self._terminated = True
             yield self._emit(self._clarify_step(3, state))
             yield clarify
             return                      # §10: после clarify поток закрывается
@@ -502,6 +506,7 @@ class Orchestrator:
             decision = self._escalation_decision(state)
             if decision.questions:
                 state["clarify_questions"] = decision.questions
+                self._terminated = True
                 yield self._emit(self._clarify_step(self._total() + 1, state))
                 yield Signal("clarify", ClarifyData(
                     session_id=self._session_id(),

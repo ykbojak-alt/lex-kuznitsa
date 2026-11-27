@@ -201,10 +201,17 @@ def available_lines(corpus: Corpus) -> list[dict]:
     Пока в манифесте нет ``business_line``, направление выводится из названия и
     типа документа. Это соответствует §11: «до появления поля — считать по
     system и типу».
+
+    Внешние нормативные акты (``external``) не считаются: «лиценз» в заголовке
+    ГК РФ приписывал кодекс к «поставке», «договор» — к «договору и финансам»,
+    и экран показывал 8 документов вместо 4 регламентов заказчика (28.11).
+    Направление — свойство организации, а не кодекса.
     """
     lines_spec = active_lines()
     counts: dict[str, int] = {line: 0 for line in lines_spec}
     for doc in corpus.documents:
+        if getattr(doc, "external", False):
+            continue
         hay = f"{doc.title} {doc.kind} {doc.system}".lower()
         words = set(re.findall(r"[\w-]+", hay))
         for line, spec in lines_spec.items():
