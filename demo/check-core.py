@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 import os as _os
@@ -1273,14 +1272,31 @@ def check_build_fingerprint() -> None:
     # нельзя брать файл и делать replace(b"\n", b"\r\n") — получится CRCRLF,
     # и «нормализация не работает» окажется ложной тревогой. Сравниваем две
     # версии ОДНОГО содержимого: сначала в LF, потом в CRLF.
+    #
+    # Проверяем САМ _build_fingerprint, а не локальную лямбду: правка только
+    # в тесте не поймала бы регрессию в нормализации — тот самый дефект,
+    # ради которого проверка и написана. Для этого подменяем байты файла
+    # модуля на время замера.
     src_lex = Path(__file__).resolve().parents[1] / "src" / "lex" / "orchestrator.py"
     if src_lex.exists():
-        lf = src_lex.read_bytes().replace(b"\r\n", b"\n")
-        crlf = lf.replace(b"\n", b"\r\n")
-        norm = lambda b: hashlib.sha256(b.replace(b"\r\n", b"\n")).digest()  # noqa: E731
+        import lex.orchestrator as _orch
+
+        target = Path(_orch.__file__)
+        original = target.read_bytes()
+        lf = original.replace(b"\r\n", b"\n")
+        try:
+            target.write_bytes(lf)
+            hash_lf = _build_fingerprint()["sha256"]
+            target.write_bytes(lf.replace(b"\n", b"\r\n"))
+            hash_crlf = _build_fingerprint()["sha256"]
+        finally:
+            target.write_bytes(original)
         check("сборка: CRLF и LF дают один отпечаток",
-              norm(lf) == norm(crlf),
-              f"LF {norm(lf).hex()[:12]} · CRLF {norm(crlf).hex()[:12]}")
+              hash_lf == hash_crlf,
+              f"LF {hash_lf} · CRLF {hash_crlf}")
+        check("сборка: отпечаток вернулся после откатa файла",
+              _build_fingerprint()["sha256"] == first["sha256"],
+              "оригинальные байты — прежний хеш")
 
     health_src = inspect.getsource(
         __import__("api.app", fromlist=["health"]).health)
