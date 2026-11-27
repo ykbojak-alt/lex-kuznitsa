@@ -58,16 +58,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          # requirements.txt в репозитории нет; набор — то, что реально импортирует
+          # src/ и demo/check-*.py. Модели и torch не нужны: --no-llm, без эмбеддера.
+          python -m pip install pytest fastapi pydantic httpx numpy python-dotenv uvicorn
       - name: Pytest
         run: |
           set -e
           if [ -d tests ] && [ -n "$(ls -A tests 2>/dev/null)" ]; then
             python -m pytest -q
-          else
-            echo "каталог tests/ пуст — юнит-тестов пока нет (спринт ещё не начался)"
           fi
+          # Сами проверки ядра живут в demo/check-*.py (pytest-тестов нет).
+          # Офлайн-набор: без модели, без сервера, без сети.
+          python demo/check-refusal-markers.py
+          python demo/check-articles.py
+          python demo/check-pipeline.py --no-llm
 
   build:
     name: Build / import check

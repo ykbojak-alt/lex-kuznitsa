@@ -194,16 +194,37 @@ def vector_state() -> dict:
             import numpy as np
             with np.load(cache, allow_pickle=True) as z:
                 ids = [str(x) for x in z["chunk_ids"]]
+                built_model = str(z["embed_model"][0]) if "embed_model" in z.files else None
         except Exception as exc:
             return {"ready": False, "reason": f"кэш не читается: {type(exc).__name__}",
                     "chunks": n_chunks}
         expected = [getattr(ch, "chunk_id", "") for ch in c.chunks]
         ok = ids == expected
-        return {"ready": ok, "chunks": n_chunks, "vectors": len(ids),
-                "reason": "совпал" if ok else "состав не совпал (кэш под другой корпус)",
-                "cache": str(cache.name)}
+        # Кэш от другой модели той же размерности прошёл бы сверку chunk_ids и
+        # дал бы мусор в поиске — модель сверяем отдельно.
+        model_ok = built_model is None or built_model == embed_model_name()
+        ready = ok and model_ok
+        if not ok:
+            reason = "состав не совпал (кэш под другой корпус)"
+        elif not model_ok:
+            reason = f"кэш собран другой моделью: {built_model}, нужна {embed_model_name()}"
+        else:
+            reason = "совпал"
+        out = {"ready": ready, "chunks": n_chunks, "vectors": len(ids),
+               "model": built_model, "expected_model": embed_model_name(),
+               "reason": reason, "cache": str(cache.name)}
+        return out
     except Exception as exc:
         return {"ready": False, "reason": f"ошибка проверки: {type(exc).__name__}"}
+
+
+def embed_model_name() -> str:
+    """Имя модели, которой считается векторный канал (env LEX_EMBED_MODEL)."""
+    try:
+        from lex.index import EMBED_MODEL
+        return str(EMBED_MODEL)
+    except Exception:
+        return "bge-m3"
 
 
 def business_lines() -> list[dict]:

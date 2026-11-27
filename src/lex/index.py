@@ -201,6 +201,9 @@ class SearchIndex:
                 self._cache_path,
                 vecs=arr.astype(np.float32),
                 chunk_ids=np.array([c.chunk_id for c in self.chunks], dtype=object),
+                # Модель пишется вместе с векторами: кэш от другой модели той же
+                # размерности прошёл бы сверку chunk_ids и дал бы мусор в поиске.
+                embed_model=np.array([EMBED_MODEL], dtype=object),
             )
         except Exception:
             pass  # кэш — оптимизация, не контракт
@@ -211,6 +214,10 @@ class SearchIndex:
                 ids = [str(x) for x in z["chunk_ids"]]
                 if ids != [c.chunk_id for c in self.chunks]:
                     return None
+                if "embed_model" in z.files:
+                    built = str(z["embed_model"][0])
+                    if built != EMBED_MODEL:
+                        return None
                 return z["vecs"].astype(np.float64)
         except Exception:
             return None
