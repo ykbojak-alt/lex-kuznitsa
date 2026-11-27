@@ -38,6 +38,7 @@ from lex.models import STEP_ORDER
 from lex.orchestrator import Orchestrator, RunOptions
 from lex.policy import evaluate
 from lex.tickets import get_ticket_store
+from refusal_marker_tests import run_refusal_marker_tests
 
 CORPUS = ROOT / "sample-corpus"
 PASS: list[str] = []
@@ -2535,6 +2536,12 @@ def check_subject_is_phrase() -> None:
           esc[:110])
 
 
+def check_model_refusal_markers() -> None:
+    passed, failures = run_refusal_marker_tests()
+    check("R3: 4 формата отказа дают refused/model_refusal",
+          passed == 4 and not failures,
+          f"{passed}/4" + (f"; {' | '.join(failures)}" if failures else ""))
+
 def main() -> int:
     global LLM_DOWN
     corpus = load_corpus(CORPUS)
@@ -2577,6 +2584,7 @@ def main() -> int:
     check_answer_with_caveat()
     check_subject_gate_audit()
     check_subject_is_phrase()
+    check_model_refusal_markers()
     print(f"\n{PASS.__len__()} passed, {len(FAIL)} failed, "
           f"{len(EXPECTED_FAIL)} expected-fail, {len(UNEXPECTED_PASS)} xpass")
     if EXPECTED_FAIL:

@@ -1,27 +1,27 @@
-"""Живые пробы зависимостей для GET /api/health.
+"""Пробы живости сервисов для /api/health.
 
-Контракт требует `reachable` как результат реальной проверки, не константу.
-Пробы параллельные и с коротким таймаутом: health не должен висеть, если
-какой-то сервис лежит.
+Три независимые проверки: LLM-шлюз NexusLink, сервис эмбеддингов и сервис
+переранжирования. Каждая возвращает словарь с полем reachable — вызывающий
+собирает из них общую картину, не полагаясь на один источник.
 """
+
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import httpx
 
 from . import config
 
 
-async def _get_json(client: httpx.AsyncClient, url: str) -> tuple[bool, Any]:
+async def _get_json(client: httpx.AsyncClient, url: str) -> tuple[bool, dict]:
     try:
         r = await client.get(url)
         if r.status_code != 200:
-            return False, None
+            return False, {}
         return True, r.json()
     except Exception:
-        return False, None
+        return False, {}
 
 
 async def probe_embed(client: httpx.AsyncClient) -> dict:
@@ -43,10 +43,24 @@ async def probe_rerank(client: httpx.AsyncClient) -> dict:
     }
 
 
+# Внутренний слот NexusLink -> масочное имя, которое видит пользователь
+# (владелец, 27.11.2026: в аналитике показывать DeepSeek/Qwen/Ernie,
+# а не внутренний claude-opus-4-6). Обратный словарь к MODELS_PUBLIC.
+# Обновлять при смене NEXUS_LINK_MODEL или добавлении моделей.
+_MODEL_PUBLIC_MAP = {
+    "claude-opus-4-7": "deepseek-4.1-flash",
+    "claude-sonnet-4-7": "qwen-3.8-27b",
+    "claude-sonnet-5": "ernie-5.5-flash",
+    "claude-opus-4-6": "claude-opus-4-6",
+}
+
+
 async def probe_llm(client: httpx.AsyncClient) -> dict:
     base = config.NEXUS_LINK_BASE_URL
+    slot = config.NEXUS_LINK_MODEL
     result = {
-        "slot": config.NEXUS_LINK_MODEL,
+        "slot": slot,
+        "slot_label": _MODEL_PUBLIC_MAP.get(slot, slot),
         "base": base,
         "reachable": False,
     }
