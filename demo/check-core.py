@@ -1274,30 +1274,35 @@ def check_build_fingerprint() -> None:
           f"source_drift={first['source_drift']!r}")
 
     # ГЛАВНОЕ свойство: правка файла БЕЗ перезапуска не должна менять
-    # исполняемый отпечаток, но обязана поднимать source_drift. Если хеш
-    # поедет — значит он опять читает диск и врёт про деплой.
+    # исполняемый отпечаток, но обязана поднимать source_drift. Проверяем
+    # на ЧИСТОЙ функции _fingerprint_report: писать в общий src/ из теста
+    # нельзя — под параллельными прогонами другой агент прочитает файл в
+    # момент подмены (нашла NEO: у неё grounding.py на секунду показал
+    # «# probe»). Откат в finally окно не убирает, только сокращает.
+    from api.app import _fingerprint_report
+
+    snapshot = {"sha256": first["sha256"], "modules": first["modules"]}
+    same = _fingerprint_report(snapshot, dict(snapshot))
+    check("сборка: совпадающий диск — дрейфа нет",
+          same["source_drift"] is False,
+          "файлы те же, процесс тот же")
+
+    edited = _fingerprint_report(snapshot, {"sha256": "0000000000000000",
+                                            "modules": first["modules"]})
+    check("сборка: правка диска не меняет исполняемый отпечаток",
+          edited["sha256"] == first["sha256"],
+          f"{first['sha256']} -> {edited['sha256']}")
+    check("сборка: правка диска без рестарта видна как source_drift",
+          edited["source_drift"] is True,
+          "фикс на диске != фикс в процессе")
+    check("сборка: source_sha256 показывает состояние диска",
+          edited["source_sha256"] == "0000000000000000",
+          edited["source_sha256"])
+
+    # CRLF/LF: одинаковый код на Windows и Linux обязан давать один хеш.
+    # Только чтение — файл в общий src/ не пишем.
     src_lex = Path(__file__).resolve().parents[1] / "src" / "lex" / "orchestrator.py"
     if src_lex.exists():
-        import lex.orchestrator as _orch
-
-        target = Path(_orch.__file__)
-        original = target.read_bytes()
-        try:
-            target.write_bytes(original + b"\n# probe\n")
-            changed = _build_fingerprint()
-        finally:
-            target.write_bytes(original)
-        check("сборка: правка файла не меняет исполняемый отпечаток",
-              changed["sha256"] == first["sha256"],
-              f"{first['sha256']} -> {changed['sha256']}")
-        check("сборка: правка файла без рестарта видна как source_drift",
-              changed["source_drift"] is True,
-              "фикс на диске != фикс в процессе")
-        check("сборка: после отката дрейф снят",
-              _build_fingerprint()["source_drift"] is False,
-              "оригинальные байты — дрейфа нет")
-
-        # CRLF/LF: одинаковый код на Windows и Linux обязан давать один хеш.
         raw = src_lex.read_bytes()
         lf = raw.replace(b"\r\n", b"\n")
         crlf = lf.replace(b"\n", b"\r\n")

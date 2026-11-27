@@ -237,6 +237,23 @@ def _init_build() -> None:
 _init_build()
 
 
+def _fingerprint_report(snapshot: dict, current: dict) -> dict:
+    """Собрать ответ из снимка при импорте и текущего состояния диска.
+
+    Чистая функция: ни файлов, ни глобального состояния. Так её можно
+    проверить без записи в исходники — а писать в ``src/`` из теста нельзя:
+    под параллельными прогонами другой агент прочитает файл в момент
+    подмены (нашла NEO: у неё ``grounding.py`` на секунду показал «# probe»).
+    """
+    return {
+        "sha256": snapshot.get("sha256", "none"),
+        "modules": snapshot.get("modules", 0),
+        "source_drift": current.get("sha256") != snapshot.get("sha256"),
+        "source_sha256": current.get("sha256", "none"),
+        "source_modules": current.get("modules", 0),
+    }
+
+
 def _build_fingerprint() -> dict:
     """Отпечаток кода, который реально исполняет этот процесс.
 
@@ -249,7 +266,7 @@ def _build_fingerprint() -> dict:
       фикс лежит, но не применён.
 
     Без этого различения подмена файла без рестарта давала ложное
-    «задеплоено» — ровно та дырка, ради которой поле и делалось.
+    «задеплоено» — ровно та дырка, ради которой поле и делалось (нашла NEO).
 
     Переводы строк приводятся к LF: иначе Windows-копия (CRLF) и Linux-стенд
     (LF) при побайтово идентичном коде дают разные хеши, и отпечаток не
@@ -257,13 +274,10 @@ def _build_fingerprint() -> dict:
     """
     current_pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
     current_sha, current_count = _digest(current_pairs)
-    return {
-        "sha256": _BUILD_AT_IMPORT.get("sha256", "none"),
-        "modules": _BUILD_AT_IMPORT.get("modules", 0),
-        "source_drift": current_sha != _BUILD_AT_IMPORT.get("sha256"),
-        "source_sha256": current_sha,
-        "source_modules": current_count,
-    }
+    return _fingerprint_report(
+        _BUILD_AT_IMPORT,
+        {"sha256": current_sha, "modules": current_count},
+    )
 
 
 @app.get("/api/health")
