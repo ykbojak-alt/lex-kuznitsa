@@ -114,11 +114,26 @@ def tts(req: TTSRequest) -> Response:
     }).encode("utf-8")
     http_req = urllib.request.Request(
         "https://api.fish.audio/v1/tts", data=body, method="POST",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            # Модель — ЗАГОЛОВКОМ, а не в теле. Fish выбирает тариф по заголовку
+            # `model`; без него берёт платную по умолчанию и на ключе без кредита
+            # отвечает 402 Payment Required. Бесплатная s2.1-pro-free при этом
+            # доступна — именно её отдаёт заголовок (проверено 28.11.2026).
+            "model": _fish_model(),
+        },
     )
     try:
         with urllib.request.urlopen(http_req, timeout=TTS_TIMEOUT) as resp:
             audio = resp.read()
+    except urllib.error.HTTPError as exc:
+        # 402 — не «сервис недоступен», а «нет кредита на этот тариф»:
+        # человек должен видеть разницу, иначе будет искать сеть.
+        if exc.code == 402:
+            raise HTTPException(status_code=503,
+                                detail="tts_no_credit") from None
+        raise HTTPException(status_code=503, detail="tts_unavailable") from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise HTTPException(status_code=503, detail="tts_unavailable") from None
     headers = {"X-TTS-Truncated": "1"} if truncated else None
