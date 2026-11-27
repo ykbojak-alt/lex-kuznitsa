@@ -168,11 +168,23 @@ def is_slot_dead(exc: Exception) -> bool:
     return "blacklisted" in text or "candidates exhausted" in text
 
 
+# Температура 0 — требование воспроизводимости, а не вкуса: демо сравнивает
+# ответы на один и тот же вопрос, и при 0.2 два прогона давали два разных
+# верных ответа, опирающихся на разные регламенты (владелец, 28.11.2026:
+# «на один и тот же вопрос получаем 2 совершенно разных ответа»). Вопрос
+# демонстрирует доверие к системе, а «каждый раз новое» читается как
+# нестабильность. Провайдеры на 0 всё равно не гарантируют бит-в-бит совпадения,
+# поэтому рядом — seed из окружения.
+DEFAULT_TEMPERATURE = float(os.environ.get("LEX_LLM_TEMPERATURE", "0"))
+# Seed передаётся только если задан: часть апстримов отвергает незнакомое поле.
+LLM_SEED = os.environ.get("LEX_LLM_SEED", "").strip()
+
+
 def chat(
     messages: list[dict],
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    temperature: float = 0.2,
+    temperature: float | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     retries_on_empty: int | None = None,
     model: str | None = None,
@@ -201,6 +213,8 @@ def chat(
             "(см. .env и docs/DEPLOY-NEXUSLINK.md)"
         )
     retries = EMPTY_RETRIES if retries_on_empty is None else retries_on_empty
+    if temperature is None:
+        temperature = DEFAULT_TEMPERATURE
     budgets_chain = [max(MIN_MAX_TOKENS, int(max_tokens))]
     for b in RETRY_BUDGETS[:retries]:
         if b > budgets_chain[-1]:
@@ -299,6 +313,13 @@ def _post_chat(messages: list[dict], max_tokens: int, temperature: float,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    # seed — только когда задан: часть апстримов отвергает незнакомое поле
+    # целиком, и «стабильность» обернулась бы отказом на каждом запросе.
+    if LLM_SEED:
+        if LLM_SEED.lstrip("-").isdigit():
+            body["seed"] = int(LLM_SEED)
+        else:
+            body["seed"] = LLM_SEED
     req = urllib.request.Request(
         url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
