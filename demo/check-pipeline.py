@@ -522,9 +522,17 @@ def main() -> int:
     ap.add_argument("--keep-state", action="store_true",
                     help="оставить временный каталог прогона")
     ap.add_argument("--questions", type=int, default=5, help="сколько вопросов корпуса (5)")
+    ap.add_argument("--corpus", default=None,
+                    help="каталог корпуса с questions.jsonl (по умолчанию LEX_CORPUS_DIR "
+                         "или sample-corpus)")
     ap.add_argument("--stress", type=int, default=0, metavar="N",
                     help="режим стабильности: N прогонов подряд, ноль пустых ответов")
     args = ap.parse_args()
+
+    global CORPUS, QUESTIONS
+    if args.corpus:
+        CORPUS = Path(args.corpus).resolve()
+        QUESTIONS = CORPUS / "questions.jsonl"
 
     has_key = load_env()
     if not has_key:

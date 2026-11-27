@@ -72,7 +72,10 @@ jobs:
           # check-articles.py не входит: он читает corpus-real/, а тот не в git
           # (публичный репозиторий) — в CI его нет и быть не может.
           python demo/check-refusal-markers.py
-          python demo/check-pipeline.py --no-llm
+          # sample-corpus/*.jsonl в .gitignore — генерируем корпус с вопросами,
+          # иначе check-pipeline нечего гонять на чистом клоне.
+          python demo/gen-sample-corpus.py --out "$RUNNER_TEMP/corpus" --json
+          python demo/check-pipeline.py --no-llm --corpus "$RUNNER_TEMP/corpus"
 
   build:
     name: Build / import check
