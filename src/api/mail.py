@@ -27,7 +27,7 @@ import datetime as dt
 import logging
 import re
 import smtplib
-from email.message import EmailMessage
+from email.mime.text import MIMEText
 from urllib.parse import quote
 
 from . import config, tickets
@@ -57,10 +57,6 @@ def _subject(question: str) -> str:
     if len(text) > 90:
         text = text[:87].rstrip(" ,;:") + "…"
     return f"[LEX] Вопрос без ответа в базе: {text}"
-
-
-# Обвязка одного encoded-word: "=?utf-8?b?" + "?=" — 12 символов.
-_ENCODED_WORD_OVERHEAD = 12
 
 
 def encode_subject(text: str, max_word_bytes: int = 42) -> str:
@@ -98,6 +94,25 @@ def encode_subject(text: str, max_word_bytes: int = 42) -> str:
     return " ".join(f"=?utf-8?b?{base64.b64encode(c).decode('ascii')}?=" for c in chunks)
 
 
+def _message(ticket: dict, to: str, sender: str, cc: str | None,
+             body: str) -> MIMEText:
+    """Собрать письмо так, чтобы тема доходила до получателя целой.
+
+    ``EmailMessage`` с политикой ``SMTP`` при сериализации переписывает
+    заголовок Subject и снова режет его по пробелу — уже закодированные слова
+    склеиваются, и пробел на стыке теряется. ``MIMEText`` живёт на ``compat32``
+    и пишет заголовок ровно так, как он задан, поэтому кодируем тему сами один
+    раз и отдаём готовую строку.
+    """
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["From"] = sender
+    msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
+    msg["Subject"] = encode_subject(_subject(ticket.get("question", "")))
+    return msg
+
+
 def send_letter(ticket: dict, to: str, sender: str, cc: str | None = None,
                 body: str | None = None) -> str:
     """Отправить письмо по SMTP. Возвращает фактический режим доставки.
@@ -109,13 +124,7 @@ def send_letter(ticket: dict, to: str, sender: str, cc: str | None = None,
     """
     if not smtp_configured():
         return "simulated"
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = to
-    if cc:
-        msg["Cc"] = cc
-    msg["Subject"] = encode_subject(_subject(ticket.get("question", "")))
-    msg.set_content(body or letter_body(ticket))
+    msg = _message(ticket, to, sender, cc, body or letter_body(ticket))
     try:
         with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10) as srv:
             if getattr(config, "SMTP_USER", ""):
