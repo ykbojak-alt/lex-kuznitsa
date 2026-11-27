@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -100,32 +101,46 @@ def embed_texts(texts: list[str], *, timeout: float = 600.0, batch: int = 8) -> 
     return out
 
 
-def _embed_batch(texts: list[str], timeout: float) -> list[list[float]]:
+def _embed_batch(texts: list[str], timeout: float, retries: int = 4) -> list[list[float]]:
+    """Один POST на батч. Сетевые сбои — транзиентные, поэтому с повторами.
+
+    Без повторов одна отвалившаяся пачка убивала многочасовую индексацию целиком
+    (сборка 875 чанков упала на 70-й минуте из-за одного refused соединения).
+    Повторяем только то, что заведомо может пройти со второй попытки: refused,
+    разрыв, таймаут чтения. Ответ 4xx/5xx от живого эмбеддера — не транзиент.
+    """
     body = json.dumps({"model": EMBED_MODEL, "input": texts}).encode("utf-8")
     req = urllib.request.Request(
         f"{EMBED_URL}/v1/embeddings", data=body,
         headers={"Content-Type": "application/json"}, method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-    except urllib.error.URLError as exc:
-        raise EmbeddingError(f"эмбеддер недоступен ({EMBED_URL}): {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise EmbeddingError(f"эмбеддер вернул не JSON: {exc}") from exc
-    except (TimeoutError, OSError) as exc:
-        # Таймаут чтения приходит как socket.timeout (TimeoutError), а не как
-        # URLError. Без этой ветки зависший эмбеддер валил весь поиск вместо
-        # того, чтобы честно деградировать до BM25 (см. search()).
-        raise EmbeddingError(f"эмбеддер не ответил за {timeout:.0f} с: {exc}") from exc
-
-    data = payload.get("data")
-    if not isinstance(data, list) or len(data) != len(texts):
-        got = len(data) if isinstance(data, list) else "?"
-        raise EmbeddingError(f"эмбеддер вернул {got} векторов на {len(texts)} текстов")
-    if all(isinstance(x, dict) and "index" in x for x in data):
-        data = sorted(data, key=lambda x: x["index"])
-    return [[float(v) for v in item["embedding"]] for item in data]
+    last: Exception | None = None
+    for attempt in range(retries):
+        if attempt:
+            time.sleep(min(2.0 ** attempt, 30.0))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            last = EmbeddingError(f"эмбеддер недоступен ({EMBED_URL}): {exc}")
+            continue
+        except json.JSONDecodeError as exc:
+            last = EmbeddingError(f"эмбеддер вернул не JSON: {exc}")
+            break
+        except (TimeoutError, OSError) as exc:
+            # Таймаут чтения приходит как socket.timeout (TimeoutError), а не как
+            # URLError. Без этой ветки зависший эмбеддер валил весь поиск вместо
+            # того, чтобы честно деградировать до BM25 (см. search()).
+            last = EmbeddingError(f"эмбеддер не ответил за {timeout:.0f} с: {exc}")
+            continue
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != len(texts):
+            got = len(data) if isinstance(data, list) else "?"
+            raise EmbeddingError(f"эмбеддер вернул {got} векторов на {len(texts)} текстов")
+        if all(isinstance(x, dict) and "index" in x for x in data):
+            data = sorted(data, key=lambda x: x["index"])
+        return [[float(v) for v in item["embedding"]] for item in data]
+    raise last if last is not None else EmbeddingError("эмбеддер: пустой ответ")
 
 
 def embeddings_reachable(timeout: float = 5.0) -> bool:
