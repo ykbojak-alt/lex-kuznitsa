@@ -184,13 +184,21 @@ _BUILD_MODULES = (
 # (нашла ALICE при приёмке — требование «хеш обязан смениться» было
 # невыполнимо). Шесть файлов, а не сканирование каталога: набор обязан быть
 # фиксированным, иначе новый файл меняет хеш без правки кода.
+#
+# Путь — ОТДАВАЕМЫЙ каталог (``config.STATIC_DIR``), а не исходник
+# ``src/web``. Это второй заход на ту же слепоту: первая версия брала
+# ``src/web``, и правка файла, который сервер действительно отдаёт, хеш не
+# сдвигала (нашла FORGE — замер: static+1 → source_sha256 не изменился).
+# Отпечаток называется доказательством деплоя, значит обязан читать то, что
+# отдаётся. Совпадение копии с исходником стережёт
+# ``check_web_static_in_sync`` — это отдельный вопрос, и смешивать нельзя.
 _BUILD_ASSETS = (
-    "src/web/index.html",
-    "src/web/app.js",
-    "src/web/lex.css",
-    "src/web/mock-lex.js",
-    "src/web/progress-view.js",
-    "src/web/console-view.js",
+    "index.html",
+    "app.js",
+    "lex.css",
+    "mock-lex.js",
+    "progress-view.js",
+    "console-view.js",
 )
 
 
@@ -229,11 +237,12 @@ def _loaded_sources() -> list[tuple[str, str | None]]:
             except Exception:
                 path = None
         out.append((name, path))
-    # Клиент: модуля нет, путь известен. Отсутствующий файл пропускается в
-    # _digest — отпечаток считается по тому, что есть, и не падает.
-    root = Path(__file__).resolve().parents[2]
+    # Клиент: модуля нет, путь известен из config.STATIC_DIR — того каталога,
+    # который сервер ОТДАЁТ. Отсутствующий файл пропускается в _digest:
+    # отпечаток считается по тому, что есть, и не падает.
+    static_dir = Path(getattr(config, "STATIC_DIR", "") or "")
     for rel in _BUILD_ASSETS:
-        out.append((rel, str(root / rel)))
+        out.append((f"static/{rel}", str(static_dir / rel)))
     return out
 
 

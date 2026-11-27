@@ -1413,29 +1413,47 @@ def check_build_fingerprint() -> None:
     # ПОКРЫТИЕ: отпечаток обязан видеть UI. Волна §18.4 целиком лежала в
     # app.js, а хеш после деплоя не сдвинулся — набор модулей был только
     # Python, и требование приёмки «хеш обязан смениться» было невыполнимо
-    # (нашла ALICE). Проверяем не список, а поведение: подмена байтов app.js
-    # сдвигает source_sha256, не трогая снимок sha256.
+    # (нашла ALICE).
+    #
+    # Проверяем ДВА пути, и это принципиально. Первая версия этой проверки
+    # подменяла src/web/app.js, то есть совпадала с набором, который сама же
+    # и утверждала, — она зеленела по построению. Отпечаток — доказательство
+    # ДЕПЛОЯ, значит он обязан читать ОТДАВАЕМЫЙ файл (config.STATIC_DIR), а
+    # не исходник: правку static без build-web он должен видеть, правку
+    # одного лишь src/web — нет (нашла FORGE замером).
     import api.app as _app2
+    from api import config as _cfg2
 
-    _orig2 = _app2._fingerprint_of
+    served = Path(str(_cfg2.STATIC_DIR)).resolve()
 
-    def _ui_patched(path):
-        data = _orig2(path)
-        if path and path.endswith("app.js") and "/web/" in path.replace("\\", "/"):
-            return (data or b"") + b"\n// probe-ui\n"
-        return data
+    def _probe(substring):
+        """Подменить байты app.js и вернуть отпечаток; чтение — только в памяти."""
+        _orig2 = _app2._fingerprint_of
 
-    _app2._fingerprint_of = _ui_patched
-    try:
-        ui_changed = _build_fingerprint()
-    finally:
-        _app2._fingerprint_of = _orig2
-    check("сборка: правка app.js видна в source_sha256",
-          ui_changed["source_sha256"] != first["source_sha256"],
-          "без клиента в наборе деплой UI нечем доказать")
-    check("сборка: правка app.js не подменяет снимок sha256",
-          ui_changed["sha256"] == first["sha256"],
+        def _patched(path):
+            data = _orig2(path)
+            if path and path.endswith("app.js") and substring in path.replace("\\", "/"):
+                return (data or b"") + b"\n// probe-ui\n"
+            return data
+
+        _app2._fingerprint_of = _patched
+        try:
+            return _build_fingerprint()
+        finally:
+            _app2._fingerprint_of = _orig2
+
+    served_changed = _probe(str(served).replace("\\", "/"))
+    check("сборка: правка ОТДАВАЕМОГО app.js видна в source_sha256",
+          served_changed["source_sha256"] != first["source_sha256"],
+          "отпечаток читает тот файл, что отдаёт сервер")
+    check("сборка: правка отдаваемого app.js не подменяет снимок sha256",
+          served_changed["sha256"] == first["sha256"],
           "исполняемый отпечаток по-прежнему из снимка импорта")
+
+    source_changed = _probe("/web/")
+    check("сборка: правка одного ИСХОДНИКА не двигает отпечаток",
+          source_changed["source_sha256"] == first["source_sha256"],
+          "деплой доказывается по отдаваемому, а не по исходнику")
 
 
 def check_ticket_delivery_truth() -> None:
