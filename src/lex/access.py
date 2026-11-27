@@ -221,6 +221,12 @@ def roles_for_corpus(corpus_root: str | Path | None = None) -> list[dict[str, An
 
     Пустой манифест не должен обнулять роли: возвращаем синтетический набор,
     чтобы API и демо отвечали, а не падали.
+
+    Карта «роль -> отделы» для диалога строится отсюда же: если диалог идёт
+    на ``sample-corpus``, а роли брать с ``corpus-real``, то ``lawyer`` там
+    нет вовсе, и модель считает, что роль не привязана к отделу — отсюда
+    лишний уточняющий вопрос «какое подразделение». Набор ролей обязан
+    приходить из того корпуса, с которым работает вызывающий.
     """
     docs = all_documents(_manifest_path(corpus_root))
     departments = sorted({str(d.get("department") or "").strip()
@@ -228,6 +234,44 @@ def roles_for_corpus(corpus_root: str | Path | None = None) -> list[dict[str, An
     if not departments:
         return [dict(r) for r in ROLE_DEFS]
     return roles_from_departments(departments)
+
+
+def role_map_for_corpus(corpus_root: str | Path | None = None) -> dict[str, list[str]]:
+    """Роль -> отделы для диалога, в рамках конкретного корпуса.
+
+    Три слоя, в этом порядке:
+
+    1. роли корпуса (их id — слаги отделов, как их видит манифест);
+    2. старые id (``lawyer``, ``it``) — отдел ищется по смыслу В ЭТОМ
+       корпусе (``LEGACY_ROLE_HINTS``), иначе диалог спрашивает
+       ``departments_of_role("lawyer")`` и получает пусто;
+    3. известные объявления из ``ROLE_DEFS_REAL``/``ROLE_DEFS`` для id,
+       которых в корпусе нет вовсе (``technical`` на синтетическом корпусе).
+
+    Слой 3 нужен не «на всякий случай»: демо и проверки зовут роль
+    ``technical`` на синтетике, и без записи в карте она выглядела бы как
+    роль без отдела — с лишним вопросом «какое подразделение».
+    """
+    corpus_roles = roles_for_corpus(corpus_root)
+    out: dict[str, list[str]] = {}
+    for role in corpus_roles:
+        rid = str(role.get("id") or "")
+        if rid:
+            out[rid] = [str(d) for d in (role.get("departments") or [])]
+
+    for legacy in LEGACY_ROLE_HINTS:
+        if legacy in out:
+            continue
+        found = resolve_role(legacy, corpus_roles)
+        if found is not None:
+            out[legacy] = [str(d) for d in (found.get("departments") or [])]
+
+    for src in (ROLE_DEFS_REAL, ROLE_DEFS):
+        for role in src:
+            rid = str(role.get("id") or "")
+            if rid and rid not in out:
+                out[rid] = [str(d) for d in (role.get("departments") or [])]
+    return out
 
 
 def _default_role_defs() -> list[dict[str, Any]]:

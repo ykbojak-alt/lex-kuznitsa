@@ -715,13 +715,23 @@ class CorpusKnowledge:
 # ------------------------------------------------------------------ роли
 
 
-def _roles_from_access() -> dict[str, list[str]]:
-    """Отделы роли из lex.access (модуль ACE). Если его нет — пусто."""
+def _roles_from_access(corpus_dir: str | Path | None = None) -> dict[str, list[str]]:
+    """Отделы роли из lex.access (модуль ACE). Если его нет — пусто.
+
+    Корпус передаётся явно: набор ролей должен быть из того корпуса, с
+    которым идёт диалог. Иначе на ``sample-corpus`` получалось, что ролей
+    ``lawyer``/``it`` в карте нет (они живут в ``corpus-real``), роль
+    считалась не привязанной к отделу, и появлялся лишний вопрос «какое
+    подразделение» — при том что документ лежит в трёх отделах и вопрос
+    был лишним.
+    """
     try:
         from . import access  # type: ignore
     except Exception:
         return {}
     try:
+        if hasattr(access, "role_map_for_corpus"):  # type: ignore[attr-defined]
+            return access.role_map_for_corpus(corpus_dir)  # type: ignore[attr-defined]
         roles = access.roles()  # type: ignore[attr-defined]
     except Exception:
         return {}
@@ -787,13 +797,24 @@ class Dialogue:
         self._today = today
         self._role_departments = role_departments
         self._roles_cache: dict[str, list[str]] | None = None
+        # Корпус нужен не только знанию, но и карте ролей: набор ролей у
+        # синтетического и реального корпуса разный, и брать роли «по
+        # умолчанию» (corpus-real) для диалога на другом корпусе — это
+        # рассинхрон, из которого росли лишние уточняющие вопросы.
+        self._corpus_dir = corpus_dir
 
     # ---- роли ----
 
     @property
     def role_departments(self) -> dict[str, list[str]]:
         if self._roles_cache is None:
-            roles = _roles_from_access()
+            # Явная карта от вызывающего важнее любой догадки: демо и тесты
+            # передают её, когда роли описывают свой корпус.
+            if self._role_departments:
+                self._roles_cache = {str(k): [str(d) for d in v]
+                                     for k, v in self._role_departments.items()}
+                return self._roles_cache
+            roles = _roles_from_access(self._corpus_dir)
             if not roles:
                 roles = _fallback_roles(self.knowledge.departments)
             self._roles_cache = roles

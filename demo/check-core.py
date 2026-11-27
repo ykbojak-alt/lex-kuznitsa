@@ -1238,6 +1238,77 @@ def check_role_aliases() -> None:
           f"{bad.status_code}")
 
 
+def check_similar_questions_text() -> None:
+    """«Часто спрашивают» отдаёт САМ вопрос, а не только счётчик.
+
+    Владелец видел таблицу из одних чисел: живой `_similar_questions` клал
+    текст только в `canonical`, а таблица читает `question`. Мок-режим работал
+    (там `question` есть), поэтому дефект не ловился ни одним тестом.
+
+    Проверяем на синтетическом журнале, а не на боевом: боевой меняется между
+    прогонами, и тест начал бы мигать. Инварианты:
+      * у каждой группы непустой `question` и он же в `canonical` (обрезка —
+        только хвост, начало текста сохраняется);
+      * `question` не длиннее QUESTION_MAX_CHARS;
+      * счётчик и `variants` на месте — старый формат не сломан.
+    """
+    from api import app as api_app
+
+    rows = [
+        {"question": "Как формируется команда проекта?", "ts": "2026-11-27T01:00:00Z"},
+        {"question": "Как формируется команда проекта?", "ts": "2026-11-27T01:05:00Z"},
+        {"question": "как ФОРМИРУЕТСЯ команда проекта", "ts": "2026-11-27T01:06:00Z"},
+        {"question": "Кто согласует ТКП в пресейле?", "ts": "2026-11-27T01:07:00Z"},
+        {"question": "Кто подбирает партнёра на пресейле?", "ts": "2026-11-27T01:08:00Z"},
+    ]
+    long_q = "Каков порядок " + "очень длинного уточнения " * 12 + "?"
+    rows.append({"question": long_q, "ts": "2026-11-27T01:09:00Z"})
+
+    orig = api_app.core.journal_read
+    api_app.core.journal_read = lambda limit=100_000: list(rows)
+    try:
+        out = api_app._similar_questions()
+    finally:
+        api_app.core.journal_read = orig
+
+    check("аналитика: у каждой группы есть текст вопроса",
+          bool(out) and all(str(x.get("question") or "").strip() for x in out),
+          f"групп {len(out)}, без текста {sum(1 for x in out if not x.get('question'))}")
+
+    # Дальше сравниваем текст — берём через .get и getattr, чтобы без фикса
+    # первый же check показал FAIL, а не уронил весь прогон исключением.
+    texts = [str(x.get("question") or "") for x in out]
+    limit = getattr(api_app, "QUESTION_MAX_CHARS", 160)
+
+    check("аналитика: каждая группа несёт непустой question до обрезки",
+          bool(out) and all(texts),
+          f"пустых {sum(1 for t in texts if not t)} из {len(texts)}")
+
+    check("аналитика: question начинается так же, как canonical (обрезка — только хвост)",
+          all(str(x.get("canonical", "")).startswith(t) for x, t in zip(out, texts, strict=False)),
+          next((f"{t!r} не начало {x.get('canonical')!r}"
+                for x, t in zip(out, texts, strict=False)
+                if not str(x.get("canonical", "")).startswith(t)), "все совпадают"))
+
+    check("аналитика: текст обрезан до QUESTION_MAX_CHARS",
+          all(len(t) <= limit for t in texts),
+          f"макс {max((len(t) for t in texts), default=0)} при пределе {limit}")
+    check("аналитика: константа обрезки объявлена в модуле",
+          hasattr(api_app, "QUESTION_MAX_CHARS"),
+          f"QUESTION_MAX_CHARS={limit}")
+
+    check("аналитика: счётчик и варианты сохранены (старый формат цел)",
+          all(isinstance(x.get("count"), int) and "variants" in x for x in out)
+          and any(x["count"] == 3 for x in out),
+          "×3 у вопроса с тремя написаниями" if any(x["count"] == 3 for x in out)
+          else "счётчик не сходится")
+
+    # Разные вопросы не должны сливаться: ключ группировки — текст без пунктуации,
+    # а не что-то вроде «первые N слов».
+    check("аналитика: разные вопросы не склеены в одну группу",
+          len(out) == 4, f"групп {len(out)} при 4 разных вопросах")
+
+
 def check_p0_leaks() -> None:
     """LEX-P0-LEAK: кейсы и развёрнутый ответ не читаются без роли.
 
@@ -2022,6 +2093,7 @@ def main() -> int:
     check_role_aliases()
     check_slot_chain()
     check_p0_leaks()
+    check_similar_questions_text()
     check_unstable_compose()
     check_verify_zero()
     check_role_denial_reason()
