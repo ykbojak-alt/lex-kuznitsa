@@ -179,25 +179,31 @@ _BUILD_MODULES = (
 )
 
 
-def _build_fingerprint() -> dict:
-    """Отпечаток кода, который реально исполняет этот процесс.
+def _fingerprint_of(path: str | None) -> bytes | None:
+    """Байты файла модуля с переводами строк, приведёнными к LF."""
+    if not path:
+        return None
+    try:
+        return Path(path).read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return None
 
-    Нужен, чтобы деплой был проверяемым снаружи: без ssh нельзя отличить
-    «фикс на диске» от «фикс в работающем процессе», и агенты получали
-    противоречивые статусы. Считаем по байтам файлов перечисленных модулей:
-    перезапуск не нужен, а подмена невозможна — хеш меняется ровно тогда,
-    когда меняется исполняемый код.
 
-    Переводы строк приводятся к LF. Без этого Windows-копия (CRLF) и
-    Linux-стенд (LF) при побайтово идентичном коде давали РАЗНЫЕ хеши —
-    отпечаток переставал быть компаратором «локально == стенд», и этим
-    уже дважды сбивались в отчётах. Расхождение было только в «\r».
-
-    Модуль не найден — он входит в отпечаток пустотой с собственным именем:
-    ``modules`` тогда меньше, и это видно, а не притворяется нулями.
-    """
+def _digest(pairs: list[tuple[str, bytes | None]]) -> tuple[str, int]:
     digest = hashlib.sha256()
     found = 0
+    for name, data in pairs:
+        if data is None:
+            continue
+        digest.update(name.encode("utf-8"))
+        digest.update(data)
+        found += 1
+    return (digest.hexdigest()[:16] if found else "none"), found
+
+
+def _loaded_sources() -> list[tuple[str, str | None]]:
+    """Пары «имя модуля -> путь» для фиксированного набора."""
+    out: list[tuple[str, str | None]] = []
     for name in _BUILD_MODULES:
         mod = sys.modules.get(name)
         path = getattr(mod, "__file__", None) if mod is not None else None
@@ -207,17 +213,57 @@ def _build_fingerprint() -> dict:
                 path = getattr(mod, "__file__", None)
             except Exception:
                 path = None
-        if not path:
-            continue
-        try:
-            data = Path(path).read_bytes().replace(b"\r\n", b"\n")
-        except OSError:
-            continue
-        digest.update(name.encode("utf-8"))
-        digest.update(data)
-        found += 1
-    return {"sha256": digest.hexdigest()[:16] if found else "none",
-            "modules": found}
+        out.append((name, path))
+    return out
+
+
+# Отпечаток исполняемого кода, снятый ОДИН РАЗ при старте процесса.
+#
+# Считать его по файлам на диске при каждом запросе — ловушка (нашла NEO):
+# подмена файла без перезапуска меняла хеш, и «задеплоено» становилось
+# ложным. Код в памяти процесса не меняется до рестарта, значит и отпечаток
+# обязан быть заморожен в момент импорта. Расхождение с диском видно
+# отдельным полем ``source_drift`` — это уже другой вопрос (файл правлен,
+# но не применён), и путать его с «задеплоено» нельзя.
+_BUILD_AT_IMPORT: dict = {}
+
+
+def _init_build() -> None:
+    pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
+    sha, count = _digest(pairs)
+    _BUILD_AT_IMPORT.update({"sha256": sha, "modules": count})
+
+
+_init_build()
+
+
+def _build_fingerprint() -> dict:
+    """Отпечаток кода, который реально исполняет этот процесс.
+
+    Два поля, и это важно не путать:
+
+    * ``sha256`` — хеш, снятый при импорте модулей, то есть код, который
+      ДЕЙСТВИТЕЛЬНО работает. Меняется только после перезапуска процесса.
+    * ``source_drift`` — ``False``, когда файлы на диске совпадают с тем, что
+      загружено. ``True`` означает «на диске новее, процесс не перезапущен»:
+      фикс лежит, но не применён.
+
+    Без этого различения подмена файла без рестарта давала ложное
+    «задеплоено» — ровно та дырка, ради которой поле и делалось.
+
+    Переводы строк приводятся к LF: иначе Windows-копия (CRLF) и Linux-стенд
+    (LF) при побайтово идентичном коде дают разные хеши, и отпечаток не
+    сравнить между машинами.
+    """
+    current_pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
+    current_sha, current_count = _digest(current_pairs)
+    return {
+        "sha256": _BUILD_AT_IMPORT.get("sha256", "none"),
+        "modules": _BUILD_AT_IMPORT.get("modules", 0),
+        "source_drift": current_sha != _BUILD_AT_IMPORT.get("sha256"),
+        "source_sha256": current_sha,
+        "source_modules": current_count,
+    }
 
 
 @app.get("/api/health")
