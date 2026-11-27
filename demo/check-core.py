@@ -20,7 +20,6 @@ import json
 import os as _os
 import sys
 import tempfile
-import time
 from datetime import date
 from pathlib import Path
 
@@ -1354,26 +1353,30 @@ def check_ticket_delivery_truth() -> None:
     Инварианты:
       * нет сохранённого факта — «simulated» (не врём в другую сторону);
       * сохранён «sent»/«failed» — карточка показывает именно его;
-      * явный аргумент сильнее сохранённого (нужно SSE, где исход только что).
+      * явный аргумент сильнее сохранённого (нужно SSE, где исход уже известен);
+      * клиент различает три исхода, а не рисует «демо» всегда.
     """
-    import os as _os
+    from api import config, mail, tickets
 
-    from api import mail, tickets
-
-    saved = _os.environ.get("LEX_VAR_DIR")
-    tmp = tempfile.mkdtemp()
-    _os.environ["LEX_VAR_DIR"] = tmp
+    # Подменяем САМ путь в конфиге, а не LEX_VAR_DIR: пути считаются при
+    # импорте config (module-level константы), поэтому переменная окружения,
+    # выставленная здесь, уже ни на что не влияет — и тест писал в настоящий
+    # var/tickets.jsonl, засоряя рабочее хранилище (нашла ALICE).
+    tmp = Path(tempfile.mkdtemp())
+    saved_paths = (config.TICKETS_PATH, config.ESCALATIONS_PATH, config.VAR_DIR)
+    config.VAR_DIR = tmp
+    config.TICKETS_PATH = tmp / "tickets.jsonl"
+    config.ESCALATIONS_PATH = tmp / "escalations.jsonl"
     try:
-        # session_id уникален на прогон. С фиксированным значением дедуп
-        # возвращал тикет прошлого прогона — с уже записанным delivery=failed,
-        # и первая проверка («без факта — simulated») падала на пустом месте.
-        # LEX_VAR_DIR, выставленный здесь, модуль уже не читает (путь взят при
-        # импорте), поэтому тикет уходит в настоящий var/ и session_id —
-        # единственное, что защищает от столкновения.
-        sid = f"t-deliv-{_os.getpid()}-{time.time_ns()}"
+        assert str(tickets._path("tk")).startswith(str(tmp)), "тест пишет вне временного каталога"
+
         row = tickets.create_ticket({"question": "Кто отвечает за пожарную безопасность?",
-                                     "kind": "not_in_corpus", "session_id": sid})
+                                     "kind": "not_in_corpus", "session_id": "t-deliv"})
         tid = row["id"]
+
+        check("delivery: тест пишет во временный каталог, а не в var/",
+              str(tmp) in str(config.TICKETS_PATH),
+              f"{config.TICKETS_PATH}")
 
         check("delivery: без факта карточка честно говорит «simulated»",
               mail.decorate(tickets.get_ticket(tid))["email"]["delivery"] == "simulated",
@@ -1404,10 +1407,7 @@ def check_ticket_delivery_truth() -> None:
                   ("mail__demo--ok", "mail__demo--fail", "mail__demo")),
               "строка доставки рисуется по значению, а не всегда одна")
     finally:
-        if saved is None:
-            _os.environ.pop("LEX_VAR_DIR", None)
-        else:
-            _os.environ["LEX_VAR_DIR"] = saved
+        config.VAR_DIR, config.TICKETS_PATH, config.ESCALATIONS_PATH = saved_paths
 
 
 def check_similar_questions_text() -> None:
