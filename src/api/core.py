@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from lex.index import reset_index
+from lex.index import SearchIndex, reset_index
 
 from . import config, sse
 
@@ -176,7 +176,11 @@ def vector_state() -> dict:
 
     ``probe_embed`` пингует только сервис :8081 и про кэш не знает, поэтому
     «Embed доступен» мог стоять рядом с «вектор 0» в шаге поиска. Здесь —
-    фактическая готовность векторов: кэш либо совпал по ``chunk_ids``, либо нет.
+    фактическая готовность векторов.
+
+    Единственная точка правды — ``SearchIndex._load_cache()``: health не должен
+    судить о кэше своим разбором npz, иначе он разойдётся с поиском (сверка
+    chunk_ids без формы матрицы давала «готовы» рядом с «вектор 0»).
     """
     try:
         c = corpus()
@@ -184,36 +188,36 @@ def vector_state() -> dict:
             return {"ready": False, "reason": "корпус не загружен"}
         root = getattr(c, "root", None)
         n_chunks = len(getattr(c, "chunks", []) or [])
-        if root is None:
-            return {"ready": False, "reason": "нет корня корпуса", "chunks": n_chunks}
-        cache = Path(root) / ".lex-index.npz"
-        if not cache.exists():
+        cache = Path(root) / ".lex-index.npz" if root is not None else None
+        if cache is None or not cache.exists():
             return {"ready": False, "reason": "кэш не собран", "chunks": n_chunks,
                     "cache": "нет файла"}
+        # Индекс строится по корню самого загруженного корпуса и по чанкам,
+        # которые он уже держит: сверка идёт ровно против того же списка,
+        # против которого будет искать search(), — не против config.
+        idx = SearchIndex(c)
+        vecs = idx._load_cache()
         try:
             import numpy as np
             with np.load(cache, allow_pickle=True) as z:
-                ids = [str(x) for x in z["chunk_ids"]]
                 built_model = str(z["embed_model"][0]) if "embed_model" in z.files else None
+                rows = len(z["chunk_ids"])
         except Exception as exc:
             return {"ready": False, "reason": f"кэш не читается: {type(exc).__name__}",
                     "chunks": n_chunks}
-        expected = [getattr(ch, "chunk_id", "") for ch in c.chunks]
-        ok = ids == expected
-        # Кэш от другой модели той же размерности прошёл бы сверку chunk_ids и
-        # дал бы мусор в поиске — модель сверяем отдельно.
-        model_ok = built_model is None or built_model == embed_model_name()
-        ready = ok and model_ok
-        if not ok:
-            reason = "состав не совпал (кэш под другой корпус)"
-        elif not model_ok:
+        if vecs is not None:
+            return {"ready": True, "chunks": n_chunks, "vectors": vecs.shape[0],
+                    "model": built_model, "expected_model": embed_model_name(),
+                    "reason": "совпал", "cache": str(cache.name)}
+        if built_model is not None and built_model != embed_model_name():
             reason = f"кэш собран другой моделью: {built_model}, нужна {embed_model_name()}"
+        elif rows != n_chunks:
+            reason = f"состав не совпал (кэш под другой корпус: {rows} из {n_chunks})"
         else:
-            reason = "совпал"
-        out = {"ready": ready, "chunks": n_chunks, "vectors": len(ids),
-               "model": built_model, "expected_model": embed_model_name(),
-               "reason": reason, "cache": str(cache.name)}
-        return out
+            reason = "форма матрицы не совпала (поиск этот кэш отвергнет)"
+        return {"ready": False, "chunks": n_chunks, "vectors": rows,
+                "model": built_model, "expected_model": embed_model_name(),
+                "reason": reason, "cache": str(cache.name)}
     except Exception as exc:
         return {"ready": False, "reason": f"ошибка проверки: {type(exc).__name__}"}
 

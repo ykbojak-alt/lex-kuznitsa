@@ -229,7 +229,7 @@ class SearchIndex:
                 # 875 чанков давали IndexError в search() (он ловит только
                 # EmbeddingError — падал весь /api/ask), а 875x512 — ValueError
                 # на матмуле; 100 строк молча ранжировали 100 чанков из 875.
-                if vecs.ndim != 2 or vecs.shape[0] != len(ids):
+                if vecs.ndim != 2 or vecs.shape[0] != len(ids) or vecs.shape[1] != EMBED_DIM:
                     return None
                 return vecs.astype(np.float64)
         except Exception:
