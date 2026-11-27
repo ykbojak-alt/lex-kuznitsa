@@ -486,7 +486,15 @@ def doc_meta(doc_id: str) -> dict | None:
                 return _as_dict(d)
         except Exception:
             pass
-    return next((d for d in manifest_documents() if d.get("doc_id") == doc_id), None)
+    # Поиск по doc_id (без расширения) — основной путь.
+    for d in manifest_documents():
+        if d.get("doc_id") == doc_id:
+            return d
+    # Поиск по полному имени файла (как приходит в URL /api/doc/{doc_id}.md).
+    for d in manifest_documents():
+        if d.get("file") == doc_id or d.get("file") and d["file"].endswith(doc_id):
+            return d
+    return None
 
 
 def doc_path(doc_id: str) -> Path | None:
