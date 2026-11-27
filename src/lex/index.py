@@ -121,6 +121,12 @@ def _embed_batch(texts: list[str], timeout: float, retries: int = 4) -> list[lis
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            # HTTPError — подкласс URLError, и без этой ветки ПЕРВОЙ он попадал
+            # в сетевую ветку ниже и повторялся 4 раза с паузами по 2-30 с.
+            # Ответ от живого эмбеддера не транзиент: падать сразу.
+            last = EmbeddingError(f"эмбеддер ответил {exc.code} ({EMBED_URL}): {exc.reason}")
+            break
         except urllib.error.URLError as exc:
             last = EmbeddingError(f"эмбеддер недоступен ({EMBED_URL}): {exc}")
             continue
@@ -218,7 +224,14 @@ class SearchIndex:
                     built = str(z["embed_model"][0])
                     if built != EMBED_MODEL:
                         return None
-                return z["vecs"].astype(np.float64)
+                vecs = z["vecs"]
+                # Форма матрицы сверяется, а не только список id: 925 строк на
+                # 875 чанков давали IndexError в search() (он ловит только
+                # EmbeddingError — падал весь /api/ask), а 875x512 — ValueError
+                # на матмуле; 100 строк молча ранжировали 100 чанков из 875.
+                if vecs.ndim != 2 or vecs.shape[0] != len(ids):
+                    return None
+                return vecs.astype(np.float64)
         except Exception:
             return None
 
