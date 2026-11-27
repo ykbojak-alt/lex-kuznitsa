@@ -20,6 +20,7 @@ import json
 import os as _os
 import sys
 import tempfile
+import time
 from datetime import date
 from pathlib import Path
 
@@ -1363,8 +1364,15 @@ def check_ticket_delivery_truth() -> None:
     tmp = tempfile.mkdtemp()
     _os.environ["LEX_VAR_DIR"] = tmp
     try:
+        # session_id уникален на прогон. С фиксированным значением дедуп
+        # возвращал тикет прошлого прогона — с уже записанным delivery=failed,
+        # и первая проверка («без факта — simulated») падала на пустом месте.
+        # LEX_VAR_DIR, выставленный здесь, модуль уже не читает (путь взят при
+        # импорте), поэтому тикет уходит в настоящий var/ и session_id —
+        # единственное, что защищает от столкновения.
+        sid = f"t-deliv-{_os.getpid()}-{time.time_ns()}"
         row = tickets.create_ticket({"question": "Кто отвечает за пожарную безопасность?",
-                                     "kind": "not_in_corpus", "session_id": "t-deliv"})
+                                     "kind": "not_in_corpus", "session_id": sid})
         tid = row["id"]
 
         check("delivery: без факта карточка честно говорит «simulated»",
@@ -1385,55 +1393,21 @@ def check_ticket_delivery_truth() -> None:
               mail.decorate(tickets.get_ticket(tid), delivery="sent")
               ["email"]["delivery"] == "sent",
               "SSE знает исход раньше, чем он записан")
+
+        # Вторая половина камня 18: клиент рисовал строку «демонстрационный
+        # режим» ВСЕГДА, не глядя на поле. Серверная правда без этого не
+        # видна человеку — проверяем, что карточка различает три исхода.
+        web = (Path(__file__).resolve().parents[1]
+               / "src" / "web" / "app.js").read_text(encoding="utf-8")
+        check("delivery: клиент различает sent / failed / simulated",
+              all(marker in web for marker in
+                  ("mail__demo--ok", "mail__demo--fail", "mail__demo")),
+              "строка доставки рисуется по значению, а не всегда одна")
     finally:
         if saved is None:
             _os.environ.pop("LEX_VAR_DIR", None)
         else:
             _os.environ["LEX_VAR_DIR"] = saved
-
-
-def check_delivery_truth() -> None:
-    """Карточка письма говорит правду о доставке (находка MIMIC).
-
-    Письмо уходило по SMTP, но карточка заявки показывала «демонстрационный
-    режим»: ``delivery`` жил только в SSE-событии эскалации, а карточка
-    собиралась заново с дефолтом ``simulated``. Плюс клиент рисовал строку
-    про демо-режим ВСЕГДА, не глядя на поле.
-
-    Проверяем три вещи: факт доставки сохраняется в тикете, ``email_block``
-    берёт его оттуда, а клиент рисует строку по значению.
-    """
-    from api import mail as mail_mod
-
-    ticket = {"id": "LEX-0001", "question": "Вопрос",
-              "asker": {"role_id": "director"}, "delivery": "sent"}
-    block = mail_mod.email_block(ticket)
-    check("письмо: карточка берёт сохранённый факт доставки",
-          block["delivery"] == "sent",
-          f"delivery={block['delivery']!r} (у тикета sent)")
-
-    without = mail_mod.email_block({"id": "LEX-0002", "question": "Вопрос"})
-    check("письмо: без сохранённого факта — simulated, а не выдумка",
-          without["delivery"] == "simulated",
-          f"delivery={without['delivery']!r}")
-
-    explicit = mail_mod.email_block(ticket, delivery="failed")
-    check("письмо: явный исход сильнее сохранённого",
-          explicit["delivery"] == "failed",
-          f"delivery={explicit['delivery']!r}")
-
-    core_src = (Path(__file__).resolve().parents[1]
-                / "src" / "api" / "core.py").read_text(encoding="utf-8")
-    check("письмо: эскалация сохраняет факт доставки в тикете",
-          "delivery=letter" in core_src.replace(" ", "") or
-          "delivery=letter[" in core_src,
-          "в core.py есть _patch_ticket(delivery=...)")
-
-    web_src = (Path(__file__).resolve().parents[1]
-               / "src" / "web" / "app.js").read_text(encoding="utf-8")
-    check("письмо: клиент различает sent/failed/simulated",
-          "mail__demo--ok" in web_src and "mail__demo--fail" in web_src,
-          "строка про доставку рисуется по значению")
 
 
 def check_similar_questions_text() -> None:

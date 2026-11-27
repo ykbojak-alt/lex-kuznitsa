@@ -1949,6 +1949,12 @@ html[data-theme="dark"] .sug--missing .sug__title { color: #e8c98a; }
   padding-top: 6px;
 }
 
+/* Факт доставки письма: не курсив и не серый — это не оговорка, а статус.
+   Раньше строка была одна на все случаи, и реально отправленное письмо
+   подписывалось «демонстрационный режим». */
+.mail__demo--ok { color: var(--success); font-style: normal; }
+.mail__demo--fail { color: var(--danger); font-style: normal; font-weight: 600; }
+
 /* почтовый ящик */
 .mail__bar { display: flex; align-items: baseline; gap: 10px; margin: 12px 0 4px; }
 .mail__count { font-size: 12px; color: var(--text-2); }

@@ -778,7 +778,17 @@
 
     var stRow = el('div', 'mail__sheetstatus');
     stRow.appendChild(el('span', 'tstatus tstatus--' + st.tone, st.label));
-    stRow.appendChild(el('span', 'mail__demo', 'демонстрационный режим — реальная отправка не выполнялась'));
+    /* Строку про доставку рисуем по факту, а не всегда: письмо на стенде
+       уходит по SMTP, и «демонстрационный режим» рядом с реально
+       отправленным письмом — прямая ложь сотруднику. */
+    var dlv = em.delivery || 'simulated';
+    if (dlv === 'sent') {
+      stRow.appendChild(el('span', 'mail__demo mail__demo--ok', 'письмо отправлено по SMTP'));
+    } else if (dlv === 'failed') {
+      stRow.appendChild(el('span', 'mail__demo mail__demo--fail', 'письмо не ушло — SMTP отказал'));
+    } else {
+      stRow.appendChild(el('span', 'mail__demo', 'демонстрационный режим — реальная отправка не выполнялась'));
+    }
     sheet.appendChild(stRow);
     host.appendChild(sheet);
 

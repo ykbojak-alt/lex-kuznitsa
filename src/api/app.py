@@ -809,7 +809,10 @@ def get_inbox(status: str | None = None, role_id: str | None = None,
     return {
         "mode": config.EMAIL_MODE,
         "mailbox": config.QUALITY_EMAIL,
-        "delivery": "simulated",
+        # Режим, а не исход конкретного письма: исход — в каждой карточке
+        # (letter.email.delivery). Здесь раньше стояло жёсткое "simulated",
+        # и в режиме smtp ответ прямо противоречил отправленным письмам.
+        "delivery": config.EMAIL_MODE,
         "stats": mail.stats(),
         "letters": letters,
     }
