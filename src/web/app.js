@@ -1298,10 +1298,25 @@
     host.appendChild(el('h3', 'detail-h', 'Здоровье системы'));
     var llm = h.llm || {}, emb = h.embed || {}, rr = h.rerank || {}, corp = h.corpus || {};
     var indexed = corp.indexed_at || corp.rebuilt_at || corp.last_indexed || corp.index_built_at;
+    /* Состояние кэша — отдельно от доступности эмбеддера: живой :8081 при
+       несовпавшем кэше даёт «вектор 0», и «Embed: доступен» рядом с этим
+       вводит в заблуждение. */
+    var vs = emb.vectors || null;
+    var vectorsText = '— (пока не измерялось)';
+    if (vs) {
+      if (vs.ready) {
+        vectorsText = 'готовы (' + (vs.vectors != null ? vs.vectors : '?') + ' векторов'
+          + (vs.chunks != null && vs.chunks !== vs.vectors ? ', чанков ' + vs.chunks : '') + ')';
+      } else {
+        vectorsText = 'выключен: ' + (vs.reason || 'кэш не собран')
+          + (vs.vectors != null && vs.chunks != null ? ' (' + vs.vectors + ' из ' + vs.chunks + ')' : '');
+      }
+    }
     var rows = [
       ['Слот модели', llm.slot_label || llm.slot || '—'],
       ['LLM', llm.reachable ? 'доступен' : 'недоступен'],
       ['Embed', (emb.model || '—') + ' · ' + (emb.reachable ? 'доступен' : 'недоступен')],
+      ['Векторы', vectorsText],
       ['Rerank', (rr.model || '—') + ' · ' + (rr.reachable ? 'доступен' : 'недоступен')],
       ['Корпус', (corp.documents != null ? corp.documents : '—') + ' документов / '
         + (corp.chunks != null ? corp.chunks : '—') + ' чанков'],
