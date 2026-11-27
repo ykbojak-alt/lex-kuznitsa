@@ -41,7 +41,9 @@ from . import (
     mail,
     preview,
     probes,
+    stats as stats_api,
     tickets,
+    voice,  # голосовой ввод-вывод (STT/TTS) — аддитивный слой
 )
 from . import (
     stats as stats_api,
@@ -58,6 +60,7 @@ app = FastAPI(
 )
 
 app.include_router(stats_api.router)
+app.include_router(voice.router)
 
 app.add_middleware(
     CORSMiddleware,

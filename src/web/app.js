@@ -1747,6 +1747,86 @@
     host.appendChild(box);
   }
 
+  function makeSpeakHandler(btn, text) {
+    var audio = new Audio();
+    var playing = false;
+    var pending = false;
+
+    btn.addEventListener('click', function () {
+      if (playing) {
+        audio.pause();
+        audio.currentTime = 0;
+        playing = false;
+        btn.classList.remove('is-playing');
+        btn.setAttribute('aria-label', 'Озвучить ответ');
+        btn.querySelector('.answer__speak__label').textContent = 'Озвучить';
+        return;
+      }
+      if (pending) return;
+      pending = true;
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
+      fetch('api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text })
+      }).then(function (r) {
+        if (!r.ok) throw new Error('tts_http_' + r.status);
+        return r.blob();
+      }).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        audio.src = url;
+        audio.play().then(function () {
+          playing = true;
+          btn.classList.add('is-playing');
+          btn.setAttribute('aria-label', 'Остановить озвучку');
+          btn.querySelector('.answer__speak__label').textContent = 'Стоп';
+        }).catch(function () { playing = false; throw new Error('tts_play'); })
+          .finally(function () { pending = false; btn.disabled = false; btn.removeAttribute('aria-busy'); });
+        audio.onended = function () {
+          playing = false;
+          btn.classList.remove('is-playing');
+          btn.setAttribute('aria-label', 'Озвучить ответ');
+          btn.querySelector('.answer__speak__label').textContent = 'Озвучить';
+        };
+        audio.onerror = function () {
+          playing = false;
+          btn.classList.remove('is-playing');
+          btn.setAttribute('aria-label', 'Озвучить ответ');
+          btn.querySelector('.answer__speak__label').textContent = 'Озвучить';
+          showVoiceUnavailable();
+        };
+      }).catch(function (e) {
+        playing = false;
+        btn.classList.remove('is-playing');
+        btn.setAttribute('aria-label', 'Озвучить ответ');
+        btn.querySelector('.answer__speak__label').textContent = 'Озвучить';
+        showVoiceUnavailable();
+      });
+    });
+    return btn;
+  }
+
+  function showVoiceUnavailable() {
+    var old = document.querySelector('.voice-unavailable');
+    if (old) old.remove();
+    var box = el('div', 'voice-unavailable');
+    box.setAttribute('role', 'alert');
+    var p = el('p');
+    p.textContent = 'Голос недоступен: сервис синтеза звука сейчас не отвечает. Опишите вопрос словами — LEX подготовит ответ.';
+    var close = el('button', 'btn btn--ghost', 'Закрыть');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Закрыть сообщение о недоступности голоса');
+    close.addEventListener('click', function () { box.remove(); });
+    box.appendChild(p);
+    box.appendChild(close);
+    var host = document.querySelector('.answer-host, .answer-short');
+    if (host) {
+      while (host.lastChild && host.lastChild !== box) host.appendChild(box);
+      host.appendChild(box);
+    }
+  }
+
   function renderAnswer(host, data) {
     clear(host);
     var turnId = data._turnId || '0';
@@ -1802,9 +1882,6 @@
         })(firstCite));
         actions.appendChild(openDoc);
       }
-
-      host.appendChild(actions);
-      host.appendChild(detailHost);
     } else if (data.text && !data.short) {
       // Ответ без короткой формы: показываем текст как есть (обратная совместимость).
       var full = el('div', 'answer__lead');
@@ -1812,6 +1889,22 @@
       fillWithNotes(fp, data.text, turnId);
       full.appendChild(fp);
       host.appendChild(full);
+    }
+
+    /* Кнопка озвучки — в строку действий ответа (если есть полный текст), с деградацией при 503.
+       Текст для озвучки очищаем от служебных ссылок [n]. */
+    var speakText = (data.text || '').replace(/\[\d+(?:\s*[,;]\s*\d+)*\]/g, '').trim();
+    if (speakText) {
+      var speakBtn = el('button', 'btn answer__speak', '');
+      speakBtn.setAttribute('aria-label', 'Озвучить ответ');
+      speakBtn.title = 'Озвучить ответ';
+      speakBtn.tabIndex = 0;
+      speakBtn.dataset.text = speakText;
+      speakBtn.appendChild(icon('icon-answer.svg', 'answer__speak__icon'));
+      var speakLabel = el('span', 'answer__speak__label', 'Озвучить');
+      speakBtn.appendChild(speakLabel);
+      speakBtn.addEventListener('click', makeSpeakHandler(speakBtn, speakText));
+      actions.appendChild(speakBtn);
     }
 
     if (data.assumptions && data.assumptions.length) {
@@ -2938,6 +3031,162 @@
     box.style.overflowY = box.scrollHeight > max ? 'auto' : 'hidden';
   }
   $('question').addEventListener('input', autoGrow);
+
+  /* ------------------------------------------------------------------ голос
+     Микрофон: MediaRecorder -> audio/* -> POST /api/stt -> текст в поле ввода.
+     Текст НЕ отправляется автоматически: человек правит и жмёт «Спросить».
+     Любая ошибка STT (503/network/нет микрофона) -> плашка, поле не трогаем. */
+
+  var micBtn = $('micBtn');
+  var mic = {
+    recorder: null,
+    stream: null,
+    chunks: [],
+    timer: null,
+    active: false,
+    cancelled: false
+  };
+
+  var MIC_MAX_MS = 60000;
+
+  function micBusyUI(busy) {
+    if (!micBtn) return;
+    if (busy) {
+      micBtn.disabled = true;
+      micBtn.setAttribute('aria-busy', 'true');
+    } else {
+      micBtn.disabled = false;
+      micBtn.removeAttribute('aria-busy');
+    }
+  }
+
+  function micResetUI() {
+    mic.active = false;
+    if (!micBtn) return;
+    micBtn.classList.remove('recording');
+    micBtn.setAttribute('aria-pressed', 'false');
+    micBtn.setAttribute('aria-label', 'Записать голосовой вопрос');
+    micBtn.title = 'Записать голосовой вопрос';
+  }
+
+  function micRelease() {
+    if (mic.timer) { clearTimeout(mic.timer); mic.timer = null; }
+    if (mic.stream) {
+      mic.stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+      mic.stream = null;
+    }
+    mic.recorder = null;
+  }
+
+  function micPickMime() {
+    var cands = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+    for (var i = 0; i < cands.length; i++) {
+      if (global.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(cands[i])) {
+        return cands[i];
+      }
+    }
+    return '';
+  }
+
+  function micStart() {
+    if (!micBtn || mic.active) return;
+    if (!global.navigator.mediaDevices || !global.navigator.mediaDevices.getUserMedia) {
+      showVoiceUnavailable();
+      return;
+    }
+    micBusyUI(true);
+    global.navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      mic.stream = stream;
+      mic.chunks = [];
+      mic.cancelled = false;
+      var mime = micPickMime();
+      try {
+        mic.recorder = mime ? new MediaRecorder(stream, { mimeType: mime })
+                            : new MediaRecorder(stream);
+      } catch (e) {
+        micRelease();
+        micBusyUI(false);
+        showVoiceUnavailable();
+        return;
+      }
+      mic.recorder.ondataavailable = function (e) {
+        if (e.data && e.data.size) mic.chunks.push(e.data);
+      };
+      mic.recorder.onstop = micOnStop;
+      mic.recorder.start();
+      mic.active = true;
+      micBusyUI(false);
+      micBtn.classList.add('recording');
+      micBtn.setAttribute('aria-pressed', 'true');
+      micBtn.setAttribute('aria-label', 'Остановить запись');
+      micBtn.title = 'Остановить запись (лимит 60 с)';
+      mic.timer = global.setTimeout(micStop, MIC_MAX_MS);
+    }).catch(function () {
+      micRelease();
+      micBusyUI(false);
+      micResetUI();
+      showVoiceUnavailable();
+    });
+  }
+
+  function micStop() {
+    if (!mic.recorder || !mic.active) return;
+    try { mic.recorder.stop(); } catch (e) { /* уже остановлен */ }
+  }
+
+  function micCancel() {
+    mic.cancelled = true;
+    if (mic.timer) { clearTimeout(mic.timer); mic.timer = null; }
+    if (mic.recorder && mic.recorder.state !== 'inactive') {
+      try { mic.recorder.stop(); } catch (e) {}
+    } else {
+      micRelease();
+      micResetUI();
+    }
+  }
+
+  function micOnStop() {
+    var chunks = mic.chunks;
+    var cancelled = mic.cancelled;
+    micRelease();
+    micResetUI();
+    if (cancelled || !chunks.length) return;
+    var type = (chunks[0] && chunks[0].type) || 'audio/webm';
+    var ext = type.indexOf('ogg') >= 0 ? 'ogg' : (type.indexOf('mp4') >= 0 ? 'm4a' : 'webm');
+    var blob = new Blob(chunks, { type: type });
+
+    micBusyUI(true);
+    var fd = new FormData();
+    fd.append('audio', blob, 'recording.' + ext);
+    fd.append('language', 'ru');
+    fetch('api/stt', { method: 'POST', body: fd })
+      .then(function (r) {
+        if (!r.ok) throw new Error('stt_http_' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        micBusyUI(false);
+        if (d && d.text) {
+          var box = $('question');
+          box.value = d.text;
+          autoGrow();
+          box.focus();
+        } else {
+          showVoiceUnavailable();
+        }
+      })
+      .catch(function () {
+        micBusyUI(false);
+        showVoiceUnavailable();
+      });
+  }
+
+  if (micBtn) {
+    micBtn.addEventListener('click', function () {
+      if (mic.active) { micCancel(); return; }
+      micStart();
+    });
+  }
 
   /* доп. №9: Ctrl+K — фокус в поле вопроса; Esc — закрыть раскрытое или снять фокус. */
   doc.addEventListener('keydown', function (e) {
