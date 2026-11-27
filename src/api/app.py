@@ -175,7 +175,22 @@ _BUILD_MODULES = (
     "lex.grounding", "lex.corpus", "lex.cases", "lex.policy",
     "lex.llm", "lex.caveat", "lex.journal",
     # HTTP-слой
-    "api.app", "api.core", "api.mail", "api.config", "api.tickets",
+    "api.app", "api.core", "api.mail", "api.config", "api.tickets", "api.sse",
+)
+
+# Клиент отдаётся статикой, а не импортируется, поэтому модуля у него нет —
+# берём файлы по путям. Без них отпечаток НЕ ВИДИТ ни одной правки интерфейса:
+# волна §18.4 целиком лежала в app.js, а отпечаток после деплоя не сдвинулся
+# (нашла ALICE при приёмке — требование «хеш обязан смениться» было
+# невыполнимо). Шесть файлов, а не сканирование каталога: набор обязан быть
+# фиксированным, иначе новый файл меняет хеш без правки кода.
+_BUILD_ASSETS = (
+    "src/web/index.html",
+    "src/web/app.js",
+    "src/web/lex.css",
+    "src/web/mock-lex.js",
+    "src/web/progress-view.js",
+    "src/web/console-view.js",
 )
 
 
@@ -214,6 +229,11 @@ def _loaded_sources() -> list[tuple[str, str | None]]:
             except Exception:
                 path = None
         out.append((name, path))
+    # Клиент: модуля нет, путь известен. Отсутствующий файл пропускается в
+    # _digest — отпечаток считается по тому, что есть, и не падает.
+    root = Path(__file__).resolve().parents[2]
+    for rel in _BUILD_ASSETS:
+        out.append((rel, str(root / rel)))
     return out
 
 

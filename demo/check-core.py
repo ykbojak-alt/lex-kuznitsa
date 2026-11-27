@@ -1410,6 +1410,33 @@ def check_build_fingerprint() -> None:
           '"build"' in health_src or "'build'" in health_src,
           "деплой проверяется одной командой curl")
 
+    # ПОКРЫТИЕ: отпечаток обязан видеть UI. Волна §18.4 целиком лежала в
+    # app.js, а хеш после деплоя не сдвинулся — набор модулей был только
+    # Python, и требование приёмки «хеш обязан смениться» было невыполнимо
+    # (нашла ALICE). Проверяем не список, а поведение: подмена байтов app.js
+    # сдвигает source_sha256, не трогая снимок sha256.
+    import api.app as _app2
+
+    _orig2 = _app2._fingerprint_of
+
+    def _ui_patched(path):
+        data = _orig2(path)
+        if path and path.endswith("app.js") and "/web/" in path.replace("\\", "/"):
+            return (data or b"") + b"\n// probe-ui\n"
+        return data
+
+    _app2._fingerprint_of = _ui_patched
+    try:
+        ui_changed = _build_fingerprint()
+    finally:
+        _app2._fingerprint_of = _orig2
+    check("сборка: правка app.js видна в source_sha256",
+          ui_changed["source_sha256"] != first["source_sha256"],
+          "без клиента в наборе деплой UI нечем доказать")
+    check("сборка: правка app.js не подменяет снимок sha256",
+          ui_changed["sha256"] == first["sha256"],
+          "исполняемый отпечаток по-прежнему из снимка импорта")
+
 
 def check_ticket_delivery_truth() -> None:
     """Карточка заявки говорит про доставку правду, а не «simulated» (MIMIC, камень 18).
