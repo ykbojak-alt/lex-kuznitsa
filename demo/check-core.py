@@ -1323,9 +1323,19 @@ def check_build_fingerprint() -> None:
     check("сборка: ЖИВОЙ замер — правка диска не меняет исполняемый отпечаток",
           live["sha256"] == first["sha256"],
           f"{first['sha256']} -> {live['sha256']}")
+    # Привязка к СНИМКУ ИМПОРТА, а не к предыдущему вызову. Иначе реализация,
+    # где sha256 и дрейф считаются из одного и того же свежего чтения
+    # (сравнение память-с-памятью), прошла бы: оба поля поехали бы вместе
+    # и «выглядели согласованными». NEO назвала это границей — закрываем.
+    check("сборка: ЖИВОЙ замер — sha256 равен снимку импорта",
+          live["sha256"] == _app._BUILD_AT_IMPORT["sha256"],
+          "исполняемый код не перечитывается с диска")
     check("сборка: ЖИВОЙ замер — дрейф поднялся",
           live["source_drift"] is True,
           "байты в процессе != байты на диске")
+    check("сборка: ЖИВОЙ замер — source_sha256 отразил подменённые байты",
+          live["source_sha256"] != live["sha256"],
+          "дрейф считается от снимка, а не сам с собой")
     check("сборка: ЖИВОЙ замер — возврат чтения снимает дрейф",
           _build_fingerprint()["source_drift"] is False,
           "чтение восстановлено, дрейфа нет")
@@ -1374,7 +1384,12 @@ def check_ticket_delivery_truth() -> None:
     config.TICKETS_PATH = tmp / "tickets.jsonl"
     config.ESCALATIONS_PATH = tmp / "escalations.jsonl"
     try:
-        assert str(tickets._path("tk")).startswith(str(tmp)), "тест пишет вне временного каталога"
+        # Один assert выше — единственный в файле; под `python -O` он исчезает
+        # молча, и защита «не пишем в var/» пропадает ровно там, где нужна.
+        # Через check(): провал виден строкой FAIL, а не пропадает.
+        check("delivery: тест пишет во временный каталог, а не в var/",
+              str(tickets._path("tk")).startswith(str(tmp)),
+              f"{tickets._path('tk')}")
 
         row = tickets.create_ticket({"question": "Кто отвечает за пожарную безопасность?",
                                      "kind": "not_in_corpus", "session_id": "t-deliv"})
