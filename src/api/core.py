@@ -84,6 +84,20 @@ def _as_dict(obj: Any) -> dict:
 _corpus_cache: dict[str, Any] = {}
 
 
+def corpus_roots() -> list[Path]:
+    """Все корни корпуса: corpus-real + опционально corpus-norm (§12).
+
+    Единственный источник списка корней — для corpus(), doc_path(),
+    manifest_documents(), content_type_mix(). Внешний корень не ломает
+    существующее поведение: если corpus-norm отсутствует — только corpus-real.
+    """
+    roots = [config.CORPUS_DIR]
+    norm_dir = getattr(config, "CORPUS_NORM_DIR", None)
+    if norm_dir and norm_dir.exists():
+        roots.append(norm_dir)
+    return roots
+
+
 def corpus():
     """Загруженный корпус ядра (кэш по корневому каталогу).
 
@@ -97,11 +111,7 @@ def corpus():
     if m is None or not hasattr(m, "load_corpus"):
         return None
     try:
-        roots = [config.CORPUS_DIR]
-        norm_dir = getattr(config, "CORPUS_NORM_DIR", None)
-        if norm_dir and norm_dir.exists():
-            roots.append(norm_dir)
-        c = m.load_corpus_multi(roots)
+        c = m.load_corpus_multi(corpus_roots())
     except Exception:
         c = m.load_corpus(config.CORPUS_DIR)
     _corpus_cache[key] = c
@@ -129,8 +139,15 @@ def manifest() -> dict:
 
 
 def manifest_documents() -> list[dict]:
-    docs = manifest().get("documents") or []
-    return [d for d in docs if isinstance(d, dict)]
+    docs: list[dict] = []
+    for root in corpus_roots():
+        path = root / "manifest.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        docs.extend(d for d in (data.get("documents") or []) if isinstance(d, dict))
+    return docs
 
 
 def content_type_mix() -> dict[str, int]:
@@ -475,12 +492,16 @@ def doc_meta(doc_id: str) -> dict | None:
 def doc_path(doc_id: str) -> Path | None:
     meta = doc_meta(doc_id)
     if meta and meta.get("file"):
-        p = config.CORPUS_DIR / str(meta["file"])
-        if p.is_file():
-            return p
-    for p in sorted(config.CORPUS_DIR.iterdir()):
-        if p.is_file() and p.name.startswith(doc_id):
-            return p
+        for root in corpus_roots():
+            p = root / str(meta["file"])
+            if p.is_file():
+                return p
+    for root in corpus_roots():
+        if not root.is_dir():
+            continue
+        for p in sorted(root.iterdir()):
+            if p.is_file() and p.name.startswith(doc_id):
+                return p
     return None
 
 
