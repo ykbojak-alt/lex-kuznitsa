@@ -29,7 +29,11 @@ from . import policy
 
 # Что вообще заслуживает тикета. Список закрытый: расширять его — решение
 # владельца контракта, а не удобство вызывающего кода.
-TRIGGER_KINDS = ("not_in_corpus", "conflict_unresolved", "ocr_degraded")
+TRIGGER_KINDS = ("not_in_corpus", "conflict_unresolved", "ocr_degraded",
+                 # §12: модельный отказ — тоже повод службе качества
+                 # разобрать (фрагменты слабые, промпт не сработал), но
+                 # в заявке он должен называться честно, а не «нет в корпусе».
+                 "model_refusal")
 
 STATUSES = ("open", "assigned", "answered", "closed")
 

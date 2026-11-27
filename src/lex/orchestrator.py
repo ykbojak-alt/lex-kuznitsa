@@ -213,6 +213,10 @@ class RunOptions:
     tone: str = "plain"
     tickets_path: Path | None = None
     changes_path: Path | None = None
+    # §23: псевдоним модели из UI. Картинка в стиле 42 — один из трёх
+    # слотов NexusLink, отображаемый под своим именем. Не передан —
+    # дефолт из NEXUS_LINK_MODEL / model_chain().
+    model: str | None = None
 
 
 def _now_ms(t0: float) -> int:
@@ -597,11 +601,23 @@ class Orchestrator:
     def _search_summary(self, state: dict, performed: bool = True) -> dict:
         """Что именно искали — это обязательная часть заявки (§15.2)."""
         hits = state.get("doc_hits") or []
-        allowed = state.get("allowed") or []
+        allowed = state.get("allowed")
+        # §23 v1.17 (defect 3, NEO-waveKNA + NEO fix-3): когда предметный
+        # гейт останавливает каскад на retrieve, _stage_permissions не
+        # выполнился, allowed None, doc_hits (видимые после _filter_access)
+        # уже посчитаны. Читаем doc_hits, но СЧИТАЕМ УНИКАЛЬНЫЕ ДОКУМЕНТЫ,
+        # не фрагменты: _stage_permissions:945-946 считает
+        # {getattr(h.chunk,'doc_id','') for h in doc_hits}, и «доступно N
+        # из 4» — это N уникальных doc_id. Фрагменты дают 56 при 4 документах,
+        # документы дают 2 — то, что совпадает с числом на шаге permissions.
+        if allowed is None:
+            allowed_docs = {getattr(h.chunk, "doc_id", "") for h in hits}
+        else:
+            allowed_docs = {getattr(h.chunk, "doc_id", "") for h in allowed}
         return {
             "documents": len(self.corpus.documents),
             "cases": len(self.cases.cases),
-            "accessible": len(allowed),
+            "accessible": len(allowed_docs),
             "top": [getattr(h.chunk, "doc_id", "") for h in hits][:5],
             "performed": performed,
             # Причина «нормы нет в регламентах». Диалог по ней не уточняет
@@ -1022,6 +1038,34 @@ class Orchestrator:
         # прогнать проверку по пустой строке — «утверждений 0» на верном
         # ответе (регрессия, поймана на «Как формируется команда проекта?»).
         state["answer_text"] = text
+        # §12 (defect 1, NEO-waveKNA + NEO fix-1): модель ответила
+        # «ОТКАЗ: <причина>» по инструкции _ask_model — это отказ, а не
+        # ответ для verify. Резаем маркер ДО grounding-проверки: барьер 3
+        # мог усечь «ОТКАЗ: <причина>» и маркер пропал бы. Детектор без
+        # регулярки (NEO): ловит markdown-обёртки '**ОТКАЗ:**', '## ОТКАЗ:',
+        # '：', и не ложится на 'ОТКАЗЫВАЮСЬ', 'Ответ: ОТКАЗ:'.
+        head = text.lstrip(" \t\r\n#*_>`")
+        if head.startswith("ОТКАЗ"):
+            rest = head[len("ОТКАЗ"):].lstrip(" \t*_")
+            if rest[:1] in (":", "："):
+                # Маркеры цитат [n] в причине отказа — мусор для человека:
+                # отказ не опирается на источник, ссылаться не на что.
+                reason = re.sub(r"\s*\[\d+\]", "", rest[1:]).strip(" \t*_>`")
+                # Причина нужна _why_unresolved ДО _open_ticket: заявка
+                # создаётся с текстом «почему», а не пустой.
+                state["model_refusal_reason"] = reason
+                # Тикет и RefusalData — один и тот же kind: заявка службе
+                # качества «модель отказалась» ≠ «нет в корпусе».
+                ticket_id = self._open_ticket(state, "model_refusal")
+                state["final"] = ("refusal", RefusalData(
+                    reason=reason or "Модель отказалась отвечать на вопрос",
+                    sources=[f.doc_id for f in frames],
+                    kind="model_refusal",
+                    searched=self._searched(state),
+                    hint=self._refusal_hint(ticket_id),
+                ))
+                return _step(n, "compose", "модель вернула отказ", self._t0,
+                             color="amber", total=self._total())
         detail = note or f"из {len(frames)} фрагментов"
         return _step(n, "compose", detail, self._t0,
                      color="amber" if note else None, total=self._total())
@@ -1502,7 +1546,7 @@ class Orchestrator:
             {"role": "system",
              "content": SYSTEM_PROMPT + "\n\n" + CASE_HINT + "\n\n" + llm.tone_rules(self.opts.tone)},
             {"role": "user", "content": user},
-        ])
+        ], model=self.opts.model)
 
     def _extractive_answer(self, frames: list[Frame]) -> str:
         """Ответ без модели: цитаты как есть. Честно, но некрасиво.
@@ -1588,6 +1632,14 @@ class Orchestrator:
         policy_reason = self._role_denied_reason(state, line=line)
         if policy_reason:
             return policy_reason
+        if kind == "model_refusal":
+            # §12: причина отказа пришла от модели, а не от поиска. «Ни одно
+            # утверждение не подтверждается» здесь было бы ложью: фрагменты
+            # нашлись, модель отказалась по ним отвечать (в т.ч. по своей
+            # вине — службе качества разбирать контекст).
+            why = (state.get("model_refusal_reason") or "").strip()
+            base = "модель отказалась отвечать по найденным фрагментам"
+            return f"{base}: {why}" if why else base
         frames = len(state.get("allowed") or [])
         if frames == 0:
             where = f" в направлении «{line}»" if line else ""

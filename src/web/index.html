@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>LEX — ассистент по документам</title>
+<!-- Стиль 42: дисплейный гротеск (Bebas Neue / Oswald) + антиква (Source Serif 4) + гротеск (Inter).
+     При оффлайн-запуске — резерв Impact / Georgia / system-ui из токенов lex.css. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&family=Oswald:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="lex.css">
 </head>
 <body>
@@ -12,12 +17,8 @@
 <div class="app" id="app">
 
   <nav class="nav" aria-label="Разделы LEX">
-    <a class="nav__brand" href="#chat" id="navBrand">
-      <svg class="nav__mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M3 4h5.2c1.7 0 2.7.8 3.3 2 .6-1.2 1.6-2 3.3-2H20v16h-4.6c-1.4 0-2.2.5-2.6 1.4h-1.6c-.4-.9-1.2-1.4-2.6-1.4H3V4Z"
-              fill="none" stroke="currentColor" stroke-width="1.4"/>
-        <path d="M12 6.6v12.6" stroke="currentColor" stroke-width="1"/>
-      </svg>
+    <a class="nav__brand" href="#chat" id="navBrand" aria-label="LEX — на главную">
+      <img class="nav__mark" src="assets/logo-lex-style42.svg" alt="" width="42" height="42">
       <span class="nav__word">LEX</span>
     </a>
     <ul class="nav__list" role="list">
@@ -29,42 +30,51 @@
       <li><button class="nav__item" type="button" data-screen="stats">Аналитика</button></li>
       <li><button class="nav__item" type="button" data-screen="mail" id="navMail">Почта качества</button></li>
     </ul>
-    <p class="nav__count" id="navCount"></p>
+    <p class="nav__count" id="navCount" role="status" aria-live="polite"></p>
   </nav>
 
   <main class="work" aria-label="Рабочая область LEX">
     <div class="work__inner">
 
-      <div class="tabs" role="tablist" aria-label="Настройки запроса">
-        <button class="tab" type="button" role="tab" id="tabRole" aria-selected="true"
-                aria-controls="panelSettings" data-tab="role">Роли <span class="tab__badge" id="badgeRole">не выбрана</span></button>
-        <button class="tab" type="button" role="tab" id="tabLine" aria-selected="false"
-                aria-controls="panelSettings" data-tab="line">Направление <span class="tab__badge" id="badgeLine">авто</span></button>
-        <button class="tab" type="button" role="tab" id="tabTone" aria-selected="false"
-                aria-controls="panelSettings" data-tab="tone">Тон <span class="tab__badge" id="badgeTone">простой</span></button>
-        <button class="tab" type="button" role="tab" id="tabMode"
-                aria-controls="panelSettings" data-tab="mode">Режим <span class="tab__badge" id="badgeMode">мок</span></button>
-      </div>
+      <section class="settings-disclosure" id="settingsDisclosure" aria-label="Параметры запроса">
+        <button class="settings-toggle" type="button" id="settingsToggle"
+                aria-expanded="true" aria-controls="settingsContent">
+          <span class="settings-toggle__label">Параметры</span>
+          <span class="settings-toggle__summary" id="settingsSummary">Загрузка параметров</span>
+          <span class="settings-toggle__action" id="settingsToggleAction">Скрыть</span>
+          <span class="settings-toggle__chevron" aria-hidden="true"></span>
+        </button>
+        <div class="settings-content" id="settingsContent">
+          <div class="tabs" role="tablist" aria-label="Настройки запроса">
+            <button class="tab" type="button" role="tab" id="tabRole" aria-selected="true"
+                    aria-controls="panelSettings" data-tab="role">Роли <span class="tab__badge" id="badgeRole">не выбрана</span></button>
+            <button class="tab" type="button" role="tab" id="tabLine" aria-selected="false"
+                    aria-controls="panelSettings" data-tab="line">Направление <span class="tab__badge" id="badgeLine">авто</span></button>
+            <button class="tab" type="button" role="tab" id="tabTone" aria-selected="false"
+                    aria-controls="panelSettings" data-tab="tone">Тон <span class="tab__badge" id="badgeTone">простой</span></button>
+            <button class="tab" type="button" role="tab" id="tabMode"
+                    aria-controls="panelSettings" data-tab="mode">Режим <span class="tab__badge" id="badgeMode">мок</span></button>
+          </div>
 
-      <div class="panelbar" id="panelSettings" role="tabpanel" aria-live="polite">
-        <p class="panelbar__hint" id="settingsHint">Выберите роль — <em>права доступа обязательны</em>: от роли зависит, какие документы агент вправе показать.</p>
-        <div class="panelbar__row" id="settingsRow"></div>
-      </div>
+          <div class="panelbar" id="panelSettings" role="tabpanel" aria-live="polite">
+            <p class="panelbar__hint sr-only" id="settingsHint">Выберите роль — <em>права доступа обязательны</em>: от роли зависит, какие документы агент вправе показать.</p>
+            <div class="panelbar__row" id="settingsRow"></div>
+          </div>
+        </div>
+      </section>
 
       <header class="article-head">
         <h1 class="article-title" id="articleTitle">Чат по документам</h1>
         <p class="article-sub" id="articleSub">Ответы только из базы знаний организации.</p>
+        <img class="article-head__art" id="articleArt" src="assets/illustration-chat-42.png" alt="" width="651" height="217">
       </header>
 
       <section class="feed" id="feed" role="log" aria-live="polite" aria-label="Лента диалога">
 
         <div class="screen is-active" id="screen-chat">
           <div class="intro" id="intro">
-            <img class="intro__art" src="assets/illustration-welcome.svg" alt="" width="200" height="160">
-            <p class="answer__lead">Задайте вопрос по регламентам и правилам организации. Ответ придёт с цитатами
-            из действующей редакции; каждое утверждение опирается на документ или кейс базы знаний.</p>
-            <p class="answer__lead">Если в базе знаний ответа нет — LEX так и скажет и покажет, что именно искал.
-            Это не сбой: так работает правило «только из базы знаний».</p>
+            <p class="answer__lead">Задайте вопрос по правилам организации. Ответ будет основан на документах базы знаний и содержит ссылки на источники.</p>
+            <p class="answer__lead">Если ответа в документах нет, LEX сообщит об этом.</p>
           </div>
         </div>
 
@@ -112,17 +122,28 @@
           <textarea id="question" rows="2"
                     placeholder="Например: какой срок согласования заявки на закупку?"
                     aria-describedby="sendHint"></textarea>
-          <button class="btn btn--primary" id="send" type="submit">
-            <span>Спросить</span>
-            <img class="btn__icon" src="assets/icon-send.svg" alt="" width="14" height="14">
-          </button>
+          <div class="composer__actions">
+            <button class="btn btn--primary" id="send" type="submit">
+              <span>Спросить</span>
+              <img class="btn__icon" src="assets/icon-send.svg" alt="" width="22" height="22">
+            </button>
+            <button class="feed__todown" id="feedToDown" type="button" hidden
+                    aria-label="Прокрутить к последнему сообщению">↓ к последнему</button>
+          </div>
         </div>
-        <div class="composer__row">
-          <label class="asof" for="asOf">
-            <span>на какую дату</span>
-            <input id="asOf" type="date" aria-label="Действующая редакция на дату">
-          </label>
-          <span class="composer__hint" id="sendHint">выберите роль — права доступа обязательны</span>
+        <span class="composer__hint sr-only" id="sendHint">выберите роль — права доступа обязательны</span>
+        <div class="composer__models" id="models" role="group" aria-label="Выбор модели">
+          <label class="composer__models-label" for="modelSelect">Модель:</label>
+          <div class="model-picker" id="modelPicker">
+            <select class="model-picker__select" id="modelSelect" name="model">
+              <option value="">Авто — по умолчанию</option>
+              <option value="deepseek-4.1-flash">DeepSeek 4.1 Flash</option>
+              <option value="qwen-3.8-27b">Qwen-3.8-27b</option>
+              <option value="ernie-5.5-flash">Ernie-5.5-Flash</option>
+            </select>
+            <span class="model-picker__chevron" aria-hidden="true"></span>
+          </div>
+          <span class="sr-only" id="modelStatus" role="status" aria-live="polite">Используется модель по умолчанию.</span>
         </div>
       </form>
 

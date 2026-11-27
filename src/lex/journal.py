@@ -70,6 +70,9 @@ REFUSAL_REASONS = (
     "no_edition_in_force",
     "conflict_unresolved",
     "ocr_unavailable",
+    # §12: модель ответила «ОТКАЗ: <причина>» по инструкции промпта —
+    # отличается от not_in_corpus («искали и не нашли»).
+    "model_refusal",
 )
 OUTCOMES = ("resolved", "escalated", "rejected", "open")
 

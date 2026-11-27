@@ -30,6 +30,7 @@
     turn: null,
     lastQuestion: '',
     lastAsOf: '',
+    model: '',  // §23: псевдоним модели из UI (deepseek-4.1-flash / qwen-3.8-27b / ernie-5.5-flash)
     lastTicket: null,
     ticketCards: {},
     ticketDetailCache: {},
@@ -253,6 +254,19 @@
     $('badgeTone').textContent = state.tone === 'formal' ? 'формальный' : 'простой';
     $('badgeMode').textContent = state.mock ? 'мок' : 'живой';
     renderSettings();
+    updateSettingsSummary();
+  }
+
+  function updateSettingsSummary() {
+    var summary = $('settingsSummary');
+    if (!summary) return;
+    var parts = [
+      state.roleId ? roleTitle(state.roleId) : 'Роль не выбрана',
+      state.lineId ? 'Направление выбрано' : 'Авто',
+      state.tone === 'formal' ? 'Формальный тон' : 'Простой тон',
+      state.mock ? 'DEMO' : 'LIVE'
+    ];
+    summary.textContent = parts.join(' · ');
   }
 
   function renderSettings() {
@@ -263,19 +277,90 @@
 
     if (activeTab === 'role') {
       hint.innerHTML = 'Выберите роль — от неё зависит, <em>какие документы</em> агент вправе показать. Регламенты читаются только по отделам роли; запись — у службы качества и руководства.';
+      var slider = el('div', 'role-slider');
+      var prev = el('button', 'role-slider__arrow', '←');
+      prev.type = 'button';
+      prev.setAttribute('aria-label', 'Предыдущая роль');
+      var viewport = el('div', 'role-slider__viewport');
+      viewport.setAttribute('aria-roledescription', 'слайдер');
+      var track = el('div', 'role-slider__track');
+      track.setAttribute('role', 'radiogroup');
+      track.setAttribute('aria-label', 'Роль доступа');
+      var next = el('button', 'role-slider__arrow', '→');
+      next.type = 'button';
+      next.setAttribute('aria-label', 'Следующая роль');
+      var position = el('span', 'role-slider__position');
+      position.setAttribute('aria-live', 'polite');
+      position.setAttribute('aria-atomic', 'true');
+
       for (i = 0; i < state.roles.length; i++) {
         var roleItem = state.roles[i];
-        b = el('button', 'chip', roleDocsLabel(roleItem));
+        b = el('button', 'chip role-slider__card');
         b.type = 'button';
         b.setAttribute('role', 'radio');
         b.setAttribute('aria-checked', String(roleItem.id === state.roleId));
+        b.tabIndex = roleItem.id === state.roleId ? 0 : -1;
+        b.setAttribute('aria-label', roleDocsLabel(roleItem));
+        b.appendChild(el('span', 'role-slider__title', roleItem.title || roleItem.id));
         if (roleItem.documents_total != null) {
           b.title = 'Доступно ' + roleItem.documents_available + ' из '
             + roleItem.documents_total + ' документов корпуса';
+          b.appendChild(el('span', 'role-slider__count', 'Доступно '
+            + roleItem.documents_available + ' из ' + roleItem.documents_total + ' документов'));
+        } else {
+          b.appendChild(el('span', 'role-slider__count', 'Доступ к документам по отделу'));
         }
         b.addEventListener('click', makeRolePicker(roleItem.id));
-        row.appendChild(b);
+        b.addEventListener('keydown', (function (index) {
+          return function (event) {
+            var target = index;
+            if (event.key === 'ArrowRight' || event.key === 'ArrowDown') target++;
+            else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') target--;
+            else if (event.key === 'Home') target = 0;
+            else if (event.key === 'End') target = state.roles.length - 1;
+            else return;
+            event.preventDefault();
+            selectRoleAt(target);
+          };
+        })(i));
+        track.appendChild(b);
       }
+      viewport.appendChild(track);
+      slider.appendChild(prev);
+      slider.appendChild(viewport);
+      slider.appendChild(next);
+      row.appendChild(slider);
+
+      var selectedRoleIndex = 0;
+      for (i = 0; i < state.roles.length; i++) {
+        if (state.roles[i].id === state.roleId) selectedRoleIndex = i;
+      }
+      position.textContent = state.roles.length
+        ? (selectedRoleIndex + 1) + ' из ' + state.roles.length
+        : 'нет ролей';
+      prev.disabled = selectedRoleIndex <= 0;
+      next.disabled = selectedRoleIndex >= state.roles.length - 1;
+      row.appendChild(position);
+      var activeRoleCard = row.querySelector('.role-slider__card[aria-checked="true"]');
+      if (activeRoleCard) {
+        activeRoleCard.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+      }
+
+      function selectRoleAt(index) {
+        var cards = row.querySelectorAll('.role-slider__card');
+        if (!cards.length) return;
+        var target = Math.max(0, Math.min(index, cards.length - 1));
+        cards[target].click();
+        var selected = row.querySelector('.role-slider__card[aria-checked="true"]');
+        if (selected) {
+          selected.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+          selected.focus();
+        }
+      }
+
+      prev.addEventListener('click', function () { selectRoleAt(selectedRoleIndex - 1); });
+      next.addEventListener('click', function () { selectRoleAt(selectedRoleIndex + 1); });
+
       /* §23.2: маленькая строка о модели прав — без неё новый выбор читается неверно. */
       var own = currentRole();
       var permText;
@@ -369,7 +454,33 @@
     })(tabEls[ti]));
   }
 
-  function updateModeChip() { renderTabs(); }
+  (function initSettingsDisclosure() {
+    var toggle = $('settingsToggle');
+    var content = $('settingsContent');
+    var shell = $('settingsDisclosure');
+    var action = $('settingsToggleAction');
+    if (!toggle || !content || !shell) return;
+    toggle.addEventListener('click', function () {
+      var expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(!expanded));
+      content.hidden = expanded;
+      shell.classList.toggle('is-collapsed', expanded);
+      if (action) action.textContent = expanded ? 'Открыть' : 'Скрыть';
+    });
+  })();
+
+  function updateModeStatus() {
+    var status = $('navCount');
+    var isDemo = state.mock;
+    status.textContent = isDemo ? 'DEMO' : 'LIVE';
+    status.className = 'nav__count ' + (isDemo ? 'nav__count--demo' : 'nav__count--live');
+    status.setAttribute('aria-label', isDemo ? 'Демо-режим' : 'Живой режим');
+  }
+
+  function updateModeChip() {
+    renderTabs();
+    updateModeStatus();
+  }
 
   function updateHint() {
     var hint = $('sendHint');
@@ -377,10 +488,10 @@
       hint.textContent = pendingTicket
         ? 'открыта ссылка на заявку из письма — выберите роль «Отдел качества», чтобы её увидеть'
         : 'выберите роль — права записи зависят от роли, чтение документов одинаково у всех';
-      hint.className = 'composer__hint composer__hint--warn';
+      hint.className = 'composer__hint composer__hint--warn sr-only';
       return;
     }
-    hint.className = 'composer__hint';
+    hint.className = 'composer__hint sr-only';
     hint.textContent = state.mock
       ? 'мок-режим: поток шагов эмулируется. Демо: «Какая ставка НДС в России?» — отказ вне базы.'
       : 'живой режим: ответ из /api/ask';
@@ -398,6 +509,16 @@
     mail: ['Почта качества', 'Синтетический ящик отдела качества: сюда приходят письма агента, отсюда эксперт отвечает.']
   };
 
+  var SCREEN_ART = {
+    chat: 'assets/illustration-chat-42.png',
+    roles: 'assets/illustration-roles-42.png',
+    lines: 'assets/illustration-directions-42.png',
+    cases: 'assets/illustration-cases-42.png',
+    tickets: 'assets/illustration-tickets-42.png',
+    stats: 'assets/illustration-analytics-42.png',
+    mail: 'assets/illustration-mail-42.png'
+  };
+
   function goScreen(name) {
     var screens = doc.querySelectorAll('.screen');
     for (var i = 0; i < screens.length; i++) {
@@ -411,6 +532,7 @@
     var meta = SCREEN_TITLE[name] || SCREEN_TITLE.chat;
     $('articleTitle').textContent = meta[0];
     $('articleSub').textContent = meta[1];
+    $('articleArt').src = SCREEN_ART[name] || SCREEN_ART.chat;
     if (name === 'roles') renderRolesScreen();
     if (name === 'lines') renderLinesScreen();
     if (name === 'cases') renderCasesScreen();
@@ -418,6 +540,7 @@
     if (name === 'stats') renderStatsScreen();
     if (name === 'mail') renderMailScreen();
     $('feed').scrollTop = 0;
+    updateFeedToDownButton();
   }
 
   /* Ящик отдела качества. Адрес Mailpit приходит с сервера (/api/health ->
@@ -1448,6 +1571,18 @@
     var nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 200;
     if (!nearBottom && state.streaming) return; /* пользователь сам прокрутил вверх — не дёргаем */
     feed.scrollTop = feed.scrollHeight;
+    updateFeedToDownButton();
+  }
+
+  function updateFeedToDownButton() {
+    var feed = $('feed');
+    var chat = $('screen-chat');
+    var btn = $('feedToDown');
+    if (!feed || !chat || !btn) return;
+    var hasDialog = !!chat.querySelector('.turn');
+    var chatActive = chat.classList.contains('is-active');
+    var gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+    btn.hidden = !(chatActive && hasDialog && gap >= 120);
   }
 
   /* §10: ответ сотрудника на уточнение — в ленту, чтобы диалог читался. */
@@ -2100,7 +2235,7 @@
        службе качества, а по esc- там заявку не найти (нашла FORGE). */
     if (!outOfScope) {
       var next = el('p', 'refusal__next', 'Обратитесь в службу качества — она ответит по существу вопроса.');
-      var tid = d.ticket_id || state.lastTicket;
+      var tid = data.ticket_id || state.lastTicket;
       if (tid) next.appendChild(el('span', 'refusal__ticket', ' · заявка № ' + tid));
       box.appendChild(next);
     }
@@ -2588,6 +2723,9 @@
     if (state.lineId) payload.business_line = state.lineId;
     if (state.sessionId) payload.session_id = state.sessionId;
     if (answers) payload.answers = answers;
+    // §23: модель из UI. Передаётся только если выбрана кнопкой —
+    // иначе /api/ask берёт дефолт из NEXUS_LINK_MODEL.
+    if (state.model) payload.model = state.model;
 
     function finish() {
       $('send').disabled = false;
@@ -2652,6 +2790,26 @@
 
   /* ------------------------------------------------------------------ форма */
 
+  // Выбранная модель отправляется вместе с вопросом; «Авто» оставляет
+  // серверный вариант по умолчанию.
+  (function initModelPicker() {
+    var select = $('modelSelect');
+    var picker = $('modelPicker');
+    var status = $('modelStatus');
+    if (!select || !picker) return;
+    function syncModel() {
+      state.model = select.value || '';
+      picker.classList.toggle('model-picker--selected', !!state.model);
+      if (status) {
+        status.textContent = state.model
+          ? 'Выбрана модель ' + select.options[select.selectedIndex].text + '.'
+          : 'Используется модель по умолчанию.';
+      }
+    }
+    select.addEventListener('change', syncModel);
+    syncModel();
+  })();
+
   $('composer').addEventListener('submit', function (e) {
     e.preventDefault();
     var q = $('question').value.trim();
@@ -2664,7 +2822,10 @@
       return;
     }
     state.lastQuestion = q;
-    state.lastAsOf = $('asOf').value || '';
+    // Поле «на какую дату» убрано из UI (27.11.2026): смысл неочевиден
+    // пользователю, а ядро LEX всегда использует самую свежую действующую
+    // редакцию. API as_of остаётся для API-клиентов; UI не передаёт.
+    state.lastAsOf = '';
     state.sessionId = '';
     state.clarifyRound = 0;
     $('question').value = '';
@@ -2714,33 +2875,31 @@
   /* доп. №9: кнопка «вниз», если пользователь сам прокрутил ленту вверх. */
   (function () {
     var feed = $('feed');
-    var btn = el('button', 'feed__todown', '↓ к последнему');
-    btn.type = 'button';
-    btn.hidden = true;
-    btn.setAttribute('aria-label', 'Прокрутить к последнему сообщению');
+    var btn = $('feedToDown');
+    if (!feed || !btn) return;
     btn.addEventListener('click', function () { scrollFeed(); });
-    feed.parentNode.insertBefore(btn, feed.nextSibling);
-
-    feed.addEventListener('scroll', function () {
-      var gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
-      btn.hidden = gap < 120;
-    }, { passive: true });
+    feed.addEventListener('scroll', updateFeedToDownButton, { passive: true });
+    updateFeedToDownButton();
   })();
 
   /* ------------------------------------------------------------------ старт */
 
   loadReference().then(function () {
     // Роль из прошлой сессии — чтобы ссылка из письма открывала заявку сразу,
-    // без повторного «выберите роль».
+    // без повторного «выберите роль». Дефолт (если ничего не запомнили) —
+    // руководитель: он видит весь корпус (4 регламента), поэтому первый
+    // прогон без ограничений прав доступа.
     var saved = storedRole();
     if (saved && state.roles.some(function (r) { return r.id === saved; })) {
       state.roleId = saved;
+    } else if (!state.roleId) {
+      state.roleId = 'director';
     }
     renderTabs();
     updateHint();
     renderRolesScreen();
     refreshTicketNav();
-    $('navCount').textContent = state.mock ? 'демо-режим · без бэкенда' : 'живой режим';
+    updateModeStatus();
     document.documentElement.setAttribute('data-mode', state.mock ? 'mock' : 'live');
     openFromHash();
   });

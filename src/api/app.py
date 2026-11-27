@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Запуск из корня репозитория (`uvicorn src.api.app:app`) — ядро лежит в src/lex,
 # поэтому src должен быть в sys.path. Из каталога src/ это уже так.
@@ -70,6 +70,22 @@ app.add_middleware(
 
 # ---------- схемы ----------
 
+# §23: псевдонимы моделей, отображаемые в UI под своими именами.
+# Это картинки в стиле 42: слоты NexusLink показаны внешним именем, не
+# внутренним slug. Картинка — то, что передаётся в /api/ask.model.
+# `nexus` — реальный slug NexusLink для этого слота; UI его не видит.
+# Объявляется ДО AskRequest: field_validator ссылается на _MODELS_PUBLIC.
+MODELS_PUBLIC = [
+    {"model": "deepseek-4.1-flash", "label": "DeepSeek 4.1 Flash",
+     "nexus": "claude-opus-4-7"},
+    {"model": "qwen-3.8-27b", "label": "Qwen-3.8-27b",
+     "nexus": "claude-sonnet-4-7"},
+    {"model": "ernie-5.5-flash", "label": "Ernie-5.5-Flash",
+     "nexus": "claude-sonnet-5"},
+]
+_MODELS_PUBLIC = {m["model"]: m["nexus"] for m in MODELS_PUBLIC}
+
+
 class AskRequest(BaseModel):
     question: str = ""
     role_id: str = ""
@@ -78,6 +94,25 @@ class AskRequest(BaseModel):
     answers: dict | None = None
     tone: str = "plain"
     business_line: str | None = None
+    # §23: псевдоним модели из UI. Картинка в стиле 42 — один из трёх
+    # слотов NexusLink, отображаемый под своим именем. Не передан —
+    # дефолт из NEXUS_LINK_MODEL.
+    model: str | None = None
+
+    @field_validator("model")
+    @classmethod
+    def _model_known(cls, v: str | None) -> str | None:
+        if v is None or v in _MODELS_PUBLIC:
+            return v
+        raise ValueError(
+            f"неизвестная модель {v!r}; доступные: {sorted(_MODELS_PUBLIC)}"
+        )
+
+    def resolve_nexus_model(self) -> str | None:
+        """Публичный псевдоним → реальный slug NexusLink. None — дефолт."""
+        if self.model is None:
+            return None
+        return _MODELS_PUBLIC.get(self.model)
 
 
 class CaseRequest(BaseModel):
@@ -438,6 +473,18 @@ def get_business_lines() -> list[dict]:
 
 # ---------- ask (SSE) ----------
 
+# §23: псевдонимы моделей (объявлены ДО AskRequest, там же и маппинг
+# на реальные slug'и NexusLink).
+
+@app.get("/api/models")
+def get_models() -> list[dict]:
+    """§23: список публичных имён моделей для UI. UI рендерит их в
+    виде кнопок-чипов под чатом; выбор передаётся в /api/ask.model.
+    Поле `nexus` — реальный slug NexusLink; UI его не использует, но
+    API-клиенты могут узнать маппинг."""
+    return MODELS_PUBLIC
+
+
 @app.post("/api/ask")
 async def ask(req: AskRequest):
     if not req.question.strip():
@@ -465,7 +512,8 @@ async def ask(req: AskRequest):
 
     gen = core.stream_answer(req.question, req.role_id, req.as_of,
                              req.session_id, req.answers, req.tone,
-                             business_line=req.business_line)
+                             business_line=req.business_line,
+                             model=req.resolve_nexus_model())
     return StreamingResponse(
         gen,
         media_type="text/event-stream",

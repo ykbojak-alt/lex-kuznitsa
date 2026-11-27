@@ -505,7 +505,8 @@ def _anchor(title: str) -> str:
 
 def _run_options(question: str, role_id: str, as_of: str | None,
                  session_id: str | None, answers: dict | None,
-                 tone: str = "plain", business_line: str | None = None):
+                 tone: str = "plain", business_line: str | None = None,
+                 model: str | None = None):
     m = core_modules()["orchestrator"]
     RunOptions = getattr(m, "RunOptions", None)
     if RunOptions is None:
@@ -529,6 +530,10 @@ def _run_options(question: str, role_id: str, as_of: str | None,
         kwargs["tone"] = tone
     if business_line:
         kwargs["business_line"] = business_line
+    if model:
+        # §23: псевдоним модели из UI. Картинка в стиле 42: один из трёх
+        # слотов NexusLink, отображаемый под своим именем. Дефолт — NEXUS_LINK_MODEL.
+        kwargs["model"] = model
     if config.NO_LLM:
         # §12: без модели ответ собирается из цитат. Тон и оговорки при этом
         # остаются — их считает grounding, а не LLM.
@@ -636,7 +641,8 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
                         session_id: str | None = None,
                         answers: dict | None = None,
                         tone: str = "plain",
-                        business_line: str | None = None) -> AsyncIterator[str]:
+                        business_line: str | None = None,
+                        model: str | None = None) -> AsyncIterator[str]:
     """Поток SSE по сигналам ядра.
 
     Инварианты, которые держит этот слой:
@@ -668,6 +674,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
         "session_id": session_id,
         "tone": tone,
         "business_line": business_line,
+        "model": model,
     }
     failed = False
     closed_without_done = False
@@ -677,7 +684,7 @@ async def stream_answer(question: str, role_id: str, as_of: str | None,
         if not core_ready():
             raise RuntimeError("ядро LEX (src/lex/orchestrator.py) недоступно")
         opts = _run_options(question, role_id, as_of, session_id, answers,
-                            tone=tone, business_line=business_line)
+                            tone=tone, business_line=business_line, model=model)
         orch = m.Orchestrator(opts)
 
         async for signal in orch.run():
