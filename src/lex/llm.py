@@ -216,7 +216,16 @@ def chat(
     if temperature is None:
         temperature = DEFAULT_TEMPERATURE
     budgets_chain = [max(MIN_MAX_TOKENS, int(max_tokens))]
-    for b in RETRY_BUDGETS[:retries]:
+    # Повтор с БОЛЬШИМ бюджетом. Прежняя обрезка ``RETRY_BUDGETS[:retries]``
+    # при дефолтных настройках давала ровно (16384,) — то есть первый элемент,
+    # равный базе, и условие ``b > budgets_chain[-1]`` не давало добавить
+    # ничего. Повтора не существовало вовсе: пустой ответ первичной модели
+    # сразу уходил на ПОДМЕНУ СЛОТА, и два прогона одного вопроса отвечали
+    # разными моделями — отсюда «на один и тот же вопрос 2 совершенно разных
+    # ответа» (владелец, 28.11.2026). Перебор идёт по всем бюджетам выше базы.
+    for b in RETRY_BUDGETS:
+        if len(budgets_chain) > retries:
+            break
         if b > budgets_chain[-1]:
             budgets_chain.append(b)
 
