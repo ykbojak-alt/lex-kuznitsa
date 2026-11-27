@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52" role="img" aria-labelledby="title">
+  <title id="title">Знак LEX</title>
+  <rect width="52" height="52" fill="#FFD400"/>
+  <path d="M8 12h15.5c3.2 0 5.5 1.4 7 4.1 1.5-2.7 3.8-4.1 7-4.1H44v28H35c-3.4 0-5.8 1.2-8 3.5-2.2-2.3-4.6-3.5-8-3.5H8V12Z" fill="#FFFDF7" stroke="#090909" stroke-width="2.5" stroke-linejoin="miter"/>
+  <path d="M30.5 16.2v27.1M12 19h11M12 24h11M12 29h11M33.5 19H40M33.5 24H40M33.5 29H40" fill="none" stroke="#090909" stroke-width="2"/>
+  <path d="M33.5 34H40" stroke="#153FE8" stroke-width="3"/>
+  <path d="M36 7h9v5h-9z" fill="#F2442E"/>
+</svg>
