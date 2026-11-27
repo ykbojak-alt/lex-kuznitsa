@@ -30,7 +30,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date
 
-from .models import Caveat, CaveatReason
+from .models import Caveat, CaveatReason, today_local
 
 # Порог «средней уверенности»: ниже — оговорка «формулировка выведена из
 # фрагментов, прямой цитаты нет». 0.72 подобрано так, чтобы точное совпадение
@@ -208,7 +208,7 @@ def _edition_reason(inp: CaveatInput) -> str:
         nxt_date = date.fromisoformat(str(nxt.get("effective")))
     except (TypeError, ValueError):
         return ""
-    as_of = inp.as_of or date.today()
+    as_of = inp.as_of or today_local()
     gap = (nxt_date - as_of).days
     if gap < 0 or gap > EDITION_NEAR_DAYS:
         return ""

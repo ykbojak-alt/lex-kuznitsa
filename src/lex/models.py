@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+import os
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -315,3 +316,14 @@ class Chunk(BaseModel):
 class CorpusStats(BaseModel):
     documents: int
     chunks: int
+
+
+def today_local() -> date:
+    """«Сегодня» в часовом поясе продукта (MSK), а не сервера.
+
+    Сервер живёт в UTC: с 21:00 UTC он ещё 27-е, а в Москве уже 28-е. Кадр
+    показывал «дата отсчёта 2026-11-27» рядом с титром «28 ноября» — рассинхрон
+    титр=кадр (FORGE-R17 §5). Смещение задаётся LEX_UTC_OFFSET_HOURS.
+    """
+    hours = float(os.environ.get("LEX_UTC_OFFSET_HOURS") or 3)
+    return (datetime.now(UTC) + timedelta(hours=hours)).date()

@@ -42,6 +42,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from .models import today_local
+
 QuestionKind = Literal["date", "choice", "text", "doc_id"]
 
 MAX_QUESTIONS_PER_ROUND = 3
@@ -831,7 +833,7 @@ class Dialogue:
         return len(deps) == 1
 
     def today(self) -> str:
-        return self._today or date.today().isoformat()
+        return self._today or today_local().isoformat()
 
     # ---- главный интерфейс ----
 

@@ -60,6 +60,7 @@ from .models import (
     ErrorData,
     RefusalData,
     StepEvent,
+    today_local,
 )
 from .tickets import get_ticket_store
 
@@ -408,6 +409,7 @@ class Orchestrator:
         self._t0 = time.monotonic()
         self._timeline: dict[str, int] = {}
         self._emitted_steps = 0
+        self._terminated = False
         self._dlg: Dialogue | None = None
         self._auto_session: str = ""
         # Число шагов прогона: из STEP_ORDER убираются стадии без данных
@@ -510,6 +512,7 @@ class Orchestrator:
                 return                  # §10: ждём ответа, поток закрывается без done
             ticket = decision.escalate or {}
             # §15.3: эскалация — последним шагом, вместо verify.
+            self._terminated = True
             yield self._emit(self._escalate_step(self._total(), ticket))
             yield Signal("escalate", self.dialogue.escalate_event(ticket))
             yield Signal("done", self._done())
@@ -663,9 +666,15 @@ class Orchestrator:
         не выполнялись: номера шли 1, 2, 3, 4, 5, 9 — гейт «n сквозной 1..N»
         падал на реальном ответе (28.11, сгенерированный корпус). Номер обязан
         считать выданные шаги, а не план каскада.
+
+        После эскалации/раннего отказа оставшиеся стадии не выполняются:
+        total ужимается до выданного, иначе кадр читается как «сломалось на 6
+        из 9», хотя ответ честный и полный.
         """
         self._emitted_steps += 1
         ev.n = self._emitted_steps
+        if self._terminated:
+            ev.total = self._emitted_steps
         return Signal("step", ev)
 
     def _escalate_step(self, n: int, ticket: dict) -> StepEvent:
@@ -685,7 +694,7 @@ class Orchestrator:
     def _stage_accept(self, n: int, state: dict) -> StepEvent | Signal:
         # §10: уточнение — не отказ. Но первый круг всегда проходит accept,
         # чтобы UI показал, что запрос понят.
-        as_of = self.opts.as_of.isoformat() if self.opts.as_of else date.today().isoformat()
+        as_of = self.opts.as_of.isoformat() if self.opts.as_of else today_local().isoformat()
         state["as_of_label"] = as_of
         role = access.get_role(self.opts.role_id)
         role_title = (role or {}).get("title") or self.opts.role_id
