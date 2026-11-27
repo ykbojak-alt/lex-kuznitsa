@@ -42,7 +42,15 @@ manifest() {
   local root="$1"
   (
     cd "$root"
-    find src scripts -type f \( -name '*.py' -o -name '*.js' \) -print0 \
+    # Исключение ровно то же, что у rsync в sync-and-restart.sh: '/api/static/'
+    # — собранная копия src/web, в git её нет, и деплой её не передаёт.
+    # Без исключения сравнение берёт объединение ключей, и на чистом клоне
+    # (до build-web.sh) четыре файла static оказываются server-only —
+    # скрипт вечно отвечает MISMATCH при одинаковом коде. Ответ зависел бы
+    # от того, собирали ли локально, то есть от источника, а не от сути
+    # (нашла FORGE).
+    find src scripts -type f \( -name '*.py' -o -name '*.js' \) \
+      -not -path 'src/api/static/*' -print0 \
       | LC_ALL=C sort -z \
       | while IFS= read -r -d '' path; do
           digest="$(md5sum <"$path" | cut -d ' ' -f1)"
@@ -59,7 +67,11 @@ ssh -i "$SSH_KEY" -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" -c aes128-gcm@openssh
 set -euo pipefail
 ROOT="$1"
 cd "$ROOT"
-find src scripts -type f \( -name '*.py' -o -name '*.js' \) -print0 \
+# То же исключение, что локально и у rsync: '/api/static/' на стенде — тоже
+# собранная копия, и её не передают. Без него сравнение видит четыре
+# server-only файла на любой машине, где статику собирали (нашла FORGE).
+find src scripts -type f \( -name '*.py' -o -name '*.js' \) \
+  -not -path 'src/api/static/*' -print0 \
   | LC_ALL=C sort -z \
   | while IFS= read -r -d '' path; do
       digest="$(md5sum <"$path" | cut -d ' ' -f1)"
