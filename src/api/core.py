@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from lex.index import SearchIndex, reset_index
+from lex.index import get_index_multi, reset_index
 
 from . import config, sse
 
@@ -186,17 +186,17 @@ def vector_state() -> dict:
         c = corpus()
         if c is None:
             return {"ready": False, "reason": "корпус не загружен"}
-        root = getattr(c, "root", None)
-        n_chunks = len(getattr(c, "chunks", []) or [])
-        cache = Path(root) / ".lex-index.npz" if root is not None else None
-        if cache is None or not cache.exists():
-            return {"ready": False, "reason": "кэш не собран", "chunks": n_chunks,
-                    "cache": "нет файла"}
-        # Индекс строится по корню самого загруженного корпуса и по чанкам,
-        # которые он уже держит: сверка идёт ровно против того же списка,
-        # против которого будет искать search(), — не против config.
-        idx = SearchIndex(c)
+        roots = corpus_roots()
+        cache = Path(roots[0]) / ".lex-index.npz"
+        if not cache.exists():
+            return {"ready": False, "reason": "кэш не собран",
+                    "chunks": len(getattr(c, "chunks", []) or []), "cache": "нет файла"}
+        # Та же точка входа, что у поиска: SearchIndex из кэша индексов, без
+        # переиндексации BM25 на каждый /api/health (FORGE-R13: было 180-200 мс
+        # против 2.6 мс, рост в 159 раз).
+        idx = get_index_multi(*roots[:2])
         vecs = idx._load_cache()
+        n_chunks = len(idx.chunks)
         try:
             import numpy as np
             with np.load(cache, allow_pickle=True) as z:
