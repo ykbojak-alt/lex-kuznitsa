@@ -6,7 +6,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 MARKERS = (
     "ОТКАЗ: нет данных",
     "**ОТКАЗ:** нет данных",

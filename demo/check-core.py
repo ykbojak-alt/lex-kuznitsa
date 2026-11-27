@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "demo"))
 
+from refusal_marker_tests import run_refusal_marker_tests
+
 from lex import caveat as caveat_mod
 from lex import policy
 from lex.cases import CaseStore, detect_deviation
@@ -38,7 +40,6 @@ from lex.models import STEP_ORDER
 from lex.orchestrator import Orchestrator, RunOptions
 from lex.policy import evaluate
 from lex.tickets import get_ticket_store
-from refusal_marker_tests import run_refusal_marker_tests
 
 CORPUS = ROOT / "sample-corpus"
 PASS: list[str] = []

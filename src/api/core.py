@@ -527,7 +527,7 @@ def doc_meta(doc_id: str) -> dict | None:
             return d
     # Поиск по полному имени файла (как приходит в URL /api/doc/{doc_id}.md).
     for d in manifest_documents():
-        if d.get("file") == doc_id or d.get("file") and d["file"].endswith(doc_id):
+        if d.get("file") == doc_id or (d.get("file") and d["file"].endswith(doc_id)):
             return d
     return None
 

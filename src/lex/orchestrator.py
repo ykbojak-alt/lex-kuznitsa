@@ -36,7 +36,7 @@ from pathlib import Path
 from . import access, detail, editions, llm, llm_debug, policy, rerank
 from . import caveat as caveat_mod
 from .cases import Case, CaseStore, get_case_store
-from .corpus import Corpus, load_corpus, load_corpus_multi
+from .corpus import Corpus, load_corpus_multi
 from .dialogue import Dialogue
 from .forms import get_form
 from .grounding import (
@@ -45,7 +45,7 @@ from .grounding import (
     subject_coverage,
     subject_is_phrase,
 )
-from .index import SearchIndex, embed_texts, get_index, get_index_multi
+from .index import SearchIndex, embed_texts, get_index_multi
 from .llm import LLMError
 from .media import inspect_corpus
 from .models import (

@@ -11,7 +11,7 @@ SRC = Path(os.environ.get("LEX_TEST_SRC", ROOT / "src")).resolve()
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(ROOT / "demo"))
 
-from refusal_marker_tests import run_refusal_marker_tests  # noqa: E402
+from refusal_marker_tests import run_refusal_marker_tests
 
 for _stream in (sys.stdout, sys.stderr):
     try:

@@ -40,7 +40,7 @@ def main() -> int:
     ap.add_argument("--doc", default=str(ROOT / "docs" / "DEMO-SCRIPT.md"))
     args = ap.parse_args()
 
-    from api.app import _build_fingerprint  # noqa: E402
+    from api.app import _build_fingerprint
 
     fp = _build_fingerprint()
     keys = set(fp)
@@ -52,8 +52,8 @@ def main() -> int:
         return 0
     block = doc.split("Отпечаток сборки записан")[1].split("**Чего НЕ следует")[0]
 
-    table = [l for l in block.split("\n")
-             if l.strip().startswith("|") and "---" not in l and "| поле |" not in l]
+    table = [line for line in block.split("\n")
+             if line.strip().startswith("|") and "---" not in line and "| поле |" not in line]
     listed: set[str] = set()
     for row in table:
         listed |= set(re.findall(r"`([a-z0-9_]+)`", row))
