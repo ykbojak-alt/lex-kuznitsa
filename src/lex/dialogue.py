@@ -1123,6 +1123,13 @@ class Dialogue:
         if kind == "no_edition_in_force":
             return (f"на запрошенную дату не действует ни одна редакция "
                     f"правила по теме «{subject}»")
+        if kind == "model_refusal":
+            # §12 (NEO-modelrefusal-audit, 27.11.2026): модель отказалась
+            # отвечать по найденным фрагментам. «В корпусе нет документа»
+            # здесь — ложь: фрагменты нашлись, отказ came от модели.
+            why = (searched or {}).get("model_refusal_reason") or ""
+            base = f"модель отказалась отвечать по теме «{subject}»"
+            return f"{base}: {why}" if why else base
         top = (searched or {}).get("top") or []
         if top:
             nearest = ", ".join(str(item) for item in top[:3])
