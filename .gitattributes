@@ -8,3 +8,4 @@
 # На внутренний корпус (corpus-real/) правило не распространяется: он вне git
 # по .gitignore (данные третьей стороны).
 corpus-norm/*.md -text
+corpus-norm/*.json -text
