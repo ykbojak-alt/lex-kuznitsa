@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import sys
 from pathlib import Path
 
@@ -164,25 +165,43 @@ class ChangeStatusRequest(BaseModel):
 
 # ---------- health / роли / направления ----------
 
+# Набор модулей, по которым считается отпечаток. Фиксирован намеренно:
+# ядро импортируется лениво, и «что успело загрузиться» давало бы разный
+# хеш в начале и в конце работы процесса. Отпечаток обязан быть одинаковым
+# при одинаковом коде — иначе он не доказательство деплоя, а шум.
+_BUILD_MODULES = (
+    # ядро: поиск, гейт, сборка ответа, кейсы, доступ
+    "lex.access", "lex.orchestrator", "lex.dialogue", "lex.index",
+    "lex.grounding", "lex.corpus", "lex.cases", "lex.policy",
+    "lex.llm", "lex.caveat", "lex.journal",
+    # HTTP-слой
+    "api.app", "api.core", "api.mail", "api.config", "api.tickets",
+)
+
+
 def _build_fingerprint() -> dict:
     """Отпечаток кода, который реально исполняет этот процесс.
 
     Нужен, чтобы деплой был проверяемым снаружи: без ssh нельзя отличить
     «фикс на диске» от «фикс в работающем процессе», и агенты получали
-    противоречивые статусы. Считаем по байтам модулей, уже загруженных в
-    ``sys.modules``: перезапуск не нужен, а обман невозможен — хеш меняется
-    ровно тогда, когда меняется исполняемый код.
+    противоречивые статусы. Считаем по байтам файлов перечисленных модулей:
+    перезапуск не нужен, а подмена невозможна — хеш меняется ровно тогда,
+    когда меняется исполняемый код.
 
-    ``none`` вместо хеша — модуль живёт внутри zip/байткода; тогда это
-    честно видно, а не подменяется нулями.
+    Модуль не найден — он входит в отпечаток пустотой с собственным именем:
+    ``modules`` тогда меньше, и это видно, а не притворяется нулями.
     """
     digest = hashlib.sha256()
-    names: list[str] = []
-    for name in sorted(sys.modules):
-        if not (name == "lex" or name.startswith("lex.")):
-            continue
-        mod = sys.modules[name]
-        path = getattr(mod, "__file__", None)
+    found = 0
+    for name in _BUILD_MODULES:
+        mod = sys.modules.get(name)
+        path = getattr(mod, "__file__", None) if mod is not None else None
+        if not path:
+            try:
+                mod = importlib.import_module(name)
+                path = getattr(mod, "__file__", None)
+            except Exception:
+                path = None
         if not path:
             continue
         try:
@@ -191,9 +210,9 @@ def _build_fingerprint() -> dict:
             continue
         digest.update(name.encode("utf-8"))
         digest.update(data)
-        names.append(name)
-    return {"sha256": digest.hexdigest()[:16] if names else "none",
-            "modules": len(names)}
+        found += 1
+    return {"sha256": digest.hexdigest()[:16] if found else "none",
+            "modules": found}
 
 
 @app.get("/api/health")
