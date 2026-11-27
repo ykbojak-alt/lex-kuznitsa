@@ -1384,20 +1384,16 @@ def check_ticket_delivery_truth() -> None:
     config.TICKETS_PATH = tmp / "tickets.jsonl"
     config.ESCALATIONS_PATH = tmp / "escalations.jsonl"
     try:
-        # Один assert выше — единственный в файле; под `python -O` он исчезает
-        # молча, и защита «не пишем в var/» пропадает ровно там, где нужна.
-        # Через check(): провал виден строкой FAIL, а не пропадает.
-        check("delivery: тест пишет во временный каталог, а не в var/",
-              str(tickets._path("tk")).startswith(str(tmp)),
-              f"{tickets._path('tk')}")
-
         row = tickets.create_ticket({"question": "Кто отвечает за пожарную безопасность?",
                                      "kind": "not_in_corpus", "session_id": "t-deliv"})
         tid = row["id"]
 
+        # Один assert в файле был здесь; под `python -O` он исчезает молча,
+        # и защита «не пишем в var/» пропадает ровно там, где нужна. Через
+        # check(): провал виден строкой FAIL, а не пропадает (нашла FORGE).
         check("delivery: тест пишет во временный каталог, а не в var/",
-              str(tmp) in str(config.TICKETS_PATH),
-              f"{config.TICKETS_PATH}")
+              str(tickets._path("tk")).startswith(str(tmp)),
+              f"{tickets._path('tk')}")
 
         check("delivery: без факта карточка честно говорит «simulated»",
               mail.decorate(tickets.get_ticket(tid))["email"]["delivery"] == "simulated",
@@ -1427,6 +1423,64 @@ def check_ticket_delivery_truth() -> None:
               all(marker in web for marker in
                   ("mail__demo--ok", "mail__demo--fail", "mail__demo")),
               "строка доставки рисуется по значению, а не всегда одна")
+
+        # ЗВЕНО 1 сквозь core.py: проверки выше сами зовут _patch_ticket, то
+        # есть проверяют, что карточка умеет читать факт, но НЕ что эскалация
+        # его сохраняет. Удали вызов из core.py — они останутся зелёными
+        # (проверено откатом: 6/6 OK без звена 1 — нашла FORGE). Идём живым
+        # потоком: mail.deliver подменён (SMTP не трогаем), но сохранение
+        # делает сам core.stream_answer, как в бою.
+        #
+        # Модель выключена ШТАТНО (config.NO_LLM, переменная LEX_NO_LLM), а не
+        # подменой llm.chat: эскалация идёт тем же путём через
+        # orchestrator._ask_model, а он при no_llm просто не зовёт модель
+        # (orchestrator.py:1015). Иначе тест зависел бы от NexusLink и флапал
+        # под --fast по причине, не связанной с доставкой (нашла ALICE).
+        from api import core as _core
+
+        _saved_no_llm = config.NO_LLM
+        _real_deliver = mail.deliver
+        config.NO_LLM = True
+        mail.deliver = lambda t: mail.email_block(t, "sent")
+
+        async def _collect():
+            return [f async for f in _core.stream_answer(
+                "Какой срок хранения бухгалтерских документов?",
+                role_id="accountant", as_of=None, session_id="t-deliv-e2e")]
+
+        _corpus_ok = (config.CORPUS_DIR / "manifest.json").is_file()
+        try:
+            frames = asyncio.run(_collect()) if _corpus_ok else []
+        except Exception as exc:            # сбой ядра — провал, не тишина
+            frames = []
+            _e2e_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+        else:
+            _e2e_err = ""
+        finally:
+            config.NO_LLM = _saved_no_llm
+            mail.deliver = _real_deliver
+
+        if not _corpus_ok:
+            # Отсутствие корпуса — условие МАШИНЫ, не дефект доставки. Явная
+            # строка SKIP, а не исключение и не xfail: xfail значит «баг
+            # известен, чинится», и на здоровой машине дал бы ложный XPASS.
+            # Иначе агент читает «красное» и ищет баг в доставке (нашла ALICE).
+            print(f"SKIP delivery: ЗВЕНО 1 через core.stream_answer — "
+                  f"нет {config.CORPUS_DIR}/manifest.json (условие среды, "
+                  f"не дефект доставки)")
+            return
+
+        esc = next((f for f in frames if f.startswith("event: escalate")), "")
+        check("delivery: поток дошёл до эскалации", bool(esc),
+              _e2e_err or f"кадров {len(frames)}")
+        stored = next((r for r in tickets.list_tickets(limit=100)
+                       if str(r.get("session_id") or "") == "t-deliv-e2e"), {})
+        check("delivery: ЗВЕНО 1 — эскалация САМА сохраняет факт доставки",
+              stored.get("delivery") == "sent",
+              f"в заявке {stored.get('id')}: delivery={stored.get('delivery')!r}")
+        check("delivery: ЗВЕНО 1 — карточка этой заявки читает сохранённый факт",
+              stored and mail.decorate(stored)["email"]["delivery"] == "sent",
+              "без сохранения тут был бы «simulated»")
     finally:
         config.VAR_DIR, config.TICKETS_PATH, config.ESCALATIONS_PATH = saved_paths
 
