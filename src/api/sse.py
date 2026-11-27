@@ -134,6 +134,13 @@ def escalate(data: dict) -> str:
     Раньше здесь стояло «всегда simulated» — при включённом SMTP это было
     неправдой, и карточка заявки показывала демо-режим у доставленного
     письма (камень 18).
+
+    §18.4: ``ticket_id`` — номер ЗАЯВКИ в очереди службы качества
+    (``LEX-YYYY-NNNN``). ``ticket`` — id эскалации ядра (``esc-NNNN``), это
+    разные вещи, и путать их нельзя: по ``esc-`` заявку не найти ни в ящике,
+    ни в API. Клиент ключует карточку в чате по ``ticket_id``, иначе
+    обновление после ответа службы качества не находит её никогда (нашла
+    FORGE).
     """
     payload = {
         "ticket": data.get("ticket", ""),
@@ -145,6 +152,9 @@ def escalate(data: dict) -> str:
         "status": data.get("status", "open"),
         "case_id": data.get("case_id"),
     }
+    # Аддитивное поле: старые клиенты его игнорируют, новые — ключуют по нему.
+    if data.get("ticket_id"):
+        payload["ticket_id"] = str(data["ticket_id"])
     email = data.get("email")
     if email:
         payload["channel"] = data.get("channel") or "email"

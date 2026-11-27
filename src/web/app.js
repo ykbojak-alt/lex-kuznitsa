@@ -846,7 +846,7 @@
       ta.rows = 4;
       ta.setAttribute('aria-label', 'Ответ службы качества');
       ta.placeholder = 'Ответ сотруднику: что делать по существу вопроса';
-      if (t.quality_answer) ta.value = t.quality_answer;
+      if ((t.reply || t.answer || t.quality_answer)) ta.value = t.reply || t.answer || t.quality_answer;
       host.appendChild(ta);
 
       var row = el('div', 'ticket-actions');
@@ -886,9 +886,14 @@
     if (t.status === 'closed' && t.close_reason) {
       host.appendChild(el('p', 'ticketcard__reason', 'Закрыто: ' + t.close_reason));
     }
-    if (t.quality_answer) {
+    /* reply — поле живого /api/inbox/{id}, answer — /api/tickets/{id};
+       quality_answer остаётся только в макете. Раньше читалось лишь
+       последнее, и ответ службы качества в заявке не показывался вовсе
+       (нашла FORGE). */
+    var qualityReply = t.reply || t.answer || t.quality_answer;
+    if (qualityReply) {
       host.appendChild(el('h3', 'detail-h', 'Отвечено'));
-      host.appendChild(el('p', 'detail-quote', t.quality_answer));
+      host.appendChild(el('p', 'detail-quote', qualityReply));
     }
 
     var draft = state.mock ? global.MockLex.draft(id) : state.ticketDraftCache[id];
@@ -2090,10 +2095,12 @@
 
     if (data.hint) box.appendChild(el('p', 'refusal__reason', 'Подсказка: ' + data.hint));
 
-    /* OUTCOME: refusal — человеку нужно знать, куда идти дальше, и номер заявки. */
+    /* OUTCOME: refusal — человеку нужно знать, куда идти дальше, и номер заявки.
+       Номер ЗАЯВКИ (LEX-…), а не эскалации (esc-…): человек называет его в
+       службе качества, а по esc- там заявку не найти (нашла FORGE). */
     if (!outOfScope) {
       var next = el('p', 'refusal__next', 'Обратитесь в службу качества — она ответит по существу вопроса.');
-      var tid = d.ticket || state.lastTicket;
+      var tid = d.ticket_id || state.lastTicket;
       if (tid) next.appendChild(el('span', 'refusal__ticket', ' · заявка № ' + tid));
       box.appendChild(next);
     }
@@ -2177,6 +2184,19 @@
           };
         })(data.ticket, copy));
         dd.appendChild(copy);
+        /* §22.2: прямая ссылка на заявку. Сервер собирает её в письме
+           (email.ticket_url), но клиент не рисовал её вовсе (проверила:
+           ticket_url встречался 0 раз — FORGE). Открывает у quality/director:
+           openFromHash -> renderTicketDetail, а ящик доступен только им
+           (ticketsAllowed). Остальным ссылка видна, но уводит в чат. */
+        var link = data.ticket_url ||
+          (data.email && data.email.ticket_url) || '';
+        if (link) {
+          var a = el('a', 'linkish lettercard__open', 'Открыть заявку');
+          a.href = link;
+          a.setAttribute('aria-label', 'Открыть заявку ' + data.ticket);
+          dd.appendChild(a);
+        }
       }
       meta.appendChild(dd);
     }
@@ -2217,28 +2237,68 @@
 
   /* ------------------------------------------------------------------ уточнение (§10) */
 
-  /* §18.4/§22: когда служба качества ответила, карточка в чате сотрудника меняет состояние. */
+  /* §18.4/§22: когда служба качества ответила, карточка в чате сотрудника меняет состояние.
+     В живом режиме тикет приходится ЗАГРУЖАТЬ: кадр escalate несёт только
+     id заявки, а status/sla_due/answer живут в /api/tickets/{id}
+     (sla_due ядро в кадре не отдаёт вовсе). Раньше здесь стоял только
+     макет — живьём tk был всегда null, и карточка не обновлялась никогда
+     (нашла FORGE). */
   function updateTicketCards(id) {
     var host = state.ticketCards[id];
     if (!host) return;
-    var tk = state.mock ? global.MockLex.ticket(id) : null;
-    if (!tk || (tk.status !== 'answered' && tk.status !== 'closed')) return;
+    if (state.mock) {
+      applyTicketCard(host, id, global.MockLex.ticket(id));
+      return;
+    }
+    fetch('api/tickets/' + encodeURIComponent(id))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; })
+      .then(function (tk) { applyTicketCard(host, id, tk); });
+  }
+
+  /* Общая часть для макета и живого ответа: рисуем, только если служба
+     качества действительно ответила или закрыла заявку. */
+  function applyTicketCard(host, id, tk) {
+    if (!host || !tk) return;
+    if (tk.status !== 'answered' && tk.status !== 'closed') return;
     clear(host);
     renderTicketCard(host, {
-      ticket: tk.id, status: tk.status, sla_due: tk.sla_due, question: tk.question, email: tk.email
+      ticket: tk.id, status: tk.status, sla_due: tk.sla_due, question: tk.question,
+      email: tk.email, ticket_url: tk.ticket_url || (tk.email && tk.email.ticket_url)
     }, {
       onGetAnswer: function () {
         clear(host);
         var ahost = el('div', 'answer-host');
         host.appendChild(ahost);
         renderAnswer(ahost, {
-          short: tk.quality_answer || 'Служба качества ответила по существу вопроса.',
+          /* answer — поле живого API; quality_answer остаётся для макета:
+             в ответах /api/tickets и /api/inbox его нет (проверено
+             замером — FORGE), и карточка показывала заглушку. */
+          short: tk.answer || tk.quality_answer ||
+            'Служба качества ответила по существу вопроса.',
           has_details: false, citations: [], _turnId: 'ticket-' + tk.id
         });
       }
     });
     delete state.ticketCards[id];
   }
+
+  /* §18.4: обновление карточки при ВОЗВРАТЕ на вкладку.
+     Без этого механизм не работает вовсе: единственные вызовы
+     updateTicketCards живут в экране ящика, поэтому из чата карточка не
+     обновляется никогда — демонстратор ответил в ящике, вернулся в чат, и
+     карточка осталась прежней (нашла FORGE). Поллинга нет намеренно:
+     фоновый трафик на сцене не нужен, а возврат на вкладку — ровно тот
+     момент, когда человек ждёт свежих данных. */
+  function refreshTicketCardsOnReturn() {
+    if (doc.hidden) return;
+    /* Экран ящика уже перерисовывает карточку своим ответом — не дублируем. */
+    if (doc.getElementById('screen-tickets').classList.contains('is-active')) return;
+    for (var id in state.ticketCards) {
+      if (Object.prototype.hasOwnProperty.call(state.ticketCards, id)) updateTicketCards(id);
+    }
+  }
+  doc.addEventListener('visibilitychange', refreshTicketCardsOnReturn);
 
   function renderClarify(host, data, ctx) {    clear(host);
     var box = el('div', 'clarify');
@@ -2428,16 +2488,21 @@
 
     if (ev.type === 'escalate') {
       if (ctx.thinkingBox) { ctx.thinkingBox.remove(); ctx.thinkingBox = null; }
+      /* show — что видит человек: номер ЗАЯВКИ (LEX-…). key — по чему
+         обновляем карточку. Живьём есть только ticket_id; в макете заявки
+         нет вовсе, там ticket и есть номер, поэтому ключуем по нему. */
+      var cardId = d.ticket_id || d.ticket;
       renderTicketCard(ctx.host, {
-        ticket: d.ticket, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason,
-        sla_due: d.sla_due, question: d.question, email: d.email, next: d.next
+        ticket: cardId, status: 'open', searched: d.searched, eta: d.eta, reason: d.reason,
+        sla_due: d.sla_due, question: d.question, email: d.email, next: d.next,
+        ticket_url: (d.email && d.email.ticket_url) || ''
       }, {});
-      state.lastTicket = d.ticket;
-      consoleView.setStatus('заявка передана в службу качества: ' + d.ticket + ' · ответ до 2 рабочих дней', 'warn');
+      state.lastTicket = cardId;
+      consoleView.setStatus('заявка передана в службу качества: ' + cardId + ' · ответ до 2 рабочих дней', 'warn');
       ctx.outcome = 'refusal';
       progressView.finish('refusal', 'Передано в службу качества');
       /* §18.4/§22: карточка в чате меняет состояние, когда служба качества ответила. */
-      state.ticketCards[d.ticket] = ctx.host;
+      state.ticketCards[cardId] = ctx.host;
       return;
     }
 
