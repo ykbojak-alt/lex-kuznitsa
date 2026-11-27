@@ -1424,16 +1424,17 @@ def check_build_fingerprint() -> None:
     import api.app as _app2
     from api import config as _cfg2
 
-    served = Path(str(_cfg2.STATIC_DIR)).resolve()
+    served = str(Path(str(_cfg2.STATIC_DIR)).resolve()).replace("\\", "/")
+    web_src = str(Path(__file__).resolve().parents[1] / "src" / "web").replace("\\", "/")
 
-    def _probe(substring):
-        """Подменить байты app.js и вернуть отпечаток; чтение — только в памяти."""
+    def _probe(predicate, suffix):
+        """Подменить байты файла в памяти и вернуть отпечаток; на диск не пишем."""
         _orig2 = _app2._fingerprint_of
 
         def _patched(path):
             data = _orig2(path)
-            if path and path.endswith("app.js") and substring in path.replace("\\", "/"):
-                return (data or b"") + b"\n// probe-ui\n"
+            if path and predicate(path.replace("\\", "/")):
+                return (data or b"") + suffix
             return data
 
         _app2._fingerprint_of = _patched
@@ -1442,46 +1443,62 @@ def check_build_fingerprint() -> None:
         finally:
             _app2._fingerprint_of = _orig2
 
-    served_changed = _probe(str(served).replace("\\", "/"))
-    check("сборка: правка ОТДАВАЕМОГО app.js видна в source_sha256",
-          served_changed["source_sha256"] != first["source_sha256"],
+    def _served_endswith(name):
+        return lambda p: p.startswith(served) and p.endswith(name)
+
+    # ЧТО ЗДЕСЬ ДОКАЗЫВАЕТСЯ. source_drift отвечает на один вопрос — «нужен ли
+    # рестарт». Нужен он только Python: статика отдаётся с диска на каждый
+    # запрос (``static_files`` -> ``FileResponse``), её правка живёт у клиента
+    # сразу. Значит правка статики ОБЯЗАНА двигать static_sha256 и НЕ ИМЕТЬ
+    # права поднимать source_drift — иначе поле снова врёт (нашла NEO, замер
+    # ALICE: lex.css пришёл в ответ без рестарта при source_drift=True).
+    # Обратная половина — правка Python обязана поднимать source_drift: без неё
+    # «всегда False» проходило бы проверку.
+
+    served_changed = _probe(_served_endswith("/app.js"), b"\n// probe-ui\n")
+    check("сборка: правка ОТДАВАЕМОГО app.js видна в static_sha256",
+          served_changed["static_sha256"] != first["static_sha256"],
           "отпечаток читает тот файл, что отдаёт сервер")
+    check("сборка: правка статики НЕ поднимает source_drift",
+          served_changed["source_drift"] is False,
+          "статика отдаётся с диска — «не перезапущен» для неё ложь")
+    check("сборка: правка статики поднимает static_drift",
+          served_changed["static_drift"] is True,
+          "факт «клиент менялся после старта», без обещания применения")
     check("сборка: правка отдаваемого app.js не подменяет снимок sha256",
           served_changed["sha256"] == first["sha256"],
-          "исполняемый отпечаток по-прежнему из снимка импорта")
+          "снимок импорта неизменен до перезапуска")
 
-    source_changed = _probe("/web/")
-    check("сборка: правка одного ИСХОДНИКА не двигает отпечаток",
-          source_changed["source_sha256"] == first["source_sha256"],
+    source_changed = _probe(lambda p: p.startswith(web_src), b"\n// probe-src\n")
+    check("сборка: правка одного ИСХОДНИКА не двигает ни один хеш",
+          source_changed["static_sha256"] == first["static_sha256"]
+          and source_changed["source_sha256"] == first["source_sha256"],
           "деплой доказывается по отдаваемому, а не по исходнику")
 
-    # ИКОНКА: набор из фиксированного списка файлов не покрывал static/assets/
-    # — 25 файлов и 5,6% клиента, и правка иконки хеш не двигала. Отпечаток
-    # теперь обходит каталог, поэтому обязан ловить и её. Проверка КРАСНЕЕТ на
-    # списочном наборе — без этого она бесполезна (требование NEO).
-    icon = None
-    for _p in sorted(served.rglob("*.svg")):
-        icon = _p
-        break
+    # ИКОНКА: набор из фиксированного списка не покрывал static/assets/ — 25
+    # файлов и 5,6% клиента, правка иконки хеш не двигала. Отпечаток обходит
+    # каталог, значит обязан ловить и её; на списочном наборе проверка КРАСНЕЕТ
+    # (требование NEO, иначе правка недоказана).
+    icon = next(iter(sorted(Path(served).rglob("*.svg"))), None)
     if icon is not None:
-        _orig_icon = _app2._fingerprint_of
-        _icon_marker = str(icon).replace("\\", "/")
-
-        def _patched_icon(path, _orig=_orig_icon, _mark=_icon_marker):
-            data = _orig(path)
-            if path and path.replace("\\", "/").endswith(_mark.split("/static/")[-1]) \
-                    and "/static/" in path.replace("\\", "/"):
-                return (data or b"") + b"\n<!-- probe -->\n"
-            return data
-
-        _app2._fingerprint_of = _patched_icon
-        try:
-            icon_changed = _build_fingerprint()
-        finally:
-            _app2._fingerprint_of = _orig_icon
-        check("сборка: правка ОТДАВАЕМОЙ иконки видна в source_sha256",
-              icon_changed["source_sha256"] != first["source_sha256"],
+        icon_changed = _probe(
+            lambda p: p.startswith(served) and p.endswith(".svg"), b"\n<!-- probe -->\n")
+        check("сборка: правка ОТДАВАЕМОЙ иконки видна в static_sha256",
+              icon_changed["static_sha256"] != first["static_sha256"],
               f"{icon.name}: assets входят в отпечаток, а не только шесть файлов")
+        check("сборка: правка иконки не поднимает source_drift",
+              icon_changed["source_drift"] is False,
+              "ассеты тоже статика — рестарт им не нужен")
+
+    # Обратная половина: правка Python обязана поднимать дрейф кода.
+    code_changed = _probe(lambda p: p.endswith("/api/sse.py"), b"\n# probe-code\n")
+    check("сборка: правка Python-модуля поднимает source_drift и двигает код",
+          code_changed["source_drift"] is True
+          and code_changed["source_sha256"] != first["source_sha256"],
+          "поле обязано краснеть на правке кода, иначе не доказывает ничего")
+    check("сборка: правка Python-модуля не трогает static_sha256",
+          code_changed["static_sha256"] == first["static_sha256"],
+          "два подмножества считаются раздельно")
 
 
 def check_ticket_delivery_truth() -> None:

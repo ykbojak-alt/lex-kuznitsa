@@ -268,13 +268,42 @@ def _loaded_sources() -> list[tuple[str, str | None]]:
 # обязан быть заморожен в момент импорта. Расхождение с диском видно
 # отдельным полем ``source_drift`` — это уже другой вопрос (файл правлен,
 # но не применён), и путать его с «задеплоено» нельзя.
+# Статика живет по ДРУГОМУ закону, чем код, и это приходится называть отдельно.
+#
+# Python-модуль попадает в память при импорте и остаётся там до перезапуска:
+# «диск != снимок» для него значит «фикс лежит, но не применён». Статика же
+# отдаётся с диска на КАЖДЫЙ запрос (``static_files`` -> ``FileResponse``),
+# поэтому правка отдаваемого файла видна клиенту немедленно (нашла NEO,
+# подтвердила замером ALICE: правка lex.css пришла в ответ при
+# ``source_drift=True``). Пока в наборе было шесть файлов, этим можно было
+# пренебречь; с обходом каталога статика стала основной массой, и одно поле
+# ``source_drift`` начало отвечать на два разных вопроса.
+#
+# Решение: ``source_drift`` — ТОЛЬКО по Python-подмножеству. Он отвечает на
+# вопрос «нужен ли перезапуск», а нужен он только коду в памяти. Для статики
+# ставим ``static_drift`` — отдельный факт «клиент менялся после старта», без
+# обещания «не применено». Сравнивать машины надо по ``build`` — сводке обоих;
+# ``source_drift`` не обязан быть полем сравнения, иначе он снова начнёт
+# отвечать на два вопроса.
+def _split_digest(pairs: list[tuple[str, bytes | None]]) -> tuple[str, str, int, int]:
+    """Хеши кода и статики РАЗДЕЛЬНО: у них разная семантика дрейфа."""
+    code = [(n, d) for n, d in pairs if not n.startswith("static/")]
+    web = [(n, d) for n, d in pairs if n.startswith("static/")]
+    code_sha, code_count = _digest(code)
+    web_sha, web_count = _digest(web)
+    return code_sha, web_sha, code_count, web_count
+
+
 _BUILD_AT_IMPORT: dict = {}
 
 
 def _init_build() -> None:
-    pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
-    sha, count = _digest(pairs)
-    _BUILD_AT_IMPORT.update({"sha256": sha, "modules": count})
+    code_sha, web_sha, code_count, web_count = _split_digest(
+        [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()])
+    _BUILD_AT_IMPORT.update({
+        "sha256": code_sha, "modules": code_count,
+        "static_sha256": web_sha, "static_files": web_count,
+    })
 
 
 _init_build()
@@ -287,6 +316,14 @@ def _fingerprint_report(snapshot: dict, current: dict) -> dict:
     проверить без записи в исходники — а писать в ``src/`` из теста нельзя:
     под параллельными прогонами другой агент прочитает файл в момент
     подмены (нашла NEO: у неё ``grounding.py`` на секунду показал «# probe»).
+
+    ``source_drift`` и ``static_drift`` — РАЗНЫЕ факты, и это намеренно:
+
+    * ``source_drift`` (только Python) — код на диске новее того, что
+      исполняет процесс: фикс не применён, нужен перезапуск;
+    * ``static_drift`` (только клиент) — файлы менялись после старта
+      процесса. НЕ значит «не применено»: статика отдаётся с диска, правка
+      уже живёт. Значит лишь «с момента старта клиент менялся».
     """
     return {
         "sha256": snapshot.get("sha256", "none"),
@@ -294,33 +331,38 @@ def _fingerprint_report(snapshot: dict, current: dict) -> dict:
         "source_drift": current.get("sha256") != snapshot.get("sha256"),
         "source_sha256": current.get("sha256", "none"),
         "source_modules": current.get("modules", 0),
+        "static_sha256": current.get("static_sha256", "none"),
+        "static_files": current.get("static_files", 0),
+        "static_drift": current.get("static_sha256") != snapshot.get("static_sha256"),
     }
 
 
 def _build_fingerprint() -> dict:
-    """Отпечаток кода, который реально исполняет этот процесс.
+    """Отпечаток того, что реально отдаёт и исполняет этот процесс.
 
-    Два поля, и это важно не путать:
+    ``sha256`` — снимок КОДА при импорте: он меняется только после
+    перезапуска. ``static_sha256`` — отдаваемый клиент на диске сейчас.
+    ``build`` — сводка обоих: именно её сравнивают между машинами.
 
-    * ``sha256`` — хеш, снятый при импорте модулей, то есть код, который
-      ДЕЙСТВИТЕЛЬНО работает. Меняется только после перезапуска процесса.
-    * ``source_drift`` — ``False``, когда файлы на диске совпадают с тем, что
-      загружено. ``True`` означает «на диске новее, процесс не перезапущен»:
-      фикс лежит, но не применён.
-
-    Без этого различения подмена файла без рестарта давала ложное
-    «задеплоено» — ровно та дырка, ради которой поле и делалось (нашла NEO).
+    ``source_drift`` считается по коду (рестарт нужен только ему), поэтому
+    правка статики его не поднимает: она применяется мгновенно, и говорить
+    про неё «не перезапущен» — ложь (нашла NEO, замер ALICE).
 
     Переводы строк приводятся к LF: иначе Windows-копия (CRLF) и Linux-стенд
     (LF) при побайтово идентичном коде дают разные хеши, и отпечаток не
     сравнить между машинами.
     """
-    current_pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
-    current_sha, current_count = _digest(current_pairs)
+    pairs = [(_name, _fingerprint_of(_path)) for _name, _path in _loaded_sources()]
+    code_sha, web_sha, code_count, web_count = _split_digest(pairs)
+    combined = _digest([
+        ("code", code_sha.encode("utf-8")),
+        ("static", web_sha.encode("utf-8")),
+    ])[0]
     return _fingerprint_report(
         _BUILD_AT_IMPORT,
-        {"sha256": current_sha, "modules": current_count},
-    )
+        {"sha256": code_sha, "modules": code_count,
+         "static_sha256": web_sha, "static_files": web_count},
+    ) | {"build": combined}
 
 
 @app.get("/api/health")
