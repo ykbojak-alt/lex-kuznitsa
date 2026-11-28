@@ -29,6 +29,42 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / CHARS_PER_TOKEN))
 
 
+# Пункт регламента: «3.3.1.», «14.5.», «20.2.3.» в начале строки. Иерархия
+# сохраняется — «3.3.1» не слипается с «3.3», поэтому ссылка в ответе находит
+# ровно тот пункт, который имела в виду.
+_CLAUSE_RE = re.compile(r"(?m)^\s*(\d+\.\d+(?:\.\d+)*)\.?\s+")
+
+
+def _split_clauses(sec_body: str) -> list[str]:
+    """Секция → куски по пунктам, сохранённым целиком.
+
+    Зачем: медиана чанка на corpus-real — 1284 символа, и 110 чанков из 154
+    содержат 3+ пункта. Модель получает п. 3.1, 3.2, 3.3 и 3.3.1 одним
+    куском и берёт соседний пункт вместо спрошенного. Это подтверждено
+    прогоном 28.11.2026: ВСЕ пять «неверно во всех прогонах» ответов ушли
+    в соседний пункт (1.5 вместо 1.6, 21.6 вместо 21.5 и т.д.), а причина
+    отказа на B-q05 — верный п. 3.3.1 (одна строка) утонул в 1732-знаковом
+    чанке и не попал в восьмёрку выдачи.
+
+    Текст до первого пункта (преамбула, перечни без нумерации) остаётся
+    отдельным куском. Секция без пунктов возвращается как есть — поведение
+    прежнее.
+    """
+    marks = list(_CLAUSE_RE.finditer(sec_body))
+    if not marks:
+        return [sec_body]
+    out: list[str] = []
+    head = sec_body[: marks[0].start()].strip()
+    if head:
+        out.append(head)
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(sec_body)
+        piece = sec_body[m.start() : end].strip()
+        if piece:
+            out.append(piece)
+    return out
+
+
 @dataclass
 class Corpus:
     """Загруженный корпус: документы, чанки, правила."""
@@ -198,24 +234,28 @@ def load_corpus(
         text = path.read_text(encoding="utf-8")
         revision, effective = _revision_of(meta, raw)
         for sec_title, sec_body in _split_sections(text):
-            for piece in _window(sec_body, chunk_tokens, overlap_tokens):
-                pos = len(corpus.chunks)
-                corpus.chunks.append(
-                    Chunk(
-                        chunk_id=f"{meta.doc_id}#{pos:04d}",
-                        doc_id=meta.doc_id,
-                        title=meta.title,
-                        section=sec_title,
-                        text=piece,
-                        department=meta.department,
-                        system=meta.system,
-                        rule_key=meta.rule_key,
-                        revision=revision,
-                        effective=effective,
-                        position=pos,
-                        external=meta.external,
+            # Секция режется на пункты ДО окна: окно нужно только для пункта,
+            # который сам длиннее лимита (перечень из 20 подпунктов). Так
+            # «3.3.1. …» остаётся отдельным чанком, а не тонет в 1732 знаках.
+            for piece in _split_clauses(sec_body):
+                for window_piece in _window(piece, chunk_tokens, overlap_tokens):
+                    pos = len(corpus.chunks)
+                    corpus.chunks.append(
+                        Chunk(
+                            chunk_id=f"{meta.doc_id}#{pos:04d}",
+                            doc_id=meta.doc_id,
+                            title=meta.title,
+                            section=sec_title,
+                            text=window_piece,
+                            department=meta.department,
+                            system=meta.system,
+                            rule_key=meta.rule_key,
+                            revision=revision,
+                            effective=effective,
+                            position=pos,
+                            external=meta.external,
+                        )
                     )
-                )
 
     for rule in raw.get("conflict_rules") or []:
         key = str(rule.get("key") or "")
